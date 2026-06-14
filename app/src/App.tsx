@@ -1275,6 +1275,7 @@ function App() {
     bootstrapAdmin: nextState.bootstrapAdmin,
     openSignup: nextState.openSignup,
     user: nextState.user,
+    csrfToken: nextState.csrfToken,
   })
 
   useEffect(() => {
@@ -1289,6 +1290,7 @@ function App() {
           return
         }
 
+        api.setCsrfToken(nextState.csrfToken)
         setBootstrapState(nextState)
         setStateError(null)
       } catch (error) {
@@ -1330,6 +1332,7 @@ function App() {
           return
         }
 
+        api.setCsrfToken(nextState.csrfToken)
         setBootstrapState(toBootstrapState(nextState))
         setAppState(nextState)
         setSelectedSeriesId((previousSeriesId) => previousSeriesId || firstSeriesId(nextState))
@@ -1833,6 +1836,7 @@ function App() {
   const categoryLabel = (category: CategoryId) => text.scopes[category]
 
   const applyState = (nextState: AppState) => {
+    api.setCsrfToken(nextState.csrfToken)
     setBootstrapState(toBootstrapState(nextState))
     setAppState(nextState)
     setSeriesCache((previousCache) => {
@@ -1896,6 +1900,7 @@ function App() {
   const handleLogout = async () => {
     await api.logout()
     const nextBootstrap = await api.getBootstrap()
+    api.setCsrfToken(nextBootstrap.csrfToken)
     setBootstrapState(nextBootstrap)
     setAppState(null)
     setSeriesCache({})

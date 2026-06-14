@@ -200,6 +200,7 @@ export type AppState = {
   bootstrapAdmin: string
   openSignup: boolean
   user: SessionUser | null
+  csrfToken: string | null
   scanSummary: ScanSummary
   scanStatus: ScanStatus
   library: SeriesSummary[]
@@ -216,6 +217,7 @@ export type BootstrapState = {
   bootstrapAdmin: string
   openSignup: boolean
   user: SessionUser | null
+  csrfToken: string | null
 }
 
 export type AuthPayload = {

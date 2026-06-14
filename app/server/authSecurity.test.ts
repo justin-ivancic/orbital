@@ -6,6 +6,7 @@ import {
   bootstrapAdminUser,
   clearSession,
   createSession,
+  findSessionContext,
   findSessionUser,
   getAppState,
   loginUser,
@@ -28,6 +29,7 @@ type MemorySession = {
   id: string
   user_id: string
   expires_at: number
+  csrf_token: string | null
   created_at: string
 }
 
@@ -177,14 +179,24 @@ class MemoryDatabase {
     }
 
     if (sql.startsWith('INSERT INTO sessions')) {
-      const [id, userId, expiresAt, createdAt] = args as [string, string, number, string]
+      const [id, userId, expiresAt, csrfToken, createdAt] = args as [string, string, number, string, string]
       this.sessions.push({
         id,
         user_id: userId,
         expires_at: expiresAt,
+        csrf_token: csrfToken,
         created_at: createdAt,
       })
       return { changes: 1 }
+    }
+
+    if (sql.startsWith('UPDATE sessions SET csrf_token = ? WHERE id = ?')) {
+      const [csrfToken, id] = args as string[]
+      const session = this.sessions.find((item) => item.id === id)
+      if (session) {
+        session.csrf_token = csrfToken
+      }
+      return { changes: session ? 1 : 0 }
     }
 
     if (sql.startsWith('DELETE FROM sessions WHERE id = ?')) {
@@ -303,6 +315,7 @@ class MemoryDatabase {
         ? {
             id: session.id,
             expires_at: session.expires_at,
+            csrf_token: session.csrf_token,
             user_id: user.id,
             username: user.username,
             role: user.role,
@@ -541,6 +554,13 @@ test('password checks and sessions bind to the intended account', async () => {
   const aliceSession = createSession(db, alice.id)
   const bobSession = createSession(db, bob.id)
 
+  assert.equal(typeof aliceSession.csrfToken, 'string')
+  assert.equal(aliceSession.csrfToken.length > 20, true)
+  assert.deepEqual(findSessionContext(db, aliceSession.sessionId), {
+    sessionId: aliceSession.sessionId,
+    csrfToken: aliceSession.csrfToken,
+    user: alice,
+  })
   assert.deepEqual(findSessionUser(db, aliceSession.sessionId), alice)
   assert.deepEqual(findSessionUser(db, bobSession.sessionId), bob)
 
@@ -548,6 +568,7 @@ test('password checks and sessions bind to the intended account', async () => {
     id: 'session_expired',
     user_id: alice.id,
     expires_at: Date.now() - 1,
+    csrf_token: 'expired-csrf-token',
     created_at: '2026-06-14T00:00:00.000Z',
   })
 

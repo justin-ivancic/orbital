@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
@@ -22,6 +23,7 @@ import {
   createSourceRoot,
   ensureConfiguredSourceRoot,
   findSessionUser,
+  findSessionContext,
   getAppState,
   getEntrySidecarMediaTracks,
   getSeriesDetail,
@@ -52,6 +54,7 @@ import { SESSION_COOKIE_NAME } from './utils'
 type RequestWithUser = Request & {
   sessionUser: ReturnType<typeof findSessionUser>
   sessionId: string | null
+  sessionCsrfToken: string | null
 }
 
 const port = Number(process.env.PORT || 4300)
@@ -177,14 +180,17 @@ let activeScanPromise: Promise<void> | null = null
 
 const trimScanEvents = (events: ScanLogEntry[]) => events.slice(-120)
 
-const getStatePayload = (user: RequestWithUser['sessionUser']) =>
-  getAppState(db, config, user, activeScanStatus)
+const getStatePayload = (user: RequestWithUser['sessionUser'], csrfToken?: string | null) => ({
+  ...getAppState(db, config, user, activeScanStatus),
+  csrfToken: user ? csrfToken ?? null : null,
+})
 
-const getBootstrapPayload = (user: RequestWithUser['sessionUser']) => ({
+const getBootstrapPayload = (user: RequestWithUser['sessionUser'], csrfToken?: string | null) => ({
   appName: config.appName,
   bootstrapAdmin: config.bootstrapAdmin,
   openSignup: config.openSignup,
   user,
+  csrfToken: user ? csrfToken ?? null : null,
 })
 
 const startBackgroundScan = (sourceId?: string) => {
@@ -365,8 +371,11 @@ const startBackgroundScan = (sourceId?: string) => {
 const getSessionFromRequest = (request: RequestWithUser) => {
   const cookies = parseCookie(request.headers.cookie || '')
   const sessionId = cookies[SESSION_COOKIE_NAME] || null
+  const sessionContext = findSessionContext(db, sessionId)
+
   request.sessionId = sessionId
-  request.sessionUser = findSessionUser(db, sessionId)
+  request.sessionUser = sessionContext?.user ?? null
+  request.sessionCsrfToken = sessionContext?.csrfToken ?? null
 }
 
 app.use((request, _response, next) => {
@@ -402,6 +411,64 @@ const requireAdmin = (request: Request, response: Response, next: NextFunction) 
   next()
 }
 
+const unsafeHttpMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+const csrfExemptPaths = new Set(['/api/auth/login', '/api/auth/signup'])
+
+const safeTokenEquals = (left: string, right: string) => {
+  const leftBuffer = Buffer.from(left)
+  const rightBuffer = Buffer.from(right)
+
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer)
+}
+
+const getAllowedRequestOrigins = (request: Request) => {
+  const host = request.get('host')
+
+  if (!host) {
+    return new Set<string>()
+  }
+
+  return new Set([`http://${host}`, `https://${host}`])
+}
+
+const requireCsrfForUnsafeMethods = (request: Request, response: Response, next: NextFunction) => {
+  if (!unsafeHttpMethods.has(request.method) || csrfExemptPaths.has(request.path)) {
+    next()
+    return
+  }
+
+  const typedRequest = request as RequestWithUser
+
+  if (!typedRequest.sessionUser) {
+    next()
+    return
+  }
+
+  const fetchSite = request.get('sec-fetch-site')
+  if (fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite)) {
+    response.status(403).json({ error: 'Cross-site requests are not allowed.' })
+    return
+  }
+
+  const origin = request.get('origin')
+  if (origin && !getAllowedRequestOrigins(request).has(origin)) {
+    response.status(403).json({ error: 'Request origin is not allowed.' })
+    return
+  }
+
+  const requestToken = request.get('x-csrf-token') || ''
+  const sessionToken = typedRequest.sessionCsrfToken || ''
+
+  if (!requestToken || !sessionToken || !safeTokenEquals(requestToken, sessionToken)) {
+    response.status(403).json({ error: 'Security token is missing or expired. Refresh and try again.' })
+    return
+  }
+
+  next()
+}
+
+app.use('/api', requireCsrfForUnsafeMethods)
+
 const setSessionCookie = (response: Response, sessionId: string, expiresAt: number) => {
   response.setHeader(
     'Set-Cookie',
@@ -434,6 +501,10 @@ const startFreshSession = (request: Request, response: Response, userId: string)
 
   const session = createSession(db, userId)
   setSessionCookie(response, session.sessionId, session.expiresAt)
+  typedRequest.sessionId = session.sessionId
+  typedRequest.sessionCsrfToken = session.csrfToken
+
+  return session
 }
 
 const sendError = (response: Response, error: unknown, status = 400) => {
@@ -523,12 +594,12 @@ const rejectStaleMediaVersion = (request: Request, response: Response, currentVe
 
 app.get('/api/state', requireAuth, (request, response) => {
   const typedRequest = request as RequestWithUser
-  response.json(getStatePayload(typedRequest.sessionUser))
+  response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
 })
 
 app.get('/api/bootstrap', (request, response) => {
   const typedRequest = request as RequestWithUser
-  response.json(getBootstrapPayload(typedRequest.sessionUser))
+  response.json(getBootstrapPayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
 })
 
 const sendHealthResponse = (_request: Request, response: Response) => {
@@ -562,8 +633,8 @@ app.post('/api/auth/login', async (request, response) => {
       String(request.body?.username || ''),
       String(request.body?.password || ''),
     )
-    startFreshSession(request, response, user.id)
-    response.json(getStatePayload(user))
+    const session = startFreshSession(request, response, user.id)
+    response.json(getStatePayload(user, session.csrfToken))
   } catch (error) {
     sendError(response, error, 401)
   }
@@ -581,8 +652,8 @@ app.post('/api/auth/signup', async (request, response) => {
       String(request.body?.username || ''),
       String(request.body?.password || ''),
     )
-    startFreshSession(request, response, user.id)
-    response.json(getStatePayload(user))
+    const session = startFreshSession(request, response, user.id)
+    response.json(getStatePayload(user, session.csrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -608,7 +679,7 @@ app.post('/api/auth/change-password', requireAuth, async (request, response) => 
       typedRequest.sessionId,
     )
 
-    response.json(getStatePayload(sessionUser))
+    response.json(getStatePayload(sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -711,7 +782,7 @@ app.post('/api/admin/roots', requireAdmin, (request, response) => {
       path: String(request.body?.path || '').trim(),
     })
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -721,7 +792,7 @@ app.delete('/api/admin/roots/:rootId', requireAdmin, (request, response) => {
   try {
     removeSourceRoot(db, config, request.params.rootId)
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -750,7 +821,7 @@ app.post('/api/admin/sources', requireAdmin, async (request, response) => {
     })
     void startBackgroundScan(createdSource.sourceId)
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -763,7 +834,7 @@ app.patch('/api/admin/sources/:sourceId', requireAdmin, (request, response) => {
     })
     void startBackgroundScan(request.params.sourceId)
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -773,7 +844,7 @@ app.delete('/api/admin/sources/:sourceId', requireAdmin, (request, response) => 
   try {
     removeSourceFolder(db, request.params.sourceId)
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -783,7 +854,7 @@ app.post('/api/admin/scan', requireAdmin, async (request, response) => {
   try {
     void startBackgroundScan(request.body?.sourceId ? String(request.body.sourceId) : undefined)
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -797,7 +868,7 @@ app.post('/api/admin/users/:userId/reset-password', requireAdmin, async (request
       String(request.body?.password || ''),
     )
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -821,7 +892,7 @@ app.post('/api/admin/series/:seriesId/metadata-override', requireAdmin, async (r
       clearCover: request.body?.clearCover === true,
     })
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -831,7 +902,7 @@ app.delete('/api/admin/series/:seriesId/metadata-override', requireAdmin, async 
   try {
     await clearMetadataOverride(db, config, request.params.seriesId)
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }
@@ -841,7 +912,7 @@ app.post('/api/admin/series/:seriesId/metadata-refresh', requireAdmin, async (re
   try {
     await refreshSeriesMetadata(db, config, request.params.seriesId)
     const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser))
+    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)
   }

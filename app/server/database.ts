@@ -31,6 +31,7 @@ export const openDatabase = (dataDirectory: string) => {
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       expires_at INTEGER NOT NULL,
+      csrf_token TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -192,6 +193,7 @@ export const openDatabase = (dataDirectory: string) => {
   }
 
   ensureColumn('entries', 'chapter_number', 'REAL')
+  ensureColumn('sessions', 'csrf_token', 'TEXT')
   ensureColumn('entries', 'season_number', 'INTEGER')
   ensureColumn('entries', 'episode_number', 'INTEGER')
   ensureColumn('entries', 'sort_order', 'REAL NOT NULL DEFAULT 0')

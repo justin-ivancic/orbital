@@ -18,11 +18,19 @@ import type {
   UpdateSourcePayload,
 } from './appTypes'
 
+let csrfToken: string | null = null
+
+const unsafeHttpMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+const isUnsafeRequest = (method: string | undefined) =>
+  unsafeHttpMethods.has((method || 'GET').toUpperCase())
+
 const request = async <T,>(input: string, init?: RequestInit) => {
   const response = await fetch(input, {
     credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
+      ...(isUnsafeRequest(init?.method) && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
       ...(init?.headers || {}),
     },
     ...init,
@@ -37,6 +45,9 @@ const request = async <T,>(input: string, init?: RequestInit) => {
 }
 
 export const api = {
+  setCsrfToken: (token: string | null | undefined) => {
+    csrfToken = token || null
+  },
   getBootstrap: () => request<BootstrapState>('/api/bootstrap'),
   getState: () => request<AppState>('/api/state'),
   login: (payload: AuthPayload) =>

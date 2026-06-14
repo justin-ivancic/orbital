@@ -10,6 +10,8 @@ export const nowIso = () => new Date().toISOString()
 export const createId = (prefix: string) =>
   `${prefix}_${crypto.randomBytes(10).toString('hex')}`
 
+export const createSecretToken = () => crypto.randomBytes(32).toString('base64url')
+
 export const hashString = (value: string) =>
   crypto.createHash('sha1').update(value).digest('hex')
 

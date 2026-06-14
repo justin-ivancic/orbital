@@ -42,6 +42,7 @@ import { fetchRemoteMetadata } from './metadata'
 import {
   compactWhitespace,
   createId,
+  createSecretToken,
   escapeHtml,
   firstNumber,
   hashString,
@@ -2735,18 +2736,19 @@ export const bootstrapAdminUser = async (db: Database, config: AppConfig) => {
 
 export const createSession = (db: Database, userId: string) => {
   const sessionId = createId('session')
+  const csrfToken = createSecretToken()
   const expiresAt = Date.now() + SESSION_TTL_MS
   db.prepare(
     `
-      INSERT INTO sessions (id, user_id, expires_at, created_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO sessions (id, user_id, expires_at, csrf_token, created_at)
+      VALUES (?, ?, ?, ?, ?)
     `,
-  ).run(sessionId, userId, expiresAt, nowIso())
+  ).run(sessionId, userId, expiresAt, csrfToken, nowIso())
 
-  return { sessionId, expiresAt }
+  return { sessionId, expiresAt, csrfToken }
 }
 
-export const findSessionUser = (db: Database, sessionId: string | null | undefined) => {
+export const findSessionContext = (db: Database, sessionId: string | null | undefined) => {
   if (!sessionId) {
     return null
   }
@@ -2754,7 +2756,7 @@ export const findSessionUser = (db: Database, sessionId: string | null | undefin
   const session = db
     .prepare(
       `
-        SELECT s.id, s.expires_at, u.id AS user_id, u.username, u.role
+        SELECT s.id, s.expires_at, s.csrf_token, u.id AS user_id, u.username, u.role
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
         WHERE s.id = ?
@@ -2764,6 +2766,7 @@ export const findSessionUser = (db: Database, sessionId: string | null | undefin
     | {
         id: string
         expires_at: number
+        csrf_token: string | null
         user_id: string
         username: string
         role: SessionUser['role']
@@ -2779,12 +2782,25 @@ export const findSessionUser = (db: Database, sessionId: string | null | undefin
     return null
   }
 
+  const csrfToken = session.csrf_token || createSecretToken()
+
+  if (!session.csrf_token) {
+    db.prepare(`UPDATE sessions SET csrf_token = ? WHERE id = ?`).run(csrfToken, session.id)
+  }
+
   return {
-    id: session.user_id,
-    username: session.username,
-    role: session.role,
-  } satisfies SessionUser
+    sessionId: session.id,
+    csrfToken,
+    user: {
+      id: session.user_id,
+      username: session.username,
+      role: session.role,
+    } satisfies SessionUser,
+  }
 }
+
+export const findSessionUser = (db: Database, sessionId: string | null | undefined) =>
+  findSessionContext(db, sessionId)?.user ?? null
 
 export const clearSession = (db: Database, sessionId: string | null | undefined) => {
   if (!sessionId) {
@@ -2894,6 +2910,7 @@ export const getAppState = (
     bootstrapAdmin: config.bootstrapAdmin,
     openSignup: config.openSignup,
     user,
+    csrfToken: null,
     scanSummary: getScanSummary(db),
     scanStatus: liveScanStatus ?? getStoredScanStatus(db),
     library: seriesRows.map((series) => mapSeriesRowToSummary(series, groupedEntryCounts.get(series.id))),
