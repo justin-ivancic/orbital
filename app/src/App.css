@@ -4577,20 +4577,75 @@ button:disabled {
 }
 
 .app-shell--reader .cbz-viewer__settings-menu {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   max-height: min(70dvh, 560px);
+  gap: 10px;
   overflow-y: auto;
+  padding: 12px;
+  border-color: rgba(136, 165, 194, 0.2);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.02)),
+    rgba(5, 8, 13, 0.86);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(22px);
+}
+
+.app-shell--reader .cbz-viewer__toolbar.is-settings-open {
+  border-color: rgba(136, 165, 194, 0.26);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.34),
+    inset 0 -1px 0 rgba(92, 214, 255, 0.14);
 }
 
 .app-shell--reader .cbz-viewer__settings-menu--floating {
   position: fixed;
-  left: 50%;
-  right: auto;
-  top: calc(112px + env(safe-area-inset-top));
+  left: max(10px, env(safe-area-inset-left));
+  right: max(10px, env(safe-area-inset-right));
+  top: calc(150px + env(safe-area-inset-top));
   z-index: 58;
-  width: min(380px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)));
-  max-height: min(70dvh, calc(100dvh - 132px - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  width: auto;
+  max-width: min(900px, calc(100vw - 20px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  max-height: min(70dvh, calc(100dvh - 170px - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
   margin-top: 0;
-  transform: translateX(-50%);
+  margin-right: auto;
+  margin-left: auto;
+  transform: none;
+}
+
+.app-shell--reader .cbz-viewer__settings-header {
+  grid-column: 1 / -1;
+  padding: 0 2px 2px;
+  color: var(--text-soft);
+}
+
+.app-shell--reader .cbz-viewer__settings-group {
+  min-width: 0;
+}
+
+.app-shell--reader .cbz-viewer__settings-menu .cbz-viewer__mode-toggle {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border-radius: 14px;
+}
+
+.app-shell--reader .cbz-viewer__settings-menu .cbz-viewer__mode-button {
+  min-width: 0;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 9px;
+  border-radius: 11px;
+  overflow-wrap: anywhere;
+  text-align: center;
+  line-height: 1.12;
+  white-space: normal;
 }
 
 .reader-overlay {
@@ -4850,6 +4905,21 @@ button:disabled {
     width: auto;
   }
 
+  .app-shell--reader .cbz-viewer__toolbar.is-settings-open {
+    align-items: center;
+    flex-wrap: nowrap;
+  }
+
+  .app-shell--reader .cbz-viewer__toolbar.is-settings-open .cbz-viewer__toolbar-actions,
+  .app-shell--reader .cbz-viewer__toolbar.is-settings-open .cbz-viewer__toolbar-right {
+    flex: 0 1 auto;
+    width: auto;
+  }
+
+  .app-shell--reader .cbz-viewer__toolbar.is-settings-open .cbz-viewer__toolbar-right > :not(.cbz-viewer__settings) {
+    display: none;
+  }
+
   .app-shell--reader .document-frame__page-label,
   .app-shell--reader .cbz-viewer__page-indicator,
   .app-shell--reader .epub-reader__progress-label,
@@ -4908,15 +4978,15 @@ button:disabled {
   }
 
   .app-shell--reader .cbz-viewer__settings-menu--floating {
-    left: 50%;
-    right: auto;
-    top: calc(108px + env(safe-area-inset-top));
-    width: min(326px, calc(100vw - 48px - env(safe-area-inset-left) - env(safe-area-inset-right)));
-    max-height: min(64dvh, calc(100dvh - 126px - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
-    gap: 10px;
-    padding: 12px;
-    border-radius: 16px;
-    transform: translateX(-50%);
+    left: max(10px, env(safe-area-inset-left));
+    right: max(10px, env(safe-area-inset-right));
+    top: calc(130px + env(safe-area-inset-top));
+    width: auto;
+    max-height: min(64dvh, calc(100dvh - 148px - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 10px;
+    border-radius: 18px;
   }
 
   .app-shell--reader .cbz-viewer__settings-header {
@@ -4929,12 +4999,15 @@ button:disabled {
   }
 
   .app-shell--reader .cbz-viewer__settings-group {
-    gap: 6px;
+    grid-template-columns: minmax(88px, 0.38fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
   }
 
   .app-shell--reader .cbz-viewer__settings-label {
     font-size: 0.68rem;
     letter-spacing: 0.06em;
+    line-height: 1.1;
   }
 
   .app-shell--reader .cbz-viewer__settings-menu .cbz-viewer__mode-toggle {
@@ -4944,11 +5017,17 @@ button:disabled {
   }
 
   .app-shell--reader .cbz-viewer__settings-menu .cbz-viewer__mode-button {
-    flex: 1 1 0;
-    min-height: 38px;
-    padding: 6px 8px;
-    font-size: 0.84rem;
+    min-height: 34px;
+    padding: 5px 7px;
+    font-size: 0.8rem;
     line-height: 1.1;
+  }
+
+  @media (max-width: 360px) {
+    .app-shell--reader .cbz-viewer__settings-group {
+      grid-template-columns: 1fr;
+      gap: 5px;
+    }
   }
 
   .app-shell--reader .player-track-bar {

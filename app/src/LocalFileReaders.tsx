@@ -1580,7 +1580,7 @@ export function CbzReader({
 
   return (
     <article className="cbz-viewer">
-      <div className="cbz-viewer__toolbar">
+      <div className={settingsOpen ? 'cbz-viewer__toolbar is-settings-open' : 'cbz-viewer__toolbar'}>
         <div>
           <strong>Live CBZ reader</strong>
           <p>Switch between single pages and spreads, then bookmark the page you want to return to.</p>
