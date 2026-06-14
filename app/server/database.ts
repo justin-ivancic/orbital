@@ -364,6 +364,14 @@ export const openDatabase = (dataDirectory: string) => {
     }
   }
 
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_series_source_folder ON series(source_folder_id);
+    CREATE INDEX IF NOT EXISTS idx_series_category_sort ON series(category, year, title COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS idx_entries_series_order ON entries(series_id, sort_order, label, title);
+    CREATE INDEX IF NOT EXISTS idx_entries_source_folder ON entries(source_folder_id);
+    CREATE INDEX IF NOT EXISTS idx_comments_series_created ON comments(series_id, created_at DESC);
+  `)
+
   const coversDirectory = path.join(dataDirectory, 'covers')
   ensureDir(coversDirectory)
 

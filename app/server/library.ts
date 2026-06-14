@@ -259,6 +259,8 @@ type EntryRow = {
   storage_file: string
   format: EntryFormat
   details: string
+  size: number
+  mtime_ms: number
   sort_order: number
   chapter_number: number | null
   season_number: number | null
@@ -1537,8 +1539,8 @@ const buildLogicalEntries = (category: CategoryId, entries: EntryRow[]): Library
         storageFile: variant.storage_file,
         format: variant.format,
         details: variant.details,
-        fileUrl: `/api/media/file/${variant.id}`,
-        downloadUrl: `/api/media/file/${variant.id}`,
+        fileUrl: `/api/media/file/${variant.id}${buildEntryMediaVersionSuffix(variant)}`,
+        downloadUrl: `/api/media/file/${variant.id}${buildEntryMediaVersionSuffix(variant)}`,
         mediaTracks: getMediaTracksForEntry(variant.id, variant.format, variant.file_path),
       }),
     )
@@ -1556,6 +1558,13 @@ const buildLogicalEntries = (category: CategoryId, entries: EntryRow[]): Library
       variants,
     }
   })
+}
+
+const buildEntryMediaVersionSuffix = (entry: Pick<EntryRow, 'mtime_ms' | 'size'>) => {
+  const mtime = Number.isFinite(entry.mtime_ms) ? Math.round(entry.mtime_ms) : 0
+  const size = Number.isFinite(entry.size) ? entry.size : 0
+
+  return `?v=${encodeURIComponent(`${mtime}-${size}`)}`
 }
 
 const parseStoredJsonArray = (value: string | null | undefined) => {
@@ -2920,7 +2929,7 @@ export const getSeriesDetail = (db: Database, seriesId: string): SeriesDetail =>
     .prepare(
       `
         SELECT series_id, id, relative_path, label, title, storage_file, format, details,
-               sort_order, chapter_number, season_number, episode_number, file_path
+               sort_order, chapter_number, season_number, episode_number, file_path, size, mtime_ms
         FROM entries
         WHERE series_id = ?
         ORDER BY sort_order, label, title

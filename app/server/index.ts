@@ -434,7 +434,7 @@ const sendMediaFile = async (response: Response, filePath: string, rangeHeader?:
 
 const hasCacheVersion = (version: unknown) => typeof version === 'string' && version.trim().length > 0
 
-const setArtworkCacheHeaders = (response: Response, version: unknown) => {
+const setPrivateVersionedCacheHeaders = (response: Response, version: unknown) => {
   response.setHeader(
     'Cache-Control',
     hasCacheVersion(version) ? 'private, max-age=2592000, immutable' : 'private, max-age=300',
@@ -754,7 +754,7 @@ app.post('/api/admin/series/:seriesId/metadata-refresh', requireAdmin, async (re
 app.get('/api/media/cover/:seriesId', requireAuth, async (request, response) => {
   try {
     const cover = resolveSeriesCoverPath(db, request.params.seriesId)
-    setArtworkCacheHeaders(response, request.query.v)
+    setPrivateVersionedCacheHeaders(response, request.query.v)
     response.setHeader('Content-Type', cover.mimeType)
     await sendMediaFile(response, cover.filePath)
   } catch (error) {
@@ -765,7 +765,7 @@ app.get('/api/media/cover/:seriesId', requireAuth, async (request, response) => 
 app.get('/api/media/banner/:seriesId', requireAuth, async (request, response) => {
   try {
     const banner = resolveSeriesBannerPath(db, request.params.seriesId)
-    setArtworkCacheHeaders(response, request.query.v)
+    setPrivateVersionedCacheHeaders(response, request.query.v)
     response.setHeader('Content-Type', banner.mimeType)
     await sendMediaFile(response, banner.filePath)
   } catch (error) {
@@ -776,6 +776,7 @@ app.get('/api/media/banner/:seriesId', requireAuth, async (request, response) =>
 app.get('/api/media/file/:entryId', requireAuth, async (request, response) => {
   try {
     const filePath = resolveEntryFilePath(db, request.params.entryId)
+    setPrivateVersionedCacheHeaders(response, request.query.v)
     await sendMediaFile(response, filePath, request.headers.range)
   } catch (error) {
     sendError(response, error, 404)
