@@ -79,11 +79,11 @@ After the container starts:
 
 Container health:
 
-- `GET /healthz` returns a cheap DB-backed liveness payload.
-- `GET /readyz` checks DB access, app data write access, cover cache write access, and the configured media root.
+- `GET /healthz` returns a cheap DB-backed liveness payload for container and router health checks.
+- `GET /readyz` checks DB access, app data write access, cover cache write access, and the configured media root for admin diagnostics.
 - `GET /api/health` is kept for compatibility.
 - `GET /api/ready` is kept for environments that prefer API-prefixed probes.
-- the Docker image includes a healthcheck against `/readyz`.
+- the Docker image includes a healthcheck against `/healthz`; keep stricter readiness checks out of Docker routing so a slow or temporarily unavailable media mount does not make the app disappear for new clients.
 - the container entrypoint repairs `/app/data` ownership for existing persistent volumes, then runs the app as the non-root `node` user when possible.
 - the provided Compose file drops Linux capabilities and defaults to localhost-only port binding.
 
