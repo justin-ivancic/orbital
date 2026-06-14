@@ -1,0 +1,19 @@
+services:
+  orbital-library:
+    environment:
+      MEDIA_HOST_DIR: ${NAS_MEDIA_DISPLAY_PATH:-//nas-host/share/media}
+      APP_MEDIA_ROOT_PATH: ${NAS_MEDIA_CONTAINER_PATH:-/media/library}
+      APP_MEDIA_ROOT_DISPLAY_PATH: ${NAS_MEDIA_DISPLAY_PATH:-//nas-host/share/media}
+    volumes:
+      - type: volume
+        source: nas-media
+        target: /media/library
+        read_only: true
+
+volumes:
+  nas-media:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: ${NAS_SHARE:-//nas-host/share}
+      o: ro,vers=${NAS_SMB_VERSION:-3.0},username=${NAS_USERNAME},password=${NAS_PASSWORD},uid=1000,gid=1000

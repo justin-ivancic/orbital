@@ -1,0 +1,29 @@
+services:
+  orbital-library:
+    build: .
+    container_name: orbital-library
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-4310}:4300"
+    environment:
+      NODE_ENV: production
+      PORT: 4300
+      APP_NAME: ${APP_NAME:-Orbital Library}
+      APP_ADMIN_USERNAME: ${APP_ADMIN_USERNAME:-admin}
+      APP_ADMIN_PASSWORD: ${APP_ADMIN_PASSWORD}
+      APP_OPEN_SIGNUP: ${APP_OPEN_SIGNUP:-1}
+      APP_ENABLE_DEMO_SEED: ${APP_ENABLE_DEMO_SEED:-0}
+      APP_COOKIE_SECURE: ${APP_COOKIE_SECURE:-0}
+      APP_DATA_DIR: /app/data
+      MEDIA_HOST_DIR: ${MEDIA_HOST_DIR:-./library}
+      APP_MEDIA_ROOT_PATH: ${APP_MEDIA_ROOT_PATH:-/media/library}
+      APP_MEDIA_ROOT_DISPLAY_PATH: ${APP_MEDIA_ROOT_DISPLAY_PATH:-}
+      APP_MEDIA_ROOT_LABEL: ${APP_MEDIA_ROOT_LABEL:-Library}
+    volumes:
+      - type: bind
+        source: ${APP_DATA_HOST_DIR:-./data}
+        target: /app/data
+      - type: bind
+        source: ${MEDIA_HOST_DIR:-./library}
+        target: /media/library
+        read_only: true
