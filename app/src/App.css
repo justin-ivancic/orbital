@@ -4793,7 +4793,7 @@ button:disabled {
   gap: 8px;
 }
 
-.reader-overlay__progress span {
+.reader-overlay__progress > span {
   max-width: 24ch;
   overflow: hidden;
   color: var(--text-soft);
@@ -4933,7 +4933,7 @@ button:disabled {
     gap: 5px;
   }
 
-  .reader-overlay__progress span {
+  .reader-overlay__progress > span {
     max-width: 100%;
     text-align: center;
     font-size: 0.72rem;
