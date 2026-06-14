@@ -1929,8 +1929,13 @@ select {
   background: rgba(255, 255, 255, 0.06);
 }
 
+.cbz-viewer__zoom-button.is-active {
+  color: #0b1220;
+  background: linear-gradient(120deg, rgba(92, 214, 255, 0.96), rgba(255, 199, 101, 0.92));
+}
+
 .cbz-viewer__zoom-value {
-  min-width: 3.6ch;
+  min-width: 5ch;
   text-align: center;
   color: var(--text-soft);
   font-size: 0.84rem;
@@ -2000,8 +2005,6 @@ select {
   width: 100%;
   max-width: 100%;
   height: auto;
-  aspect-ratio: 2 / 3;
-  object-fit: contain;
   display: block;
   border: 1px solid rgba(136, 165, 194, 0.14);
   background: rgba(4, 7, 12, 0.92);

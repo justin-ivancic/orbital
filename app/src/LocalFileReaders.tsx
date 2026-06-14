@@ -12,7 +12,7 @@ import {
   type RenderTask,
 } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import pdfWorker from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
-import { ExternalLink, Minus, Plus, Settings2, X } from 'lucide-react'
+import { ExternalLink, Maximize2, Minus, Plus, Settings2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type { ReaderProgress, ReaderViewMode } from './appTypes'
 
@@ -124,6 +124,7 @@ type CbzDisplayPage = {
 type CbzReadingDirection = 'ltr' | 'rtl'
 type CbzPageOrderMode = 'archive' | 'filename'
 type CbzSpreadAlignment = 'cover-first' | 'straight-pairs'
+type CbzScaleMode = 'manual' | 'fit-width'
 
 const naturalSort = (left: string, right: string) =>
   left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
@@ -1261,6 +1262,7 @@ export function CbzReader({
     useState<CbzPageOrderMode>(initialPageOrderMode)
   const [spreadAlignment, setSpreadAlignment] =
     useState<CbzSpreadAlignment>(initialSpreadAlignment)
+  const [scaleMode, setScaleMode] = useState<CbzScaleMode>('manual')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [singlePageZoom, setSinglePageZoom] = useState(100)
   const [spreadZoom, setSpreadZoom] = useState(100)
@@ -1279,6 +1281,7 @@ export function CbzReader({
       setReadingDirection(initialReadingDirection)
       setPageOrderMode(initialPageOrderMode)
       setSpreadAlignment(initialSpreadAlignment)
+      setScaleMode('manual')
       return
     }
 
@@ -1288,6 +1291,7 @@ export function CbzReader({
       setReadingDirection(initialReadingDirection)
       setPageOrderMode(initialPageOrderMode)
       setSpreadAlignment(initialSpreadAlignment)
+      setScaleMode('manual')
       return
     }
 
@@ -1296,15 +1300,22 @@ export function CbzReader({
         readingDirection: CbzReadingDirection
         pageOrderMode: CbzPageOrderMode
         spreadAlignment: CbzSpreadAlignment
+        scaleMode: CbzScaleMode
       }>
 
       setReadingDirection(parsedSettings.readingDirection ?? initialReadingDirection)
       setPageOrderMode(parsedSettings.pageOrderMode ?? initialPageOrderMode)
       setSpreadAlignment(parsedSettings.spreadAlignment ?? initialSpreadAlignment)
+      setScaleMode(
+        parsedSettings.scaleMode === 'fit-width' || parsedSettings.scaleMode === 'manual'
+          ? parsedSettings.scaleMode
+          : 'manual',
+      )
     } catch {
       setReadingDirection(initialReadingDirection)
       setPageOrderMode(initialPageOrderMode)
       setSpreadAlignment(initialSpreadAlignment)
+      setScaleMode('manual')
     }
   }, [
     initialPageOrderMode,
@@ -1323,10 +1334,11 @@ export function CbzReader({
       JSON.stringify({
         pageOrderMode,
         readingDirection,
+        scaleMode,
         spreadAlignment,
       }),
     )
-  }, [pageOrderMode, readingDirection, settingsStorageKey, spreadAlignment])
+  }, [pageOrderMode, readingDirection, scaleMode, settingsStorageKey, spreadAlignment])
 
   useEffect(() => {
     setViewMode(initialViewMode)
@@ -1528,7 +1540,9 @@ export function CbzReader({
     }
   }, [error, groups, loading, onProgressChange, pages.length, viewMode, visiblePage])
 
+  const fitWidthActive = scaleMode === 'fit-width'
   const activeZoom = viewMode === 'spread' ? spreadZoom : singlePageZoom
+  const activeZoomLabel = fitWidthActive ? 'Width' : `${activeZoom}%`
   const activeGroup = groups.find(
     (group) => visiblePage >= group.startPage && visiblePage <= group.endPage,
   )
@@ -1536,7 +1550,11 @@ export function CbzReader({
     viewMode === 'spread' && activeGroup && activeGroup.endPage > activeGroup.startPage
       ? `Pages ${activeGroup.startPage}-${activeGroup.endPage} of ${orderedPages.length}`
       : `Page ${visiblePage} of ${orderedPages.length}`
+  const getSheetWidth = (baseWidth: number, zoom: number) =>
+    fitWidthActive ? '100%' : `${Math.round((baseWidth * zoom) / 100)}px`
   const decreaseZoom = () => {
+    setScaleMode('manual')
+
     if (viewMode === 'spread') {
       setSpreadZoom((previousZoom) => clampZoom(previousZoom - cbzZoomStep))
       return
@@ -1545,12 +1563,19 @@ export function CbzReader({
     setSinglePageZoom((previousZoom) => clampZoom(previousZoom - cbzZoomStep))
   }
   const increaseZoom = () => {
+    setScaleMode('manual')
+
     if (viewMode === 'spread') {
       setSpreadZoom((previousZoom) => clampZoom(previousZoom + cbzZoomStep))
       return
     }
 
     setSinglePageZoom((previousZoom) => clampZoom(previousZoom + cbzZoomStep))
+  }
+  const toggleFitWidth = () => {
+    setScaleMode((currentScaleMode) =>
+      currentScaleMode === 'fit-width' ? 'manual' : 'fit-width',
+    )
   }
 
   return (
@@ -1600,21 +1625,31 @@ export function CbzReader({
               <button
                 aria-label="Zoom out"
                 className="cbz-viewer__zoom-button"
-                disabled={activeZoom <= minCbzZoom}
+                disabled={!fitWidthActive && activeZoom <= minCbzZoom}
                 onClick={decreaseZoom}
                 type="button"
               >
                 <Minus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
               </button>
-              <span className="cbz-viewer__zoom-value">{activeZoom}%</span>
+              <span className="cbz-viewer__zoom-value">{activeZoomLabel}</span>
               <button
                 aria-label="Zoom in"
                 className="cbz-viewer__zoom-button"
-                disabled={activeZoom >= maxCbzZoom}
+                disabled={!fitWidthActive && activeZoom >= maxCbzZoom}
                 onClick={increaseZoom}
                 type="button"
               >
                 <Plus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+              </button>
+              <button
+                aria-label={fitWidthActive ? 'Use manual zoom' : 'Fit pages to width'}
+                aria-pressed={fitWidthActive}
+                className={`cbz-viewer__zoom-button ${fitWidthActive ? 'is-active' : ''}`}
+                onClick={toggleFitWidth}
+                title={fitWidthActive ? 'Use manual zoom' : 'Fit pages to width'}
+                type="button"
+              >
+                <Maximize2 aria-hidden="true" className="app-icon" strokeWidth={1.9} />
               </button>
             </div>
             {toolbarAccessory}
@@ -1647,6 +1682,27 @@ export function CbzReader({
             >
               <X aria-hidden="true" className="app-icon" strokeWidth={1.9} />
             </button>
+          </div>
+          <div className="cbz-viewer__settings-group">
+            <span className="cbz-viewer__settings-label">Page scale</span>
+            <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Page scale">
+              <button
+                aria-pressed={scaleMode === 'manual'}
+                className={`cbz-viewer__mode-button ${scaleMode === 'manual' ? 'is-active' : ''}`}
+                onClick={() => setScaleMode('manual')}
+                type="button"
+              >
+                Manual
+              </button>
+              <button
+                aria-pressed={scaleMode === 'fit-width'}
+                className={`cbz-viewer__mode-button ${scaleMode === 'fit-width' ? 'is-active' : ''}`}
+                onClick={() => setScaleMode('fit-width')}
+                type="button"
+              >
+                Fit width
+              </button>
+            </div>
           </div>
           <div className="cbz-viewer__settings-group">
             <span className="cbz-viewer__settings-label">Reading direction</span>
@@ -1741,15 +1797,15 @@ export function CbzReader({
                 | undefined =
                 isSinglePageGroup
                   ? {
-                      '--cbz-single-page-width': `${Math.round((cbzSinglePageBaseWidth * singlePageZoom) / 100)}px`,
+                      '--cbz-single-page-width': getSheetWidth(cbzSinglePageBaseWidth, singlePageZoom),
                     }
                   : isSpreadPair
                     ? {
-                        '--cbz-spread-width': `${Math.round((cbzSpreadBaseWidth * spreadZoom) / 100)}px`,
+                        '--cbz-spread-width': getSheetWidth(cbzSpreadBaseWidth, spreadZoom),
                       }
                     : isSpreadSoloGroup
                       ? {
-                          '--cbz-spread-solo-width': `${Math.round((cbzSpreadSoloBaseWidth * spreadZoom) / 100)}px`,
+                          '--cbz-spread-solo-width': getSheetWidth(cbzSpreadSoloBaseWidth, spreadZoom),
                         }
                       : undefined
               const groupDistanceFromVisiblePage =
