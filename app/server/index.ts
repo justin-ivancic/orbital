@@ -655,25 +655,82 @@ const parseRangeHeader = (rangeHeader: string, fileSize: number) => {
     return null
   }
 
-  const start = match[1] ? Number(match[1]) : 0
-  const end = match[2] ? Number(match[2]) : fileSize - 1
+  const startText = match[1] || ''
+  const endText = match[2] || ''
 
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || end >= fileSize) {
+  if (!startText && !endText) {
+    return null
+  }
+
+  let start = startText ? Number(startText) : 0
+  let end = endText ? Number(endText) : fileSize - 1
+
+  if (!startText) {
+    const suffixLength = Number(endText)
+
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+      return null
+    }
+
+    start = Math.max(fileSize - suffixLength, 0)
+    end = fileSize - 1
+  }
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start < 0 || end >= fileSize) {
     return null
   }
 
   return { start, end }
 }
 
-const sendMediaFile = async (response: Response, filePath: string, rangeHeader?: string) => {
+const buildMediaEntityTag = (stats: fs.Stats) =>
+  `"${Math.round(stats.mtimeMs).toString(36)}-${stats.size.toString(36)}"`
+
+const requestMatchesMediaValidators = (request: Request, stats: fs.Stats, entityTag: string) => {
+  const ifNoneMatch = request.get('if-none-match')
+
+  if (ifNoneMatch && ifNoneMatch.split(',').map((value) => value.trim()).includes(entityTag)) {
+    return true
+  }
+
+  const ifModifiedSince = request.get('if-modified-since')
+
+  if (!ifModifiedSince) {
+    return false
+  }
+
+  const modifiedSince = Date.parse(ifModifiedSince)
+
+  return Number.isFinite(modifiedSince) && Math.floor(stats.mtimeMs / 1000) <= Math.floor(modifiedSince / 1000)
+}
+
+const sendMediaFile = async (
+  request: Request,
+  response: Response,
+  filePath: string,
+  rangeHeader?: string,
+) => {
   const stats = await fsPromises.stat(filePath)
   const contentType = mime.lookup(filePath) || 'application/octet-stream'
   const safeFileName = encodeURIComponent(path.basename(filePath))
+  const entityTag = buildMediaEntityTag(stats)
+
+  if (!response.hasHeader('Cache-Control')) {
+    response.setHeader('Cache-Control', 'private, max-age=0, must-revalidate')
+  }
+
   response.setHeader('Accept-Ranges', 'bytes')
+  response.setHeader('ETag', entityTag)
+  response.setHeader('Last-Modified', stats.mtime.toUTCString())
   response.setHeader(
     'Content-Disposition',
     `inline; filename*=UTF-8''${safeFileName}`,
   )
+
+  if (!rangeHeader && requestMatchesMediaValidators(request, stats, entityTag)) {
+    response.status(304).end()
+    return
+  }
 
   if (rangeHeader) {
     const range = parseRangeHeader(rangeHeader, stats.size)
@@ -687,6 +744,11 @@ const sendMediaFile = async (response: Response, filePath: string, rangeHeader?:
     response.setHeader('Content-Type', contentType)
     response.setHeader('Content-Length', range.end - range.start + 1)
     response.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${stats.size}`)
+    if (request.method === 'HEAD') {
+      response.end()
+      return
+    }
+
     fs.createReadStream(filePath, { start: range.start, end: range.end }).pipe(response)
     return
   }
@@ -694,6 +756,11 @@ const sendMediaFile = async (response: Response, filePath: string, rangeHeader?:
   response.status(200)
   response.setHeader('Content-Type', contentType)
   response.setHeader('Content-Length', stats.size)
+  if (request.method === 'HEAD') {
+    response.end()
+    return
+  }
+
   fs.createReadStream(filePath).pipe(response)
 }
 
@@ -1169,7 +1236,7 @@ app.get('/api/media/cover/:seriesId', requireAuth, async (request, response) => 
     const cover = resolveSeriesCoverPath(db, request.params.seriesId)
     setPrivateVersionedCacheHeaders(response, request.query.v)
     response.setHeader('Content-Type', cover.mimeType)
-    await sendMediaFile(response, cover.filePath)
+    await sendMediaFile(request, response, cover.filePath)
   } catch (error) {
     sendError(response, error, 404)
   }
@@ -1180,7 +1247,7 @@ app.get('/api/media/banner/:seriesId', requireAuth, async (request, response) =>
     const banner = resolveSeriesBannerPath(db, request.params.seriesId)
     setPrivateVersionedCacheHeaders(response, request.query.v)
     response.setHeader('Content-Type', banner.mimeType)
-    await sendMediaFile(response, banner.filePath)
+    await sendMediaFile(request, response, banner.filePath)
   } catch (error) {
     sendError(response, error, 404)
   }
@@ -1259,8 +1326,7 @@ app.get('/api/media/cbz/:entryId/pages/:pageNumber', requireAuth, async (request
 app.get('/api/media/file/:entryId', requireAuth, async (request, response) => {
   try {
     const filePath = resolveEntryFilePath(db, request.params.entryId)
-    setPrivateVersionedCacheHeaders(response, request.query.v)
-    await sendMediaFile(response, filePath, request.headers.range)
+    await sendMediaFile(request, response, filePath, request.headers.range)
   } catch (error) {
     sendError(response, error, 404)
   }
@@ -1310,7 +1376,7 @@ app.get('/api/media/track/:entryId/:kind/:trackId', requireAuth, async (request,
 
     if (kind === 'audio') {
       const track = resolveEntryTrack(db, request.params.entryId, kind, request.params.trackId)
-      await sendMediaFile(response, track.filePath, request.headers.range)
+      await sendMediaFile(request, response, track.filePath, request.headers.range)
       return
     }
 
