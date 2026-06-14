@@ -144,7 +144,7 @@ const startBackgroundScan = (sourceId?: string) => {
     events: [],
   }
 
-  activeScanPromise = runScan(db, config, sourceId, {
+  const scanReporter = {
     onRunStarted: ({ runId, startedAt, totalSources }) => {
       activeScanStatus = {
         ...(activeScanStatus || {
@@ -258,6 +258,12 @@ const startBackgroundScan = (sourceId?: string) => {
         events: trimScanEvents(activeScanStatus?.events || []),
       }
     },
+  }
+
+  activeScanPromise = new Promise<void>((resolve, reject) => {
+    setImmediate(() => {
+      runScan(db, config, sourceId, scanReporter).then(resolve, reject)
+    })
   })
     .then(() => undefined)
     .catch((error) => {
