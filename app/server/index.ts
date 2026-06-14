@@ -105,6 +105,11 @@ const config = {
     : null,
 }
 
+const explicitCookieSecure = process.env.APP_COOKIE_SECURE?.trim()
+const useSecureSessionCookie = explicitCookieSecure
+  ? explicitCookieSecure === '1'
+  : process.env.NODE_ENV === 'production'
+
 const app = express()
 app.use(express.json({ limit: '2mb' }))
 
@@ -343,10 +348,10 @@ const setSessionCookie = (response: Response, sessionId: string, expiresAt: numb
     'Set-Cookie',
     serializeCookie(SESSION_COOKIE_NAME, sessionId, {
       httpOnly: true,
-      sameSite: 'lax',
+      sameSite: 'strict',
       path: '/',
       expires: new Date(expiresAt),
-      secure: process.env.APP_COOKIE_SECURE === '1',
+      secure: useSecureSessionCookie,
     }),
   )
 }
@@ -356,12 +361,20 @@ const clearSessionCookie = (response: Response) => {
     'Set-Cookie',
     serializeCookie(SESSION_COOKIE_NAME, '', {
       httpOnly: true,
-      sameSite: 'lax',
+      sameSite: 'strict',
       path: '/',
       expires: new Date(0),
-      secure: process.env.APP_COOKIE_SECURE === '1',
+      secure: useSecureSessionCookie,
     }),
   )
+}
+
+const startFreshSession = (request: Request, response: Response, userId: string) => {
+  const typedRequest = request as RequestWithUser
+  clearSession(db, typedRequest.sessionId)
+
+  const session = createSession(db, userId)
+  setSessionCookie(response, session.sessionId, session.expiresAt)
 }
 
 const sendError = (response: Response, error: unknown, status = 400) => {
@@ -419,7 +432,7 @@ const sendMediaFile = async (response: Response, filePath: string, rangeHeader?:
   fs.createReadStream(filePath).pipe(response)
 }
 
-app.get('/api/state', (request, response) => {
+app.get('/api/state', requireAuth, (request, response) => {
   const typedRequest = request as RequestWithUser
   response.json(getStatePayload(typedRequest.sessionUser))
 })
@@ -444,8 +457,7 @@ app.post('/api/auth/login', async (request, response) => {
       String(request.body?.username || ''),
       String(request.body?.password || ''),
     )
-    const session = createSession(db, user.id)
-    setSessionCookie(response, session.sessionId, session.expiresAt)
+    startFreshSession(request, response, user.id)
     response.json(getStatePayload(user))
   } catch (error) {
     sendError(response, error, 401)
@@ -464,8 +476,7 @@ app.post('/api/auth/signup', async (request, response) => {
       String(request.body?.username || ''),
       String(request.body?.password || ''),
     )
-    const session = createSession(db, user.id)
-    setSessionCookie(response, session.sessionId, session.expiresAt)
+    startFreshSession(request, response, user.id)
     response.json(getStatePayload(user))
   } catch (error) {
     sendError(response, error)

@@ -54,7 +54,7 @@ import {
   stripExtension,
 } from './utils'
 
-type AppConfig = {
+export type AppConfig = {
   appName: string
   bootstrapAdmin: string
   bootstrapPassword: string
@@ -2747,6 +2747,12 @@ export const clearSession = (db: Database, sessionId: string | null | undefined)
 }
 
 export const loginUser = async (db: Database, username: string, password: string) => {
+  const normalizedUsername = username.trim()
+
+  if (!normalizedUsername) {
+    throw new Error('Unknown username or password.')
+  }
+
   const user = db
     .prepare(
       `
@@ -2756,7 +2762,7 @@ export const loginUser = async (db: Database, username: string, password: string
         LIMIT 1
       `,
     )
-    .get(username) as UserRow | undefined
+    .get(normalizedUsername) as UserRow | undefined
 
   if (!user) {
     throw new Error('Unknown username or password.')
@@ -2818,19 +2824,21 @@ export const getAppState = (
   user: SessionUser | null,
   liveScanStatus?: ScanStatus | null,
 ): AppState => {
-  const seriesRows = db
-    .prepare(
-      `
-        SELECT id, source_folder_id, category, title, title_short, year, format, status,
-               description, folder_path, cover_source, metadata_source, cover_path, cover_mime,
-               banner_path, banner_mime, remote_provider, remote_id, external_url,
-               source_name, source_role, genres_json, file_count, last_scan_at, tags_json,
-               metadata_refreshed_at
-        FROM series
-        ORDER BY category, CASE WHEN year IS NULL THEN 999999 ELSE year END, title COLLATE NOCASE
-      `,
-    )
-    .all() as SeriesRow[]
+  const seriesRows = user
+    ? db
+        .prepare(
+          `
+            SELECT id, source_folder_id, category, title, title_short, year, format, status,
+                   description, folder_path, cover_source, metadata_source, cover_path, cover_mime,
+                   banner_path, banner_mime, remote_provider, remote_id, external_url,
+                   source_name, source_role, genres_json, file_count, last_scan_at, tags_json,
+                   metadata_refreshed_at
+            FROM series
+            ORDER BY category, CASE WHEN year IS NULL THEN 999999 ELSE year END, title COLLATE NOCASE
+          `,
+        )
+        .all() as SeriesRow[]
+    : []
   const groupedEntryCounts = getGroupedEntryCountsBySeries(db, seriesRows)
 
   return {

@@ -12,7 +12,9 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "start": "tsx server/index.ts"
+    "start": "tsx server/index.ts",
+    "test": "npm run test:auth",
+    "test:auth": "tsx --test server/authSecurity.test.ts"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.97",
