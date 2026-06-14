@@ -4108,8 +4108,8 @@ button:disabled {
     width: 100%;
     max-width: 100%;
     min-width: 0;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 26px clamp(10px, 3vw, 14px);
+    grid-template-columns: 1fr;
+    gap: 12px;
     align-items: start;
   }
 
@@ -4120,12 +4120,13 @@ button:disabled {
     overflow: visible;
     isolation: isolate;
     display: grid;
-    grid-template-columns: 1fr;
-    gap: 7px;
-    padding: 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+    padding: 10px 46px 10px 10px;
+    border: 1px solid rgba(136, 165, 194, 0.12);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.03);
   }
 
   .bookmark-card--list:hover {
@@ -4136,7 +4137,7 @@ button:disabled {
     min-height: 0;
     width: 100%;
     max-width: 100%;
-    border-radius: 10px;
+    border-radius: 14px;
     box-shadow: 0 12px 26px rgba(0, 0, 0, 0.32);
   }
 
@@ -4161,8 +4162,9 @@ button:disabled {
   }
 
   .bookmark-card--list .bookmark-card__content {
-    display: block;
-    padding: 0;
+    display: grid;
+    gap: 7px;
+    padding: 3px 0;
   }
 
   .bookmark-card__topline,
@@ -4173,7 +4175,7 @@ button:disabled {
 
   .bookmark-card__headline {
     display: block;
-    padding-right: 20px;
+    padding-right: 0;
   }
 
   .bookmark-card__headline h4 {
@@ -4189,14 +4191,21 @@ button:disabled {
   }
 
   .bookmark-card__headline p {
-    display: none;
+    display: -webkit-box;
+    margin-top: 4px;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+    font-size: 0.82rem;
+    line-height: 1.24;
   }
 
   .bookmark-card__menu {
     position: absolute;
-    right: 0;
-    bottom: -2px;
-    top: auto;
+    right: 10px;
+    top: 10px;
+    bottom: auto;
     width: 32px;
     height: 32px;
     display: inline-flex;
@@ -4210,27 +4219,16 @@ button:disabled {
   }
 
   .bookmark-card__menu-panel {
-    top: auto;
-    right: auto;
-    bottom: 38px;
-    left: 0;
+    top: 48px;
+    right: 10px;
+    bottom: auto;
+    left: auto;
     z-index: 90;
     width: min(184px, calc(100vw - 40px));
     min-width: 0;
     max-width: calc(100vw - 32px);
     padding: 6px;
     border-radius: 14px;
-  }
-
-  .bookmark-card--list:nth-child(3n + 2) .bookmark-card__menu-panel {
-    left: 50%;
-    transform: translateX(-50%);
-  }
-
-  .bookmark-card--list:nth-child(3n) .bookmark-card__menu-panel {
-    right: 0;
-    left: auto;
-    transform: none;
   }
 
   .bookmark-card__menu-panel button {
@@ -4496,7 +4494,7 @@ button:disabled {
   position: fixed;
   left: max(10px, env(safe-area-inset-left));
   right: max(10px, env(safe-area-inset-right));
-  top: calc(64px + env(safe-area-inset-top));
+  top: calc(78px + env(safe-area-inset-top));
   z-index: 38;
   width: auto;
   max-width: min(900px, calc(100vw - 20px - env(safe-area-inset-left) - env(safe-area-inset-right)));
@@ -4819,9 +4817,14 @@ button:disabled {
   .app-shell--reader .cbz-viewer__toolbar,
   .app-shell--reader .epub-reader__toolbar,
   .app-shell--reader .html-reader__toolbar {
-    top: calc(62px + env(safe-area-inset-top));
+    top: calc(76px + env(safe-area-inset-top));
+    gap: 6px;
     justify-content: flex-start;
+    padding: 6px;
     border-radius: 18px;
+    overflow-x: visible;
+    overflow-y: visible;
+    flex-wrap: wrap;
   }
 
   .app-shell--reader .document-frame__toolbar-actions,
@@ -4829,14 +4832,34 @@ button:disabled {
   .app-shell--reader .epub-reader__toolbar-actions,
   .app-shell--reader .html-reader__toolbar-actions,
   .app-shell--reader .cbz-viewer__toolbar-right {
+    gap: 6px;
     justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .app-shell--reader .document-frame__toolbar-actions,
+  .app-shell--reader .cbz-viewer__toolbar-actions,
+  .app-shell--reader .epub-reader__toolbar-actions,
+  .app-shell--reader .html-reader__toolbar-actions {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .app-shell--reader .cbz-viewer__toolbar-right {
+    flex: 1 1 auto;
+    width: auto;
   }
 
   .app-shell--reader .document-frame__page-label,
   .app-shell--reader .cbz-viewer__page-indicator,
   .app-shell--reader .epub-reader__progress-label,
   .app-shell--reader .html-reader__progress-label {
-    max-width: 18ch;
+    flex: 1 1 auto;
+    max-width: none;
+  }
+
+  .app-shell--reader .cbz-viewer__page-indicator {
+    display: none;
   }
 
   .app-shell--reader .document-frame__toolbar .ghost-button,
@@ -4847,6 +4870,41 @@ button:disabled {
     min-height: 36px;
     padding: 7px 10px;
     font-size: 0.82rem;
+  }
+
+  .app-shell--reader .cbz-viewer__settings {
+    flex: 0 1 auto;
+  }
+
+  .app-shell--reader .cbz-viewer__mode-toggle,
+  .app-shell--reader .cbz-viewer__zoom-control {
+    max-width: 100%;
+  }
+
+  .app-shell--reader .cbz-viewer__mode-button {
+    padding: 7px 10px;
+  }
+
+  .app-shell--reader .cbz-viewer__zoom-button {
+    width: 30px;
+    height: 30px;
+  }
+
+  .app-shell--reader .cbz-viewer__zoom-value {
+    min-width: 4ch;
+  }
+
+  .app-shell--reader .cbz-viewer__toolbar-right > .ghost-button {
+    width: 36px;
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .app-shell--reader .cbz-viewer__toolbar-right > .ghost-button .app-icon {
+    width: 18px;
+    height: 18px;
   }
 
   .app-shell--reader .cbz-viewer__settings-menu--floating {
