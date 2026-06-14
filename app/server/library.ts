@@ -281,6 +281,16 @@ type FileRecord = {
   mtimeMs: number
 }
 
+type ScanDirectoryWarning = {
+  path: string
+  message: string
+}
+
+type ScanDirectoryResult = {
+  files: FileRecord[]
+  warnings: ScanDirectoryWarning[]
+}
+
 type ParsedEntry = {
   file: FileRecord
   groupKey: string
@@ -909,11 +919,26 @@ const resolveMediaTrackForEntry = (
 
 const padNumber = (value: number) => String(value).padStart(2, '0')
 
-const scanDirectory = (rootPath: string, allowedExtensions: Set<string>) => {
-  const results: FileRecord[] = []
+const formatFileSystemError = (error: unknown) =>
+  error instanceof Error ? error.message : 'Unknown filesystem error'
+
+const scanDirectory = (rootPath: string, allowedExtensions: Set<string>): ScanDirectoryResult => {
+  const files: FileRecord[] = []
+  const warnings: ScanDirectoryWarning[] = []
 
   const visit = (absolutePath: string, relativeDirectory: string) => {
-    const directoryEntries = fs.readdirSync(absolutePath, { withFileTypes: true })
+    let directoryEntries: fs.Dirent[]
+
+    try {
+      directoryEntries = fs.readdirSync(absolutePath, { withFileTypes: true })
+    } catch (error) {
+      warnings.push({
+        path: absolutePath,
+        message: `Skipped directory: ${formatFileSystemError(error)}`,
+      })
+      return
+    }
+
     directoryEntries.sort((left, right) => naturalCompare(left.name, right.name))
 
     for (const directoryEntry of directoryEntries) {
@@ -937,9 +962,19 @@ const scanDirectory = (rootPath: string, allowedExtensions: Set<string>) => {
         continue
       }
 
-      const stats = fs.statSync(entryAbsolutePath)
+      let stats: fs.Stats
 
-      results.push({
+      try {
+        stats = fs.statSync(entryAbsolutePath)
+      } catch (error) {
+        warnings.push({
+          path: entryAbsolutePath,
+          message: `Skipped file: ${formatFileSystemError(error)}`,
+        })
+        continue
+      }
+
+      files.push({
         path: entryAbsolutePath,
         relativePath: entryRelativePath,
         baseName: directoryEntry.name,
@@ -954,7 +989,7 @@ const scanDirectory = (rootPath: string, allowedExtensions: Set<string>) => {
     visit(rootPath, '')
   }
 
-  return results
+  return { files, warnings }
 }
 
 const parseAnimeEntry = (file: FileRecord, sourceFolder: SourceFolderRow): ParsedEntry => {
@@ -3847,10 +3882,33 @@ export const runScan = async (
         reporter,
       )
 
-      const files = scanDirectory(
+      const scanResult = scanDirectory(
         sourceFolder.path,
         supportedExtensionsByCategory[sourceFolder.category],
       )
+      const { files } = scanResult
+      const warningCount = scanResult.warnings.length
+
+      for (const warning of scanResult.warnings.slice(0, 25)) {
+        appendScanEvent(
+          db,
+          scanRunId,
+          'error',
+          `${warning.message} (${warning.path})`,
+          reporter,
+        )
+      }
+
+      if (warningCount > 25) {
+        appendScanEvent(
+          db,
+          scanRunId,
+          'error',
+          `Skipped ${warningCount - 25} additional unreadable ${warningCount - 25 === 1 ? 'entry' : 'entries'} in ${sourceLabel}`,
+          reporter,
+        )
+      }
+
       const groupedSeries = groupSeriesFromFiles(sourceFolder, files)
       reporter?.onProgress?.({
         runId: scanRunId,
@@ -3867,7 +3925,7 @@ export const runScan = async (
         db,
         scanRunId,
         'info',
-        `Queued ${sourceLabel}: ${files.length} ${files.length === 1 ? 'file' : 'files'} across ${groupedSeries.length} ${groupedSeries.length === 1 ? 'series' : 'series'}`,
+        `Queued ${sourceLabel}: ${files.length} ${files.length === 1 ? 'file' : 'files'} across ${groupedSeries.length} ${groupedSeries.length === 1 ? 'series' : 'series'}${warningCount > 0 ? `, ${warningCount} skipped` : ''}`,
         reporter,
       )
       const existingSeries = db
