@@ -12,7 +12,7 @@ import {
   type RenderTask,
 } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import pdfWorker from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
-import { ExternalLink, Minus, Plus, Settings2 } from 'lucide-react'
+import { ExternalLink, Minus, Plus, Settings2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type { ReaderProgress, ReaderViewMode } from './appTypes'
 
@@ -1261,6 +1261,7 @@ export function CbzReader({
     useState<CbzPageOrderMode>(initialPageOrderMode)
   const [spreadAlignment, setSpreadAlignment] =
     useState<CbzSpreadAlignment>(initialSpreadAlignment)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [singlePageZoom, setSinglePageZoom] = useState(100)
   const [spreadZoom, setSpreadZoom] = useState(100)
   const [visiblePage, setVisiblePage] = useState(initialPage)
@@ -1334,7 +1335,26 @@ export function CbzReader({
   useEffect(() => {
     setSinglePageZoom(100)
     setSpreadZoom(100)
+    setSettingsOpen(false)
   }, [fileUrl])
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSettingsOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [settingsOpen])
 
   useEffect(() => {
     let disposed = false
@@ -1545,77 +1565,19 @@ export function CbzReader({
             <span className="cbz-viewer__page-indicator">{pageIndicatorLabel}</span>
           )}
           <div className="cbz-viewer__toolbar-right">
-            <details className="cbz-viewer__settings">
-              <summary className="ghost-button">
+            <div className="cbz-viewer__settings">
+              <button
+                aria-controls="cbz-reader-settings-popover"
+                aria-expanded={settingsOpen}
+                aria-haspopup="dialog"
+                className={`ghost-button ${settingsOpen ? 'is-active' : ''}`}
+                onClick={() => setSettingsOpen((isOpen) => !isOpen)}
+                type="button"
+              >
                 <Settings2 aria-hidden="true" className="app-icon" strokeWidth={1.9} />
                 Reader settings
-              </summary>
-              <div className="cbz-viewer__settings-menu">
-                <div className="cbz-viewer__settings-group">
-                  <span className="cbz-viewer__settings-label">Reading direction</span>
-                  <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Reading direction">
-                    <button
-                      aria-pressed={readingDirection === 'rtl'}
-                      className={`cbz-viewer__mode-button ${readingDirection === 'rtl' ? 'is-active' : ''}`}
-                      onClick={() => setReadingDirection('rtl')}
-                      type="button"
-                    >
-                      RTL
-                    </button>
-                    <button
-                      aria-pressed={readingDirection === 'ltr'}
-                      className={`cbz-viewer__mode-button ${readingDirection === 'ltr' ? 'is-active' : ''}`}
-                      onClick={() => setReadingDirection('ltr')}
-                      type="button"
-                    >
-                      LTR
-                    </button>
-                  </div>
-                </div>
-                <div className="cbz-viewer__settings-group">
-                  <span className="cbz-viewer__settings-label">Page order</span>
-                  <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Page order">
-                    <button
-                      aria-pressed={pageOrderMode === 'archive'}
-                      className={`cbz-viewer__mode-button ${pageOrderMode === 'archive' ? 'is-active' : ''}`}
-                      onClick={() => setPageOrderMode('archive')}
-                      type="button"
-                    >
-                      Archive
-                    </button>
-                    <button
-                      aria-pressed={pageOrderMode === 'filename'}
-                      className={`cbz-viewer__mode-button ${pageOrderMode === 'filename' ? 'is-active' : ''}`}
-                      onClick={() => setPageOrderMode('filename')}
-                      type="button"
-                    >
-                      Filename
-                    </button>
-                  </div>
-                </div>
-                <div className="cbz-viewer__settings-group">
-                  <span className="cbz-viewer__settings-label">Spread alignment</span>
-                  <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Spread alignment">
-                    <button
-                      aria-pressed={spreadAlignment === 'cover-first'}
-                      className={`cbz-viewer__mode-button ${spreadAlignment === 'cover-first' ? 'is-active' : ''}`}
-                      onClick={() => setSpreadAlignment('cover-first')}
-                      type="button"
-                    >
-                      Cover first
-                    </button>
-                    <button
-                      aria-pressed={spreadAlignment === 'straight-pairs'}
-                      className={`cbz-viewer__mode-button ${spreadAlignment === 'straight-pairs' ? 'is-active' : ''}`}
-                      onClick={() => setSpreadAlignment('straight-pairs')}
-                      type="button"
-                    >
-                      Straight pairs
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </details>
+              </button>
+            </div>
             <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Reading mode">
               <button
                 aria-pressed={viewMode === 'single'}
@@ -1667,6 +1629,90 @@ export function CbzReader({
           </div>
         </div>
       </div>
+
+      {settingsOpen && (
+        <div
+          aria-label="Reader settings"
+          className="cbz-viewer__settings-menu cbz-viewer__settings-menu--floating"
+          id="cbz-reader-settings-popover"
+          role="dialog"
+        >
+          <div className="cbz-viewer__settings-header">
+            <span>Reader settings</span>
+            <button
+              aria-label="Close reader settings"
+              className="cbz-viewer__settings-close"
+              onClick={() => setSettingsOpen(false)}
+              type="button"
+            >
+              <X aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+            </button>
+          </div>
+          <div className="cbz-viewer__settings-group">
+            <span className="cbz-viewer__settings-label">Reading direction</span>
+            <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Reading direction">
+              <button
+                aria-pressed={readingDirection === 'rtl'}
+                className={`cbz-viewer__mode-button ${readingDirection === 'rtl' ? 'is-active' : ''}`}
+                onClick={() => setReadingDirection('rtl')}
+                type="button"
+              >
+                RTL
+              </button>
+              <button
+                aria-pressed={readingDirection === 'ltr'}
+                className={`cbz-viewer__mode-button ${readingDirection === 'ltr' ? 'is-active' : ''}`}
+                onClick={() => setReadingDirection('ltr')}
+                type="button"
+              >
+                LTR
+              </button>
+            </div>
+          </div>
+          <div className="cbz-viewer__settings-group">
+            <span className="cbz-viewer__settings-label">Page order</span>
+            <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Page order">
+              <button
+                aria-pressed={pageOrderMode === 'archive'}
+                className={`cbz-viewer__mode-button ${pageOrderMode === 'archive' ? 'is-active' : ''}`}
+                onClick={() => setPageOrderMode('archive')}
+                type="button"
+              >
+                Archive
+              </button>
+              <button
+                aria-pressed={pageOrderMode === 'filename'}
+                className={`cbz-viewer__mode-button ${pageOrderMode === 'filename' ? 'is-active' : ''}`}
+                onClick={() => setPageOrderMode('filename')}
+                type="button"
+              >
+                Filename
+              </button>
+            </div>
+          </div>
+          <div className="cbz-viewer__settings-group">
+            <span className="cbz-viewer__settings-label">Spread alignment</span>
+            <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Spread alignment">
+              <button
+                aria-pressed={spreadAlignment === 'cover-first'}
+                className={`cbz-viewer__mode-button ${spreadAlignment === 'cover-first' ? 'is-active' : ''}`}
+                onClick={() => setSpreadAlignment('cover-first')}
+                type="button"
+              >
+                Cover first
+              </button>
+              <button
+                aria-pressed={spreadAlignment === 'straight-pairs'}
+                className={`cbz-viewer__mode-button ${spreadAlignment === 'straight-pairs' ? 'is-active' : ''}`}
+                onClick={() => setSpreadAlignment('straight-pairs')}
+                type="button"
+              >
+                Straight pairs
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {loading && <div className="cbz-viewer__state">Loading pages from {title}...</div>}
       {error && <div className="cbz-viewer__state cbz-viewer__state--error">{error}</div>}
