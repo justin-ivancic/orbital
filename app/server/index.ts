@@ -93,7 +93,10 @@ const config = {
   appName: process.env.APP_NAME || 'Orbital Library',
   bootstrapAdmin: process.env.APP_ADMIN_USERNAME || 'admin',
   bootstrapPassword: configuredBootstrapPassword,
-  openSignup: process.env.APP_OPEN_SIGNUP !== '0',
+  openSignup:
+    process.env.APP_OPEN_SIGNUP != null
+      ? process.env.APP_OPEN_SIGNUP === '1'
+      : process.env.NODE_ENV !== 'production',
   enableDemoSeed:
     process.env.APP_ENABLE_DEMO_SEED != null
       ? process.env.APP_ENABLE_DEMO_SEED === '1'
@@ -115,8 +118,58 @@ const explicitCookieSecure = process.env.APP_COOKIE_SECURE?.trim()
 const useSecureSessionCookie = explicitCookieSecure
   ? explicitCookieSecure === '1'
   : process.env.NODE_ENV === 'production'
+const enableStrictTransportSecurity = process.env.APP_ENABLE_HSTS === '1'
 
 const app = express()
+
+if (process.env.APP_TRUST_PROXY) {
+  const trustProxy = process.env.APP_TRUST_PROXY.trim()
+  app.set('trust proxy', trustProxy === '1' ? 1 : trustProxy)
+}
+
+app.use((request, response, next) => {
+  response.setHeader('X-Content-Type-Options', 'nosniff')
+  response.setHeader('Referrer-Policy', 'no-referrer')
+  response.setHeader('X-Frame-Options', 'DENY')
+  response.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+  response.setHeader(
+    'Permissions-Policy',
+    'camera=(), microphone=(), geolocation=(), payment=(), usb=(), xr-spatial-tracking=()',
+  )
+  response.setHeader(
+    'Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "base-uri 'self'",
+      "connect-src 'self'",
+      "font-src 'self' data:",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "frame-src 'self' blob:",
+      "img-src 'self' data: blob:",
+      "media-src 'self' blob:",
+      "object-src 'none'",
+      "script-src 'self' 'wasm-unsafe-eval'",
+      "style-src 'self' 'unsafe-inline'",
+      "worker-src 'self' blob:",
+    ].join('; '),
+  )
+
+  if (enableStrictTransportSecurity && request.secure) {
+    response.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains')
+  }
+
+  next()
+})
+
+app.use('/api', (request, response, next) => {
+  if (!request.path.startsWith('/media/')) {
+    response.setHeader('Cache-Control', 'no-store')
+  }
+
+  next()
+})
+
 app.use(express.json({ limit: '2mb' }))
 
 let activeScanStatus: ScanStatus | null = null
@@ -478,13 +531,29 @@ app.get('/api/bootstrap', (request, response) => {
   response.json(getBootstrapPayload(typedRequest.sessionUser))
 })
 
-app.get('/api/health', (_request, response) => {
-  response.json({
-    ok: true,
-    appName: config.appName,
-    now: new Date().toISOString(),
-  })
-})
+const sendHealthResponse = (_request: Request, response: Response) => {
+  response.setHeader('Cache-Control', 'no-store')
+
+  try {
+    db.prepare('SELECT 1 AS ok').get()
+    response.json({
+      ok: true,
+      appName: config.appName,
+      database: 'ok',
+      now: new Date().toISOString(),
+    })
+  } catch {
+    response.status(503).json({
+      ok: false,
+      appName: config.appName,
+      database: 'unavailable',
+      now: new Date().toISOString(),
+    })
+  }
+}
+
+app.get('/api/health', sendHealthResponse)
+app.get('/healthz', sendHealthResponse)
 
 app.post('/api/auth/login', async (request, response) => {
   try {
@@ -940,8 +1009,22 @@ app.get('/api/media/track/:entryId/:kind/:trackId', requireAuth, async (request,
 
 const distDirectory = path.join(appRoot, 'dist')
 if (fs.existsSync(distDirectory)) {
-  app.use(express.static(distDirectory))
+  app.use(
+    express.static(distDirectory, {
+      setHeaders: (response, filePath) => {
+        const relativePath = path.relative(distDirectory, filePath).replace(/\\/g, '/')
+
+        if (relativePath.startsWith('assets/')) {
+          response.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+          return
+        }
+
+        response.setHeader('Cache-Control', 'no-cache')
+      },
+    }),
+  )
   app.get(/^(?!\/api\/).*/, (_request, response) => {
+    response.setHeader('Cache-Control', 'no-cache')
     response.sendFile(path.join(distDirectory, 'index.html'))
   })
 } else {

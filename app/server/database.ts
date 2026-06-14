@@ -15,6 +15,7 @@ export const openDatabase = (dataDirectory: string) => {
 
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
+  db.pragma('busy_timeout = 5000')
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (

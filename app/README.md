@@ -58,11 +58,16 @@ By default, Docker stores app state in `./data` and mounts local media from `./l
 
 Common environment variables:
 
+- `HOST_BIND_ADDR`: host interface for Docker port binding; defaults to `127.0.0.1`
 - `APP_ADMIN_USERNAME`: bootstrap admin username
 - `APP_ADMIN_PASSWORD`: required in production
+- `APP_OPEN_SIGNUP`: set to `1` only when you intentionally want public self-signup
 - `APP_DATA_HOST_DIR`: host directory for SQLite data
 - `MEDIA_HOST_DIR`: host directory or mounted share containing media
 - `APP_MEDIA_ROOT_LABEL`: display label for the mounted media root
+- `APP_COOKIE_SECURE`: set to `1` when serving behind HTTPS
+- `APP_ENABLE_HSTS`: set to `1` only after HTTPS is confirmed
+- `APP_TRUST_PROXY`: set to `1` only when Orbital is behind a trusted reverse proxy
 
 After the container starts:
 
@@ -74,8 +79,10 @@ After the container starts:
 
 Container health:
 
-- `GET /api/health` returns a simple health payload.
-- the Docker image includes a healthcheck against that route.
+- `GET /healthz` returns a DB-backed health payload.
+- `GET /api/health` is kept for compatibility.
+- the Docker image includes a healthcheck against `/healthz`.
+- the container runs as a non-root user, drops Linux capabilities, and defaults to localhost-only port binding.
 
 ## Persistence
 

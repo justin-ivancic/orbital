@@ -90,13 +90,16 @@ The most important environment variables are:
 
 | Variable | Purpose |
 | --- | --- |
+| `HOST_BIND_ADDR` | Host interface for Docker port binding. Defaults to `127.0.0.1`; set to `0.0.0.0` only when a proxy/firewall protects it. |
 | `APP_ADMIN_USERNAME` | Bootstrap admin username. Defaults to `admin`. |
 | `APP_ADMIN_PASSWORD` | Required bootstrap admin password. |
-| `APP_OPEN_SIGNUP` | Set to `0` to disable public self-signup. |
+| `APP_OPEN_SIGNUP` | Set to `1` only when you intentionally want public self-signup. Production Docker defaults to `0`. |
 | `APP_DATA_HOST_DIR` | Host directory for persistent Docker app data. |
 | `MEDIA_HOST_DIR` | Host folder or mounted share containing media files. |
 | `APP_MEDIA_ROOT_LABEL` | Display name for the mounted media root. |
 | `APP_COOKIE_SECURE` | Set to `1` when serving behind HTTPS. |
+| `APP_ENABLE_HSTS` | Set to `1` only after HTTPS is confirmed. |
+| `APP_TRUST_PROXY` | Set to `1` only when Orbital is behind a trusted reverse proxy. |
 
 See [`app/.env.example`](app/.env.example) for the full example.
 
@@ -125,7 +128,10 @@ app/
 
 - Always set a strong `APP_ADMIN_PASSWORD`.
 - Use `APP_COOKIE_SECURE=1` behind HTTPS.
+- Leave `APP_OPEN_SIGNUP=0` unless you intentionally want new people to self-register.
 - Mount media read-only when possible.
+- Keep the default localhost Docker bind unless a reverse proxy or firewall protects the app.
+- Use `/healthz` for container and reverse-proxy health checks.
 - Keep `data/` backed up if bookmarks, users, comments, and scan state matter.
 - Do not commit `.env`, local databases, media folders, or generated builds.
 
