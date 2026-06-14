@@ -139,7 +139,7 @@ export function VideoPlayer({ variant }: VideoPlayerProps) {
     }
 
     const restoreProgress = () => {
-      const savedProgress = Number(window.localStorage.getItem(progressStorageKey) || 0)
+      const savedProgress = Number(window.sessionStorage.getItem(progressStorageKey) || 0)
 
       if (
         Number.isFinite(savedProgress) &&
@@ -152,7 +152,7 @@ export function VideoPlayer({ variant }: VideoPlayerProps) {
 
     const saveProgress = () => {
       if (Number.isFinite(video.currentTime) && video.currentTime > 0) {
-        window.localStorage.setItem(progressStorageKey, String(Math.floor(video.currentTime)))
+        window.sessionStorage.setItem(progressStorageKey, String(Math.floor(video.currentTime)))
       }
     }
 

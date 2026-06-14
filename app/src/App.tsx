@@ -108,6 +108,8 @@ const preloadedPosterUrls = new Set<string>()
 const appStateCacheVersion = 1
 const maxCachedSeriesDetails = 24
 const appStateCachePrefix = `orbital:reader-cache:v${appStateCacheVersion}`
+const legacyAppStateCachePrefix = 'orbital:reader-cache:'
+let legacyAppStateCachePruned = false
 
 const preloadPosterImage = (url: string) => {
   if (typeof window === 'undefined' || preloadedPosterUrls.has(url)) {
@@ -150,13 +152,47 @@ const emptyScanStatus: ScanStatus = {
 
 const getAppStateCacheKey = (userId: string) => `${appStateCachePrefix}:${userId}`
 
+const getReaderCacheStorage = () => window.sessionStorage
+
+const pruneLegacyPersistentReaderCaches = () => {
+  if (typeof window === 'undefined' || legacyAppStateCachePruned) {
+    return
+  }
+
+  legacyAppStateCachePruned = true
+
+  try {
+    Object.keys(window.localStorage)
+      .filter((key) => key.startsWith(legacyAppStateCachePrefix) || key.startsWith('video-progress:'))
+      .forEach((key) => window.localStorage.removeItem(key))
+  } catch {
+    // Storage may be unavailable; cache cleanup is best-effort.
+  }
+}
+
+const clearReaderSessionCaches = () => {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    Object.keys(window.sessionStorage)
+      .filter((key) => key.startsWith(legacyAppStateCachePrefix) || key.startsWith('video-progress:'))
+      .forEach((key) => window.sessionStorage.removeItem(key))
+  } catch {
+    // Storage may be unavailable; the server session remains authoritative.
+  }
+}
+
 const readCachedReaderState = (bootstrapState: BootstrapState) => {
   if (typeof window === 'undefined' || !bootstrapState.user) {
     return null
   }
 
+  pruneLegacyPersistentReaderCaches()
+
   try {
-    const rawCache = window.localStorage.getItem(getAppStateCacheKey(bootstrapState.user.id))
+    const rawCache = getReaderCacheStorage().getItem(getAppStateCacheKey(bootstrapState.user.id))
 
     if (!rawCache) {
       return null
@@ -229,7 +265,8 @@ const writeCachedReaderState = (
   }
 
   try {
-    window.localStorage.setItem(getAppStateCacheKey(appState.user.id), JSON.stringify(cache))
+    pruneLegacyPersistentReaderCaches()
+    getReaderCacheStorage().setItem(getAppStateCacheKey(appState.user.id), JSON.stringify(cache))
   } catch {
     // Browser storage can be disabled or full; the live API state remains authoritative.
   }
@@ -2207,6 +2244,7 @@ function App() {
 
   const handleLogout = async () => {
     await api.logout()
+    clearReaderSessionCaches()
     const nextBootstrap = await api.getBootstrap()
     api.setCsrfToken(nextBootstrap.csrfToken)
     setBootstrapState(nextBootstrap)
