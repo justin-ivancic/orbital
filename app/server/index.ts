@@ -14,6 +14,16 @@ import {
 import { getEntryEmbeddedMediaTracks, renderEmbeddedSubtitleTrack, streamEmbeddedAudioTrack } from './embeddedMedia'
 import { openDatabase } from './database'
 import {
+  assertRateLimitAllowed,
+  clearRateLimitBuckets,
+  consumeRateLimit,
+  createRateLimitKey,
+  pruneRateLimitBuckets,
+  RateLimitError,
+  recordRateLimitFailure,
+  type RateLimitPolicy,
+} from './rateLimit'
+import {
   addComment,
   bootstrapAdminUser,
   changeUserPassword,
@@ -69,6 +79,40 @@ const {
   db,
   coversDirectory,
 } = openDatabase(dataDirectory)
+pruneRateLimitBuckets(db)
+
+const minutes = (value: number) => value * 60 * 1000
+const hours = (value: number) => value * 60 * 60 * 1000
+
+const loginIpPolicy = {
+  limit: 30,
+  windowMs: minutes(15),
+  blockMs: minutes(15),
+} satisfies RateLimitPolicy
+
+const loginUsernamePolicy = {
+  limit: 8,
+  windowMs: minutes(15),
+  blockMs: minutes(15),
+} satisfies RateLimitPolicy
+
+const signupPolicy = {
+  limit: 10,
+  windowMs: hours(1),
+  blockMs: hours(1),
+} satisfies RateLimitPolicy
+
+const passwordChangePolicy = {
+  limit: 6,
+  windowMs: minutes(15),
+  blockMs: minutes(15),
+} satisfies RateLimitPolicy
+
+const adminResetPolicy = {
+  limit: 12,
+  windowMs: hours(1),
+  blockMs: hours(1),
+} satisfies RateLimitPolicy
 const configuredBootstrapPassword = process.env.APP_ADMIN_PASSWORD?.trim() || ''
 const configuredManagedSourceRootPath = process.env.APP_MEDIA_ROOT_PATH?.trim() || ''
 const configuredManagedSourceRootDisplayPath =
@@ -508,9 +552,63 @@ const startFreshSession = (request: Request, response: Response, userId: string)
 }
 
 const sendError = (response: Response, error: unknown, status = 400) => {
+  if (error instanceof RateLimitError) {
+    response.setHeader('Retry-After', String(Math.max(1, Math.ceil(error.retryAfterMs / 1000))))
+    response.status(429).json({ error: error.message })
+    return
+  }
+
   response.status(status).json({
     error: error instanceof Error ? error.message : 'Unknown error',
   })
+}
+
+const getClientAddress = (request: Request) =>
+  request.ip || request.socket.remoteAddress || 'unknown-client'
+
+const getLoginRateLimiters = (request: Request, username: string) => {
+  const clientAddress = getClientAddress(request)
+
+  return [
+    {
+      key: createRateLimitKey('login-ip', clientAddress),
+      policy: loginIpPolicy,
+    },
+    {
+      key: createRateLimitKey('login-username', username, clientAddress),
+      policy: loginUsernamePolicy,
+    },
+  ]
+}
+
+const assertRateLimitersAllowed = (
+  rateLimiters: Array<{ key: string; policy: RateLimitPolicy }>,
+) => {
+  for (const rateLimiter of rateLimiters) {
+    assertRateLimitAllowed(db, rateLimiter.key)
+  }
+}
+
+const recordRateLimiterFailures = (
+  rateLimiters: Array<{ key: string; policy: RateLimitPolicy }>,
+) => {
+  let rateLimitError: RateLimitError | null = null
+
+  for (const rateLimiter of rateLimiters) {
+    try {
+      recordRateLimitFailure(db, rateLimiter.key, rateLimiter.policy)
+    } catch (error) {
+      if (error instanceof RateLimitError && !rateLimitError) {
+        rateLimitError = error
+      } else if (!(error instanceof RateLimitError)) {
+        throw error
+      }
+    }
+  }
+
+  if (rateLimitError) {
+    throw rateLimitError
+  }
 }
 
 const parseRangeHeader = (rangeHeader: string, fileSize: number) => {
@@ -627,17 +725,34 @@ app.get('/api/health', sendHealthResponse)
 app.get('/healthz', sendHealthResponse)
 
 app.post('/api/auth/login', async (request, response) => {
+  const username = String(request.body?.username || '')
+  const rateLimiters = getLoginRateLimiters(request, username)
+  let user: Awaited<ReturnType<typeof loginUser>>
+
   try {
-    const user = await loginUser(
+    assertRateLimitersAllowed(rateLimiters)
+    user = await loginUser(
       db,
-      String(request.body?.username || ''),
+      username,
       String(request.body?.password || ''),
     )
-    const session = startFreshSession(request, response, user.id)
-    response.json(getStatePayload(user, session.csrfToken))
   } catch (error) {
+    if (!(error instanceof RateLimitError)) {
+      try {
+        recordRateLimiterFailures(rateLimiters)
+      } catch (rateLimitError) {
+        sendError(response, rateLimitError)
+        return
+      }
+    }
+
     sendError(response, error, 401)
+    return
   }
+
+  clearRateLimitBuckets(db, rateLimiters.map((rateLimiter) => rateLimiter.key))
+  const session = startFreshSession(request, response, user.id)
+  response.json(getStatePayload(user, session.csrfToken))
 })
 
 app.post('/api/auth/signup', async (request, response) => {
@@ -647,6 +762,11 @@ app.post('/api/auth/signup', async (request, response) => {
   }
 
   try {
+    consumeRateLimit(
+      db,
+      createRateLimitKey('signup-ip', getClientAddress(request)),
+      signupPolicy,
+    )
     const user = await signupUser(
       db,
       String(request.body?.username || ''),
@@ -670,14 +790,26 @@ app.post('/api/auth/change-password', requireAuth, async (request, response) => 
   try {
     const typedRequest = request as RequestWithUser
     const sessionUser = typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>
+    const rateLimitKey = createRateLimitKey('change-password', sessionUser.id, getClientAddress(request))
 
-    await changeUserPassword(
-      db,
-      sessionUser.id,
-      String(request.body?.currentPassword || ''),
-      String(request.body?.newPassword || ''),
-      typedRequest.sessionId,
-    )
+    assertRateLimitAllowed(db, rateLimitKey)
+
+    try {
+      await changeUserPassword(
+        db,
+        sessionUser.id,
+        String(request.body?.currentPassword || ''),
+        String(request.body?.newPassword || ''),
+        typedRequest.sessionId,
+      )
+      clearRateLimitBuckets(db, [rateLimitKey])
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Current password is incorrect.') {
+        recordRateLimitFailure(db, rateLimitKey, passwordChangePolicy)
+      }
+
+      throw error
+    }
 
     response.json(getStatePayload(sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
@@ -862,12 +994,19 @@ app.post('/api/admin/scan', requireAdmin, async (request, response) => {
 
 app.post('/api/admin/users/:userId/reset-password', requireAdmin, async (request, response) => {
   try {
+    const typedRequest = request as RequestWithUser
+    const adminUser = typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>
+
+    consumeRateLimit(
+      db,
+      createRateLimitKey('admin-reset-password', adminUser.id, request.params.userId, getClientAddress(request)),
+      adminResetPolicy,
+    )
     await resetUserPassword(
       db,
       request.params.userId,
       String(request.body?.password || ''),
     )
-    const typedRequest = request as RequestWithUser
     response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
   } catch (error) {
     sendError(response, error)

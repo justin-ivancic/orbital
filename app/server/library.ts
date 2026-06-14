@@ -4190,13 +4190,17 @@ export const resetUserPassword = async (
 
   const now = nowIso()
   const passwordHash = await bcrypt.hash(password, 10)
-  db.prepare(
+  const result = db.prepare(
     `
       UPDATE users
       SET password_hash = ?, updated_at = ?
       WHERE id = ?
     `,
   ).run(passwordHash, now, userId)
+
+  if (result.changes !== 1) {
+    throw new Error('User account not found.')
+  }
 
   db.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(userId)
 }

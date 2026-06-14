@@ -180,6 +180,17 @@ export const openDatabase = (dataDirectory: string) => {
       message TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+      key TEXT PRIMARY KEY,
+      points INTEGER NOT NULL,
+      window_reset_at INTEGER NOT NULL,
+      blocked_until INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_expiry
+      ON rate_limit_buckets (window_reset_at, blocked_until);
   `)
 
   const ensureColumn = (tableName: string, columnName: string, definition: string) => {
