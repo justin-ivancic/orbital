@@ -136,6 +136,14 @@ type CbzPageOrderMode = 'archive' | 'filename'
 type CbzSpreadAlignment = 'cover-first' | 'straight-pairs'
 type CbzScaleMode = 'manual' | 'fit-width'
 
+const getInitialCbzScaleMode = (): CbzScaleMode => {
+  if (typeof window === 'undefined') {
+    return 'manual'
+  }
+
+  return window.matchMedia('(max-width: 1180px)').matches ? 'fit-width' : 'manual'
+}
+
 const naturalSort = (left: string, right: string) =>
   left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
 
@@ -1288,7 +1296,7 @@ export function CbzReader({
     useState<CbzPageOrderMode>(initialPageOrderMode)
   const [spreadAlignment, setSpreadAlignment] =
     useState<CbzSpreadAlignment>(initialSpreadAlignment)
-  const [scaleMode, setScaleMode] = useState<CbzScaleMode>('manual')
+  const [scaleMode, setScaleMode] = useState<CbzScaleMode>(() => getInitialCbzScaleMode())
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [singlePageZoom, setSinglePageZoom] = useState(100)
   const [spreadZoom, setSpreadZoom] = useState(100)
@@ -1307,7 +1315,7 @@ export function CbzReader({
       setReadingDirection(initialReadingDirection)
       setPageOrderMode(initialPageOrderMode)
       setSpreadAlignment(initialSpreadAlignment)
-      setScaleMode('manual')
+      setScaleMode(getInitialCbzScaleMode())
       return
     }
 
@@ -1317,7 +1325,7 @@ export function CbzReader({
       setReadingDirection(initialReadingDirection)
       setPageOrderMode(initialPageOrderMode)
       setSpreadAlignment(initialSpreadAlignment)
-      setScaleMode('manual')
+      setScaleMode(getInitialCbzScaleMode())
       return
     }
 
@@ -1335,13 +1343,13 @@ export function CbzReader({
       setScaleMode(
         parsedSettings.scaleMode === 'fit-width' || parsedSettings.scaleMode === 'manual'
           ? parsedSettings.scaleMode
-          : 'manual',
+          : getInitialCbzScaleMode(),
       )
     } catch {
       setReadingDirection(initialReadingDirection)
       setPageOrderMode(initialPageOrderMode)
       setSpreadAlignment(initialSpreadAlignment)
-      setScaleMode('manual')
+      setScaleMode(getInitialCbzScaleMode())
     }
   }, [
     initialPageOrderMode,
@@ -1564,7 +1572,7 @@ export function CbzReader({
 
   const fitWidthActive = scaleMode === 'fit-width'
   const activeZoom = viewMode === 'spread' ? spreadZoom : singlePageZoom
-  const activeZoomLabel = fitWidthActive ? 'Width' : `${activeZoom}%`
+  const activeZoomLabel = fitWidthActive ? 'Fit' : `${activeZoom}%`
   const activeGroup = groups.find(
     (group) => visiblePage >= group.startPage && visiblePage <= group.endPage,
   )
@@ -1622,7 +1630,7 @@ export function CbzReader({
                 type="button"
               >
                 <Settings2 aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-                Reader settings
+                Settings
               </button>
             </div>
             <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Reading mode">
@@ -1632,7 +1640,7 @@ export function CbzReader({
                 onClick={() => setViewMode('single')}
                 type="button"
               >
-                Single pages
+                Single
               </button>
               <button
                 aria-pressed={viewMode === 'spread'}
@@ -1640,7 +1648,7 @@ export function CbzReader({
                 onClick={() => setViewMode('spread')}
                 type="button"
               >
-                Spreads
+                Spread
               </button>
             </div>
             <div className="cbz-viewer__zoom-control" aria-label="Reader zoom">
@@ -1722,7 +1730,7 @@ export function CbzReader({
                 onClick={() => setScaleMode('fit-width')}
                 type="button"
               >
-                Fit width
+                Fit
               </button>
             </div>
           </div>
@@ -1764,7 +1772,7 @@ export function CbzReader({
                 onClick={() => setPageOrderMode('filename')}
                 type="button"
               >
-                Filename
+                Name
               </button>
             </div>
           </div>
@@ -1777,7 +1785,7 @@ export function CbzReader({
                 onClick={() => setSpreadAlignment('cover-first')}
                 type="button"
               >
-                Cover first
+                Cover
               </button>
               <button
                 aria-pressed={spreadAlignment === 'straight-pairs'}
@@ -1785,7 +1793,7 @@ export function CbzReader({
                 onClick={() => setSpreadAlignment('straight-pairs')}
                 type="button"
               >
-                Straight pairs
+                Pairs
               </button>
             </div>
           </div>
