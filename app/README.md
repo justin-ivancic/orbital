@@ -84,7 +84,8 @@ Container health:
 - `GET /api/health` is kept for compatibility.
 - `GET /api/ready` is kept for environments that prefer API-prefixed probes.
 - the Docker image includes a healthcheck against `/readyz`.
-- the container runs as a non-root user, drops Linux capabilities, and defaults to localhost-only port binding.
+- the container entrypoint repairs `/app/data` ownership for existing persistent volumes, then runs the app as the non-root `node` user when possible.
+- the provided Compose file drops Linux capabilities and defaults to localhost-only port binding.
 
 ## Persistence
 
