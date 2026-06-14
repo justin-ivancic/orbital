@@ -44,6 +44,10 @@ const readStream = async (stream: NodeJS.ReadableStream) => {
   return Buffer.concat(chunks)
 }
 
+test('CBZ media versions use the same timestamp precision as scanned entries', () => {
+  assert.equal(getCbzMediaVersion({ mtimeMs: 1234.9, size: 456 }), '1234-456')
+})
+
 test('CBZ manifest indexes image entries without inflating the archive', async () => {
   const directory = await createTempDirectory()
 

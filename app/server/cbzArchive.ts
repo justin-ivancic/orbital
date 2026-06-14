@@ -52,7 +52,7 @@ type ZipCentralDirectory = {
 const manifestCache = new Map<string, CbzArchiveManifest>()
 
 export const getCbzMediaVersion = (stats: Pick<fs.Stats, 'mtimeMs' | 'size'>) =>
-  `${Math.round(stats.mtimeMs)}-${stats.size}`
+  `${Math.floor(stats.mtimeMs)}-${stats.size}`
 
 const readFileRange = async (filePath: string, start: number, length: number) => {
   if (length < 0) {
