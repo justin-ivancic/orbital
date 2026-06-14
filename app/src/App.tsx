@@ -105,6 +105,9 @@ const isReaderChromeInteractionTarget = (target: EventTarget | null) =>
   target instanceof Element && Boolean(target.closest(readerChromeInteractionSelector))
 
 const preloadedPosterUrls = new Set<string>()
+const appStateCacheVersion = 1
+const maxCachedSeriesDetails = 24
+const appStateCachePrefix = `orbital:reader-cache:v${appStateCacheVersion}`
 
 const preloadPosterImage = (url: string) => {
   if (typeof window === 'undefined' || preloadedPosterUrls.has(url)) {
@@ -115,6 +118,142 @@ const preloadPosterImage = (url: string) => {
   const image = new Image()
   image.decoding = 'async'
   image.src = url
+}
+
+type CachedReaderState = {
+  version: number
+  userId: string
+  savedAt: string
+  library: AppState['library']
+  bookmarks: AppState['bookmarks']
+  readingPositions: AppState['readingPositions']
+  scanSummary: AppState['scanSummary']
+  scanStatus: AppState['scanStatus']
+  seriesCache: Record<string, SeriesDetail>
+}
+
+const emptyScanStatus: ScanStatus = {
+  active: false,
+  runId: null,
+  startedAt: null,
+  finishedAt: null,
+  totalSources: 0,
+  completedSources: 0,
+  currentSource: null,
+  currentSourceFilesDiscovered: null,
+  currentSourceSeriesTotal: null,
+  currentSourceSeriesCompleted: 0,
+  currentSeries: null,
+  summary: null,
+  events: [],
+}
+
+const getAppStateCacheKey = (userId: string) => `${appStateCachePrefix}:${userId}`
+
+const readCachedReaderState = (bootstrapState: BootstrapState) => {
+  if (typeof window === 'undefined' || !bootstrapState.user) {
+    return null
+  }
+
+  try {
+    const rawCache = window.localStorage.getItem(getAppStateCacheKey(bootstrapState.user.id))
+
+    if (!rawCache) {
+      return null
+    }
+
+    const cache = JSON.parse(rawCache) as Partial<CachedReaderState>
+
+    if (
+      cache.version !== appStateCacheVersion ||
+      cache.userId !== bootstrapState.user.id ||
+      !Array.isArray(cache.library) ||
+      !Array.isArray(cache.bookmarks) ||
+      !cache.readingPositions ||
+      !cache.scanSummary
+    ) {
+      return null
+    }
+
+    const appState: AppState = {
+      appName: bootstrapState.appName,
+      bootstrapAdmin: bootstrapState.bootstrapAdmin,
+      openSignup: bootstrapState.openSignup,
+      user: bootstrapState.user,
+      csrfToken: bootstrapState.csrfToken,
+      scanSummary: cache.scanSummary,
+      scanStatus: cache.scanStatus?.active ? emptyScanStatus : cache.scanStatus || emptyScanStatus,
+      library: cache.library,
+      bookmarks: cache.bookmarks,
+      readingPositions: cache.readingPositions,
+      sourceRoots: [],
+      sourceFolders: [],
+      users: [],
+      metadataQueue: [],
+    }
+
+    return {
+      appState,
+      seriesCache: cache.seriesCache && typeof cache.seriesCache === 'object'
+        ? cache.seriesCache
+        : {},
+    }
+  } catch {
+    return null
+  }
+}
+
+const writeCachedReaderState = (
+  appState: AppState,
+  seriesCache: Record<string, SeriesDetail>,
+) => {
+  if (typeof window === 'undefined' || !appState.user || appState.scanStatus.active) {
+    return
+  }
+
+  const validSeriesIds = new Set(appState.library.map((series) => series.id))
+  const cachedSeriesEntries = Object.entries(seriesCache)
+    .filter(([seriesId]) => validSeriesIds.has(seriesId))
+    .slice(-maxCachedSeriesDetails)
+
+  const cache: CachedReaderState = {
+    version: appStateCacheVersion,
+    userId: appState.user.id,
+    savedAt: new Date().toISOString(),
+    library: appState.library,
+    bookmarks: appState.bookmarks,
+    readingPositions: appState.readingPositions,
+    scanSummary: appState.scanSummary,
+    scanStatus: appState.scanStatus,
+    seriesCache: Object.fromEntries(cachedSeriesEntries),
+  }
+
+  try {
+    window.localStorage.setItem(getAppStateCacheKey(appState.user.id), JSON.stringify(cache))
+  } catch {
+    // Browser storage can be disabled or full; the live API state remains authoritative.
+  }
+}
+
+const pruneSeriesCacheForLibrary = (
+  previousCache: Record<string, SeriesDetail>,
+  library: SeriesSummary[],
+) => {
+  const summariesById = new Map(library.map((series) => [series.id, series]))
+
+  return Object.fromEntries(
+    Object.entries(previousCache).filter(([seriesId, cachedSeries]) => {
+      const summary = summariesById.get(seriesId)
+
+      return Boolean(
+        summary &&
+          cachedSeries.stats.lastScanAt === summary.stats.lastScanAt &&
+          cachedSeries.coverUrl === summary.coverUrl &&
+          cachedSeries.bannerUrl === summary.bannerUrl &&
+          cachedSeries.title === summary.title,
+      )
+    }),
+  )
 }
 
 const ui = {
@@ -1072,6 +1211,7 @@ function App() {
   const [bootLoading, setBootLoading] = useState(true)
   const [stateLoading, setStateLoading] = useState(true)
   const [stateError, setStateError] = useState<string | null>(null)
+  const [cachedStateNeedsRefresh, setCachedStateNeedsRefresh] = useState(false)
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState<string | null>(null)
   const [passwordChangeBusy, setPasswordChangeBusy] = useState(false)
@@ -1142,6 +1282,7 @@ function App() {
   const lastReaderTouchToggleRef = useRef(0)
   const readerChromeTimerRef = useRef<number | null>(null)
   const scanStreamWasActiveRef = useRef(false)
+  const cacheWriteTimerRef = useRef<number | null>(null)
   const [readerChromeVisible, setReaderChromeVisible] = useState(true)
 
   const text = ui[language]
@@ -1163,7 +1304,44 @@ function App() {
     bookmarkedCoverUrls.slice(0, 48).forEach(preloadPosterImage)
   }, [authenticated, appState?.bookmarks, library])
 
+  useEffect(() => {
+    if (cacheWriteTimerRef.current) {
+      window.clearTimeout(cacheWriteTimerRef.current)
+      cacheWriteTimerRef.current = null
+    }
+
+    if (!authenticated || !appState?.user || appState.scanStatus.active) {
+      return
+    }
+
+    cacheWriteTimerRef.current = window.setTimeout(() => {
+      writeCachedReaderState(appState, seriesCache)
+      cacheWriteTimerRef.current = null
+    }, 500)
+
+    return () => {
+      if (cacheWriteTimerRef.current) {
+        window.clearTimeout(cacheWriteTimerRef.current)
+        cacheWriteTimerRef.current = null
+      }
+    }
+  }, [authenticated, appState, seriesCache])
+
   const visibleLibrary = library.filter((series) => isReaderCategory(series.category))
+
+  useEffect(() => {
+    if (!authenticated) {
+      return
+    }
+
+    library
+      .filter((series) => isReaderCategory(series.category))
+      .map((series) => series.coverUrl)
+      .filter((coverUrl): coverUrl is string => Boolean(coverUrl))
+      .slice(0, 72)
+      .forEach(preloadPosterImage)
+  }, [authenticated, library])
+
   const selectedSeriesSummary =
     library.find((series) => series.id === selectedSeriesId) ?? null
   const selectedSeriesDisplayTitle = selectedSeriesSummary
@@ -1294,6 +1472,17 @@ function App() {
 
         api.setCsrfToken(nextState.csrfToken)
         setBootstrapState(nextState)
+        const cachedReaderState = readCachedReaderState(nextState)
+
+        if (cachedReaderState) {
+          setAppState(cachedReaderState.appState)
+          setSeriesCache(cachedReaderState.seriesCache)
+          setCachedStateNeedsRefresh(true)
+          setSelectedSeriesId((previousSeriesId) =>
+            previousSeriesId || firstSeriesId(cachedReaderState.appState),
+          )
+        }
+
         setStateError(null)
       } catch (error) {
         if (!active) {
@@ -1316,10 +1505,13 @@ function App() {
   }, [text.authErrorFallback])
 
   useEffect(() => {
-    if (!bootstrapState?.user || appState) {
-      if (!bootstrapState?.user) {
-        setStateLoading(false)
-      }
+    if (!bootstrapState?.user) {
+      setStateLoading(false)
+      setCachedStateNeedsRefresh(false)
+      return
+    }
+
+    if (appState && !cachedStateNeedsRefresh) {
       return
     }
 
@@ -1337,6 +1529,8 @@ function App() {
         api.setCsrfToken(nextState.csrfToken)
         setBootstrapState(toBootstrapState(nextState))
         setAppState(nextState)
+        setCachedStateNeedsRefresh(false)
+        setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, nextState.library))
         setSelectedSeriesId((previousSeriesId) => previousSeriesId || firstSeriesId(nextState))
         setStateError(null)
       } catch (error) {
@@ -1357,7 +1551,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [appState, bootstrapState, text.authErrorFallback])
+  }, [appState, bootstrapState, cachedStateNeedsRefresh, text.authErrorFallback])
 
   useEffect(() => {
     const shouldPollForTransportRecovery =
@@ -1406,13 +1600,7 @@ function App() {
           api.setCsrfToken(nextState.csrfToken)
           setBootstrapState(toBootstrapState(nextState))
           setAppState(nextState)
-          setSeriesCache((previousCache) => {
-            const validSeriesIds = new Set(nextState.library.map((series) => series.id))
-
-            return Object.fromEntries(
-              Object.entries(previousCache).filter(([seriesId]) => validSeriesIds.has(seriesId)),
-            )
-          })
+          setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, nextState.library))
           setSelectedSeriesId((previousSeriesId) =>
             previousSeriesId && nextState.library.some((series) => series.id === previousSeriesId)
               ? previousSeriesId
@@ -1482,13 +1670,7 @@ function App() {
           csrfToken: nextState.csrfToken,
         })
         setAppState(nextState)
-        setSeriesCache((previousCache) => {
-          const validSeriesIds = new Set(nextState.library.map((series) => series.id))
-
-          return Object.fromEntries(
-            Object.entries(previousCache).filter(([seriesId]) => validSeriesIds.has(seriesId)),
-          )
-        })
+        setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, nextState.library))
         setSelectedSeriesId((previousSeriesId) =>
           previousSeriesId && nextState.library.some((series) => series.id === previousSeriesId)
             ? previousSeriesId
@@ -1939,13 +2121,8 @@ function App() {
     api.setCsrfToken(nextState.csrfToken)
     setBootstrapState(toBootstrapState(nextState))
     setAppState(nextState)
-    setSeriesCache((previousCache) => {
-      const validSeriesIds = new Set(nextState.library.map((series) => series.id))
-
-      return Object.fromEntries(
-        Object.entries(previousCache).filter(([seriesId]) => validSeriesIds.has(seriesId)),
-      )
-    })
+    setCachedStateNeedsRefresh(false)
+    setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, nextState.library))
     if (
       !selectedSeriesId ||
       !nextState.library.some((series) => series.id === selectedSeriesId && isReaderCategory(series.category))
@@ -2002,6 +2179,7 @@ function App() {
     const nextBootstrap = await api.getBootstrap()
     api.setCsrfToken(nextBootstrap.csrfToken)
     setBootstrapState(nextBootstrap)
+    setCachedStateNeedsRefresh(false)
     setAppState(null)
     setSeriesCache({})
     setSearchQuery('')
