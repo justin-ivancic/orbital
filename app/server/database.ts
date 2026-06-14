@@ -384,6 +384,53 @@ export const openDatabase = (dataDirectory: string) => {
     CREATE INDEX IF NOT EXISTS idx_entries_series_order ON entries(series_id, sort_order, label, title);
     CREATE INDEX IF NOT EXISTS idx_entries_source_folder ON entries(source_folder_id);
     CREATE INDEX IF NOT EXISTS idx_comments_series_created ON comments(series_id, created_at DESC);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS series_search_fts USING fts5(
+      series_id UNINDEXED,
+      category UNINDEXED,
+      title,
+      title_short,
+      source_name,
+      source_role,
+      tags,
+      genres,
+      year,
+      format,
+      folder_path,
+      entries,
+      description,
+      tokenize = 'unicode61 remove_diacritics 2',
+      prefix = '2 3 4'
+    );
+  `)
+
+  db.exec(`
+    DELETE FROM series_search_fts;
+
+    INSERT INTO series_search_fts (
+      series_id, category, title, title_short, source_name, source_role, tags, genres,
+      year, format, folder_path, entries, description
+    )
+    SELECT
+      s.id,
+      s.category,
+      s.title,
+      s.title_short,
+      COALESCE(s.source_name, ''),
+      COALESCE(s.source_role, ''),
+      COALESCE(s.tags_json, ''),
+      COALESCE(s.genres_json, ''),
+      COALESCE(CAST(s.year AS TEXT), ''),
+      s.format,
+      s.folder_path,
+      COALESCE(GROUP_CONCAT(
+        COALESCE(e.label, '') || ' ' || COALESCE(e.title, '') || ' ' || COALESCE(e.storage_file, ''),
+        ' '
+      ), ''),
+      s.description
+    FROM series s
+    LEFT JOIN entries e ON e.series_id = s.id
+    GROUP BY s.id;
   `)
 
   const coversDirectory = path.join(dataDirectory, 'covers')

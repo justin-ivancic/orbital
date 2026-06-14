@@ -1903,6 +1903,98 @@ const persistSeriesPresentation = (
     nowIso(),
     seriesId,
   )
+
+  refreshSeriesSearchDocument(db, seriesId)
+}
+
+const deleteSeriesSearchDocument = (db: Database, seriesId: string) => {
+  db.prepare(`DELETE FROM series_search_fts WHERE series_id = ?`).run(seriesId)
+}
+
+const refreshSeriesSearchDocument = (db: Database, seriesId: string) => {
+  const document = db
+    .prepare(
+      `
+        SELECT
+          s.id AS series_id,
+          s.category,
+          s.title,
+          s.title_short,
+          COALESCE(s.source_name, '') AS source_name,
+          COALESCE(s.source_role, '') AS source_role,
+          COALESCE(s.tags_json, '') AS tags,
+          COALESCE(s.genres_json, '') AS genres,
+          COALESCE(CAST(s.year AS TEXT), '') AS year,
+          s.format,
+          s.folder_path,
+          COALESCE(GROUP_CONCAT(
+            COALESCE(e.label, '') || ' ' || COALESCE(e.title, '') || ' ' || COALESCE(e.storage_file, ''),
+            ' '
+          ), '') AS entries,
+          s.description
+        FROM series s
+        LEFT JOIN entries e ON e.series_id = s.id
+        WHERE s.id = ?
+        GROUP BY s.id
+      `,
+    )
+    .get(seriesId) as
+    | {
+        series_id: string
+        category: CategoryId
+        title: string
+        title_short: string
+        source_name: string
+        source_role: string
+        tags: string
+        genres: string
+        year: string
+        format: string
+        folder_path: string
+        entries: string
+        description: string
+      }
+    | undefined
+
+  deleteSeriesSearchDocument(db, seriesId)
+
+  if (!document) {
+    return
+  }
+
+  db.prepare(
+    `
+      INSERT INTO series_search_fts (
+        series_id, category, title, title_short, source_name, source_role, tags, genres,
+        year, format, folder_path, entries, description
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    document.series_id,
+    document.category,
+    document.title,
+    document.title_short,
+    document.source_name,
+    document.source_role,
+    document.tags,
+    document.genres,
+    document.year,
+    document.format,
+    document.folder_path,
+    document.entries,
+    document.description,
+  )
+}
+
+const refreshSourceFolderSearchDocuments = (db: Database, sourceFolderId: string) => {
+  const seriesRows = db
+    .prepare(`SELECT id FROM series WHERE source_folder_id = ?`)
+    .all(sourceFolderId) as Array<{ id: string }>
+
+  for (const series of seriesRows) {
+    refreshSeriesSearchDocument(db, series.id)
+  }
 }
 
 const mapSeriesRowToPresentation = (series: SeriesRow): SeriesPresentation => ({
@@ -3274,8 +3366,42 @@ export const refreshSeriesMetadata = async (
   persistSeriesPresentation(db, seriesId, effectiveSeries.title, effectiveSeries.titleShort, presentation)
 }
 
-export const searchSeries = (db: Database, query: string, scope: 'all' | CategoryId): SearchResponse => {
-  const likeQuery = `%${query.toLowerCase()}%`
+const getSearchTokens = (query: string) =>
+  compactWhitespace(query.replace(/[^\p{L}\p{N}_]+/gu, ' '))
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length >= 2)
+    .slice(0, 8)
+
+const seriesSearchFields = [
+  's.title',
+  's.title_short',
+  's.description',
+  's.folder_path',
+  "COALESCE(s.source_name, '')",
+  "COALESCE(s.source_role, '')",
+  "COALESCE(s.metadata_source, '')",
+  "COALESCE(s.remote_provider, '')",
+  's.genres_json',
+  's.tags_json',
+  "COALESCE(e.title, '')",
+  "COALESCE(e.storage_file, '')",
+]
+
+const searchSeriesWithLike = (
+  db: Database,
+  query: string,
+  scope: 'all' | CategoryId,
+  searchTokens: string[],
+) => {
+  const tokenWhereClause = searchTokens
+    .map(() => `(${seriesSearchFields.map((field) => `lower(${field}) LIKE ?`).join(' OR ')})`)
+    .join(' AND ')
+  const tokenParameters = searchTokens.flatMap((token) =>
+    seriesSearchFields.map(() => `%${token}%`),
+  )
+  const normalizedQuery = compactWhitespace(query).toLowerCase()
+  const firstToken = searchTokens[0]
   const results = db
     .prepare(
       `
@@ -3287,22 +3413,98 @@ export const searchSeries = (db: Database, query: string, scope: 'all' | Categor
         FROM series s
         LEFT JOIN entries e ON e.series_id = s.id
         WHERE (? = 'all' OR s.category = ?)
-          AND (
-            lower(s.title) LIKE ?
-            OR lower(s.description) LIKE ?
-            OR lower(s.folder_path) LIKE ?
-            OR lower(e.title) LIKE ?
-            OR lower(e.storage_file) LIKE ?
-          )
-        ORDER BY s.title COLLATE NOCASE
-        LIMIT 12
+          AND ${tokenWhereClause}
+        ORDER BY
+          CASE
+            WHEN lower(s.title) = ? THEN 0
+            WHEN lower(s.title) LIKE ? THEN 1
+            WHEN lower(s.title_short) LIKE ? THEN 2
+            WHEN lower(COALESCE(s.source_name, '')) LIKE ? THEN 3
+            WHEN lower(s.tags_json) LIKE ? THEN 4
+            ELSE 5
+          END,
+          s.title COLLATE NOCASE
+        LIMIT 20
       `,
     )
-    .all(scope, scope, likeQuery, likeQuery, likeQuery, likeQuery, likeQuery) as SeriesRow[]
+    .all(
+      scope,
+      scope,
+      ...tokenParameters,
+      normalizedQuery,
+      `${normalizedQuery}%`,
+      `%${firstToken}%`,
+      `%${firstToken}%`,
+      `%${firstToken}%`,
+    ) as SeriesRow[]
   const groupedEntryCounts = getGroupedEntryCountsBySeries(db, results)
 
   return {
     results: results.map((series) => mapSeriesRowToSummary(series, groupedEntryCounts.get(series.id))),
+  }
+}
+
+export const searchSeries = (db: Database, query: string, scope: 'all' | CategoryId): SearchResponse => {
+  const searchTokens = getSearchTokens(query)
+
+  if (!searchTokens.length) {
+    return { results: [] }
+  }
+
+  const normalizedQuery = compactWhitespace(query).toLowerCase()
+  const firstToken = searchTokens[0]
+  const ftsQuery = searchTokens.map((token) => `${token}*`).join(' AND ')
+
+  try {
+    const results = db
+      .prepare(
+        `
+          WITH matched AS (
+            SELECT
+              series_id,
+              bm25(series_search_fts, 0, 0, 10, 8, 6, 4, 4, 3, 2, 2, 1, 1, 0.5) AS rank
+            FROM series_search_fts
+            WHERE series_search_fts MATCH ?
+              AND (? = 'all' OR category = ?)
+          )
+          SELECT s.id, s.source_folder_id, s.category, s.title, s.title_short, s.year,
+                 s.format, s.status, s.description, s.folder_path, s.cover_source,
+                 s.metadata_source, s.cover_path, s.cover_mime, s.banner_path, s.banner_mime,
+                 s.remote_provider, s.remote_id, s.external_url, s.source_name, s.source_role,
+                 s.genres_json, s.file_count, s.last_scan_at, s.tags_json, s.metadata_refreshed_at
+          FROM matched
+          JOIN series s ON s.id = matched.series_id
+          ORDER BY
+            CASE
+              WHEN lower(s.title) = ? THEN 0
+              WHEN lower(s.title) LIKE ? THEN 1
+              WHEN lower(s.title_short) LIKE ? THEN 2
+              WHEN lower(COALESCE(s.source_name, '')) LIKE ? THEN 3
+              WHEN lower(s.tags_json) LIKE ? THEN 4
+              ELSE 5
+            END,
+            matched.rank,
+            s.title COLLATE NOCASE
+          LIMIT 20
+        `,
+      )
+      .all(
+        ftsQuery,
+        scope,
+        scope,
+        normalizedQuery,
+        `${normalizedQuery}%`,
+        `%${firstToken}%`,
+        `%${firstToken}%`,
+        `%${firstToken}%`,
+      ) as SeriesRow[]
+    const groupedEntryCounts = getGroupedEntryCountsBySeries(db, results)
+
+    return {
+      results: results.map((series) => mapSeriesRowToSummary(series, groupedEntryCounts.get(series.id))),
+    }
+  } catch {
+    return searchSeriesWithLike(db, query, scope, searchTokens)
   }
 }
 
@@ -3630,6 +3832,7 @@ export const updateSourceFolderCategory = (
     })
 
     updateCategory()
+    refreshSourceFolderSearchDocuments(db, sourceId)
   }
 
   return {
@@ -3646,6 +3849,14 @@ export const removeSourceFolder = (db: Database, sourceId: string) => {
     throw new Error('Linked folder was not found.')
   }
 
+  const seriesRows = db
+    .prepare(`SELECT id FROM series WHERE source_folder_id = ?`)
+    .all(sourceId) as Array<{ id: string }>
+
+  for (const series of seriesRows) {
+    deleteSeriesSearchDocument(db, series.id)
+  }
+
   db.prepare(`DELETE FROM source_folders WHERE id = ?`).run(sourceId)
 }
 
@@ -3656,6 +3867,7 @@ const deleteSeriesNotInSet = (db: Database, sourceFolderId: string, keepSeriesId
 
   for (const series of existingSeries) {
     if (!keepSeriesIds.has(series.id)) {
+      deleteSeriesSearchDocument(db, series.id)
       db.prepare(`DELETE FROM series WHERE id = ?`).run(series.id)
     }
   }
@@ -3903,6 +4115,8 @@ const upsertSeries = async (
     now,
     now,
   )
+
+  refreshSeriesSearchDocument(db, seriesId)
 
   return {
     seriesId,

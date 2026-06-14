@@ -1157,6 +1157,39 @@ const getSeriesDisplayTitle = (series: SeriesSummary) => {
   )
 }
 
+const getLocalSearchTokens = (query: string) =>
+  query
+    .replace(/[^\p{L}\p{N}_]+/gu, ' ')
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length >= 2)
+
+const matchesSeriesMetadataQuery = (series: SeriesSummary, query: string) => {
+  const tokens = getLocalSearchTokens(query)
+
+  if (!tokens.length) {
+    return false
+  }
+
+  const searchableText = [
+    getSeriesDisplayTitle(series),
+    series.description,
+    series.folder,
+    series.metadataSource,
+    series.sourceName,
+    series.sourceRole,
+    series.year?.toString(),
+    ...series.genres,
+    ...series.tags,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' ')
+    .toLowerCase()
+
+  return tokens.every((token) => searchableText.includes(token))
+}
+
 const getAvailableAnimeSeasons = (series: SeriesDetail | null) => {
   if (!series || series.category !== 'anime') {
     return []
@@ -1379,9 +1412,7 @@ function App() {
   const metadataReviewItems = appState?.metadataQueue ?? emptyMetadataReviewItems
   const metadataSearchResults = metadataSearchQuery.trim()
     ? library
-        .filter((series) =>
-          getSeriesDisplayTitle(series).toLowerCase().includes(metadataSearchQuery.trim().toLowerCase())
-        )
+        .filter((series) => matchesSeriesMetadataQuery(series, metadataSearchQuery))
         .slice(0, 10)
     : []
   const selectedMetadataSeries =
