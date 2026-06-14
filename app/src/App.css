@@ -2785,6 +2785,37 @@ select {
   color: #ffb7b7;
 }
 
+.global-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.global-error span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.global-error__dismiss {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255, 183, 183, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 183, 183, 0.08);
+  color: #ffd0d0;
+}
+
+.global-error__dismiss:hover,
+.global-error__dismiss:focus-visible {
+  border-color: rgba(255, 183, 183, 0.42);
+  background: rgba(255, 183, 183, 0.14);
+  color: #ffffff;
+}
+
 .auth-success {
   color: #a9f2c0;
 }

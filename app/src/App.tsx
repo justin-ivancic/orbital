@@ -171,6 +171,7 @@ const ui = {
     searchAction: 'Search',
     clearSearch: 'Clear',
     closeSearch: 'Close search',
+    dismissError: 'Dismiss error',
     filters: 'Filters',
     activeFilter: 'Active filter',
     clearFilter: 'Clear filter',
@@ -405,6 +406,7 @@ const ui = {
     searchAction: 'Suche',
     clearSearch: 'Leeren',
     closeSearch: 'Suche schlieÃŸen',
+    dismissError: 'Fehler schliessen',
     filters: 'Filter',
     activeFilter: 'Aktiver Filter',
     clearFilter: 'Filter lÃ¶schen',
@@ -4905,7 +4907,19 @@ function App() {
           </section>
         )}
 
-        {stateError && authenticated && <article className="panel panel--padded global-error">{stateError}</article>}
+        {stateError && authenticated && (
+          <article className="panel panel--padded global-error" role="alert">
+            <span>{stateError}</span>
+            <button
+              aria-label={text.dismissError}
+              className="global-error__dismiss"
+              onClick={() => setStateError(null)}
+              type="button"
+            >
+              <AppIcon name="close" />
+            </button>
+          </article>
+        )}
 
         {currentView === 'bookmarks' && renderBookmarks()}
         {currentView === 'library' && renderLibrary()}
