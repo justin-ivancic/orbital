@@ -199,6 +199,24 @@ class MemoryDatabase {
       return { changes: session ? 1 : 0 }
     }
 
+    if (sql.startsWith('UPDATE sessions SET id = ? WHERE id = ?')) {
+      const [nextId, currentId] = args as string[]
+      const session = this.sessions.find((item) => item.id === currentId)
+      if (session) {
+        session.id = nextId
+      }
+      return { changes: session ? 1 : 0 }
+    }
+
+    if (sql.startsWith('DELETE FROM sessions WHERE id = ? OR id = ?')) {
+      const [firstId, secondId] = args as string[]
+      const before = this.sessions.length
+      this.sessions = this.sessions.filter(
+        (session) => session.id !== firstId && session.id !== secondId,
+      )
+      return { changes: before - this.sessions.length }
+    }
+
     if (sql.startsWith('DELETE FROM sessions WHERE id = ?')) {
       const [id] = args as string[]
       const before = this.sessions.length
@@ -556,6 +574,7 @@ test('password checks and sessions bind to the intended account', async () => {
 
   assert.equal(typeof aliceSession.csrfToken, 'string')
   assert.equal(aliceSession.csrfToken.length > 20, true)
+  assert.equal(memoryDb.sessions.some((session) => session.id === aliceSession.sessionId), false)
   assert.deepEqual(findSessionContext(db, aliceSession.sessionId), {
     sessionId: aliceSession.sessionId,
     csrfToken: aliceSession.csrfToken,
@@ -563,6 +582,21 @@ test('password checks and sessions bind to the intended account', async () => {
   })
   assert.deepEqual(findSessionUser(db, aliceSession.sessionId), alice)
   assert.deepEqual(findSessionUser(db, bobSession.sessionId), bob)
+
+  memoryDb.sessions.push({
+    id: 'session_legacy',
+    user_id: bob.id,
+    expires_at: Date.now() + 60_000,
+    csrf_token: 'legacy-csrf-token',
+    created_at: new Date().toISOString(),
+  })
+  assert.deepEqual(findSessionContext(db, 'session_legacy'), {
+    sessionId: 'session_legacy',
+    csrfToken: 'legacy-csrf-token',
+    user: bob,
+  })
+  assert.equal(memoryDb.sessions.some((session) => session.id === 'session_legacy'), false)
+  assert.deepEqual(findSessionUser(db, 'session_legacy'), bob)
 
   memoryDb.sessions.push({
     id: 'session_expired',

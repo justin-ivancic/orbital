@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
+import crypto from 'node:crypto'
 import path from 'node:path'
 import { createCanvas } from '@napi-rs/canvas'
 import type { Database } from 'better-sqlite3'
@@ -2859,7 +2860,8 @@ export const bootstrapAdminUser = async (db: Database, config: AppConfig) => {
 }
 
 export const createSession = (db: Database, userId: string) => {
-  const sessionId = createId('session')
+  const sessionId = createSecretToken()
+  const storedSessionId = hashSessionToken(sessionId)
   const csrfToken = createSecretToken()
   const expiresAt = Date.now() + SESSION_TTL_MS
   db.prepare(
@@ -2867,16 +2869,23 @@ export const createSession = (db: Database, userId: string) => {
       INSERT INTO sessions (id, user_id, expires_at, csrf_token, created_at)
       VALUES (?, ?, ?, ?, ?)
     `,
-  ).run(sessionId, userId, expiresAt, csrfToken, nowIso())
+  ).run(storedSessionId, userId, expiresAt, csrfToken, nowIso())
 
   return { sessionId, expiresAt, csrfToken }
 }
+
+const sessionTokenHashPrefix = 'sha256:'
+const hashSessionToken = (sessionId: string) =>
+  `${sessionTokenHashPrefix}${crypto.createHash('sha256').update(sessionId).digest('base64url')}`
+
+const isLegacyRawSessionId = (sessionId: string) => sessionId.startsWith('session_')
 
 export const findSessionContext = (db: Database, sessionId: string | null | undefined) => {
   if (!sessionId) {
     return null
   }
 
+  const storedSessionId = hashSessionToken(sessionId)
   const session = db
     .prepare(
       `
@@ -2886,7 +2895,7 @@ export const findSessionContext = (db: Database, sessionId: string | null | unde
         WHERE s.id = ?
       `,
     )
-    .get(sessionId) as
+    .get(storedSessionId) as
     | {
         id: string
         expires_at: number
@@ -2896,29 +2905,57 @@ export const findSessionContext = (db: Database, sessionId: string | null | unde
         role: SessionUser['role']
       }
     | undefined
+  const resolvedSession = session ?? (
+    isLegacyRawSessionId(sessionId)
+      ? db
+          .prepare(
+            `
+              SELECT s.id, s.expires_at, s.csrf_token, u.id AS user_id, u.username, u.role
+              FROM sessions s
+              INNER JOIN users u ON u.id = s.user_id
+              WHERE s.id = ?
+            `,
+          )
+          .get(sessionId) as
+          | {
+              id: string
+              expires_at: number
+              csrf_token: string | null
+              user_id: string
+              username: string
+              role: SessionUser['role']
+            }
+          | undefined
+      : undefined
+  )
 
-  if (!session) {
+  if (!resolvedSession) {
     return null
   }
 
-  if (session.expires_at <= Date.now()) {
-    db.prepare(`DELETE FROM sessions WHERE id = ?`).run(session.id)
+  if (resolvedSession.id === sessionId) {
+    db.prepare(`UPDATE sessions SET id = ? WHERE id = ?`).run(storedSessionId, sessionId)
+    resolvedSession.id = storedSessionId
+  }
+
+  if (resolvedSession.expires_at <= Date.now()) {
+    db.prepare(`DELETE FROM sessions WHERE id = ?`).run(resolvedSession.id)
     return null
   }
 
-  const csrfToken = session.csrf_token || createSecretToken()
+  const csrfToken = resolvedSession.csrf_token || createSecretToken()
 
-  if (!session.csrf_token) {
-    db.prepare(`UPDATE sessions SET csrf_token = ? WHERE id = ?`).run(csrfToken, session.id)
+  if (!resolvedSession.csrf_token) {
+    db.prepare(`UPDATE sessions SET csrf_token = ? WHERE id = ?`).run(csrfToken, resolvedSession.id)
   }
 
   return {
-    sessionId: session.id,
+    sessionId,
     csrfToken,
     user: {
-      id: session.user_id,
-      username: session.username,
-      role: session.role,
+      id: resolvedSession.user_id,
+      username: resolvedSession.username,
+      role: resolvedSession.role,
     } satisfies SessionUser,
   }
 }
@@ -2931,7 +2968,7 @@ export const clearSession = (db: Database, sessionId: string | null | undefined)
     return
   }
 
-  db.prepare(`DELETE FROM sessions WHERE id = ?`).run(sessionId)
+  db.prepare(`DELETE FROM sessions WHERE id = ? OR id = ?`).run(hashSessionToken(sessionId), sessionId)
 }
 
 export const loginUser = async (db: Database, username: string, password: string) => {
@@ -4495,7 +4532,11 @@ export const changeUserPassword = async (
   ).run(passwordHash, now, userId)
 
   if (currentSessionId) {
-    db.prepare(`DELETE FROM sessions WHERE user_id = ? AND id != ?`).run(userId, currentSessionId)
+    db.prepare(`DELETE FROM sessions WHERE user_id = ? AND id != ? AND id != ?`).run(
+      userId,
+      hashSessionToken(currentSessionId),
+      currentSessionId,
+    )
   } else {
     db.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(userId)
   }
