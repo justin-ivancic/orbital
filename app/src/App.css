@@ -2177,6 +2177,48 @@ select {
   color: #ffd3cf;
 }
 
+.admin-scan-log__raw {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(136, 165, 194, 0.12);
+  background: rgba(3, 7, 12, 0.62);
+}
+
+.admin-scan-log__raw-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.admin-scan-log__raw-header strong {
+  color: var(--text-strong);
+}
+
+.admin-scan-log__raw-header span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.admin-scan-log__raw pre {
+  max-height: 220px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(136, 165, 194, 0.1);
+  background: rgba(0, 0, 0, 0.26);
+  color: rgba(231, 239, 250, 0.9);
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .admin-form {
   display: grid;
   gap: 14px;
@@ -3355,6 +3397,11 @@ button:disabled {
   .series-tab-grid,
   .admin-grid {
     grid-template-columns: 1fr;
+  }
+
+  .admin-scan-log__raw-header {
+    display: grid;
+    justify-content: stretch;
   }
 
   .source-category-picker {

@@ -116,7 +116,7 @@ app.use(express.json({ limit: '2mb' }))
 let activeScanStatus: ScanStatus | null = null
 let activeScanPromise: Promise<void> | null = null
 
-const trimScanEvents = (events: ScanLogEntry[]) => events.slice(-40)
+const trimScanEvents = (events: ScanLogEntry[]) => events.slice(-120)
 
 const getStatePayload = (user: RequestWithUser['sessionUser']) =>
   getAppState(db, config, user, activeScanStatus)

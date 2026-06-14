@@ -1675,7 +1675,7 @@ const getStoredScanStatus = (db: Database): ScanStatus => {
         FROM scan_events
         WHERE scan_run_id = ?
         ORDER BY created_at DESC
-        LIMIT 40
+        LIMIT 120
       `,
     )
     .all(latestRun.id) as Array<{

@@ -53,6 +53,7 @@ import type {
   LibraryEntry,
   ReaderProgress,
   SavedReadingPosition,
+  ScanLogEntry,
   ScopeId,
   SeriesDetail,
   SeriesSummary,
@@ -304,6 +305,11 @@ const ui = {
     scanLogEmpty: 'No scan events yet.',
     scanInProgress: 'Scan in progress',
     scanIdle: 'No active scan right now.',
+    scanRawLog: 'Raw event log',
+    scanRawLogHelp: 'Browser and server scan events, shown as reported.',
+    scanRawLogEmpty: 'No raw scan lines yet. Start a scan to stream events here.',
+    scanStartQueued: 'Browser requested a scan start; waiting for server status.',
+    scanRequestLost: 'Browser request failed, but the scan may still be running. Polling server status',
     commentsEmpty: 'No comments yet.',
     language: 'Language',
     searchCount: 'matches',
@@ -533,6 +539,11 @@ const ui = {
     scanLogEmpty: 'Noch keine Scan-Ereignisse.',
     scanInProgress: 'Scan läuft',
     scanIdle: 'Aktuell läuft kein Scan.',
+    scanRawLog: 'Roh-Log',
+    scanRawLogHelp: 'Browser- und Server-Scanereignisse, direkt aus dem Status.',
+    scanRawLogEmpty: 'Noch keine Rohzeilen. Starte einen Scan, um Events hier zu sehen.',
+    scanStartQueued: 'Browser hat den Scan-Start angefragt; warte auf Serverstatus.',
+    scanRequestLost: 'Browser-Request fehlgeschlagen, aber der Scan kann trotzdem laufen. Serverstatus wird weiter abgefragt',
     commentsEmpty: 'Noch keine Kommentare.',
     language: 'Sprache',
     searchCount: 'Treffer',
@@ -1084,6 +1095,8 @@ function App() {
   const [rootLabel, setRootLabel] = useState('Media root')
   const [rootPath, setRootPath] = useState('')
   const [adminBusy, setAdminBusy] = useState(false)
+  const [scanClientNotice, setScanClientNotice] = useState<ScanLogEntry | null>(null)
+  const [scanPollUntil, setScanPollUntil] = useState<number | null>(null)
   const [metadataSearchQuery, setMetadataSearchQuery] = useState('')
   const [selectedMetadataSeriesId, setSelectedMetadataSeriesId] = useState<string | null>(null)
   const [metadataTitleDraft, setMetadataTitleDraft] = useState('')
@@ -1313,7 +1326,19 @@ function App() {
   }, [appState, bootstrapState, text.authErrorFallback])
 
   useEffect(() => {
-    if (!authenticated || appState?.user?.role !== 'admin' || !scanIsActive) {
+    const shouldPollForTransportRecovery =
+      scanPollUntil != null && Date.now() < scanPollUntil
+
+    if (scanPollUntil != null && !scanIsActive && !shouldPollForTransportRecovery) {
+      setScanPollUntil(null)
+      return
+    }
+
+    if (
+      !authenticated ||
+      appState?.user?.role !== 'admin' ||
+      (!scanIsActive && !shouldPollForTransportRecovery)
+    ) {
       return
     }
 
@@ -1342,12 +1367,25 @@ function App() {
             : firstSeriesId(nextState),
         )
 
-        if (nextState.scanStatus.active) {
-          timeout = window.setTimeout(pollState, 1250)
+        const shouldKeepPolling =
+          nextState.scanStatus.active ||
+          (scanPollUntil != null && Date.now() < scanPollUntil)
+
+        if (shouldKeepPolling) {
+          timeout = window.setTimeout(pollState, nextState.scanStatus.active ? 1250 : 2000)
+        } else if (scanPollUntil != null) {
+          setScanPollUntil(null)
         }
       } catch {
         if (active) {
-          timeout = window.setTimeout(pollState, 2000)
+          const shouldRetry =
+            scanIsActive || (scanPollUntil != null && Date.now() < scanPollUntil)
+
+          if (shouldRetry) {
+            timeout = window.setTimeout(pollState, 2000)
+          } else if (scanPollUntil != null) {
+            setScanPollUntil(null)
+          }
         }
       }
     }
@@ -1358,7 +1396,7 @@ function App() {
       active = false
       window.clearTimeout(timeout)
     }
-  }, [appState?.user?.role, authenticated, scanIsActive])
+  }, [appState?.user?.role, authenticated, scanIsActive, scanPollUntil])
 
   useEffect(() => {
     if (!selectedSeries || selectedSeries.category !== 'anime') {
@@ -2290,12 +2328,36 @@ function App() {
   }
 
   const handleRunScan = async (sourceId?: string) => {
+    setScanClientNotice({
+      id: `client-scan-start-${Date.now()}`,
+      level: 'info',
+      message: text.scanStartQueued,
+      createdAt: new Date().toISOString(),
+    })
+    setScanPollUntil(Date.now() + 60000)
+
     try {
       setAdminBusy(true)
       const nextState = await api.runScan(sourceId)
       applyState(nextState)
+      setStateError(null)
     } catch (error) {
-      setStateError(error instanceof Error ? error.message : text.authErrorFallback)
+      const errorMessage = error instanceof Error ? error.message : text.authErrorFallback
+
+      setScanClientNotice({
+        id: `client-scan-error-${Date.now()}`,
+        level: 'error',
+        message: `${text.scanRequestLost}: ${errorMessage}`,
+        createdAt: new Date().toISOString(),
+      })
+      setScanPollUntil(Date.now() + 60000)
+
+      try {
+        const nextState = await api.getState()
+        applyState(nextState)
+      } catch {
+        // Keep the raw scan log notice visible while the recovery poll retries.
+      }
     } finally {
       setAdminBusy(false)
     }
@@ -3817,6 +3879,21 @@ function App() {
             (scanStatus.currentSourceSeriesCompleted || 0) / scanStatus.currentSourceSeriesTotal,
           )
         : 0
+    const rawScanEvents = [
+      ...(scanStatus?.events || []),
+      ...(scanClientNotice ? [scanClientNotice] : []),
+    ].sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
+    const rawScanLines = [
+      scanStatus?.runId
+        ? `[${formatDateTime(scanStatus.startedAt, language)}] RUN ${scanStatus.runId} ${
+            scanStatus.active ? 'running' : 'finished'
+          }${scanStatus.summary ? ` - ${scanStatus.summary}` : ''}`
+        : null,
+      ...rawScanEvents.map(
+        (event) =>
+          `[${formatDateTime(event.createdAt, language)}] ${event.level.toUpperCase()} ${event.message}`,
+      ),
+    ].filter((line): line is string => Boolean(line))
 
     return (
       <article className="panel panel--padded admin-scan-log">
@@ -3898,6 +3975,18 @@ function App() {
               ))
           ) : (
             <div className="admin-scan-log__empty">{text.scanLogEmpty}</div>
+          )}
+        </div>
+
+        <div className="admin-scan-log__raw">
+          <div className="admin-scan-log__raw-header">
+            <strong>{text.scanRawLog}</strong>
+            <span>{text.scanRawLogHelp}</span>
+          </div>
+          {rawScanLines.length ? (
+            <pre>{rawScanLines.join('\n')}</pre>
+          ) : (
+            <div className="admin-scan-log__empty">{text.scanRawLogEmpty}</div>
           )}
         </div>
       </article>
