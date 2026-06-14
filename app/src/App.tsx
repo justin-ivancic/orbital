@@ -193,9 +193,13 @@ const ui = {
     removeBookmark: 'Remove bookmark',
     openReader: 'Open reader',
     previousEntry: 'Previous chapter',
+    previousEntryShort: 'Prev',
     nextEntry: 'Next chapter',
+    nextEntryShort: 'Next',
     setBookmark: 'Set bookmark',
+    setBookmarkShort: 'Bookmark',
     bookmarked: 'Bookmarked',
+    bookmarkedShort: 'Saved',
     backToList: 'Back to list',
     libraryTitle: 'Shelf browsing',
     libraryBody:
@@ -418,9 +422,13 @@ const ui = {
     openSeries: 'Serie öffnen',
     openReader: 'Reader öffnen',
     previousEntry: 'Vorheriges Kapitel',
+    previousEntryShort: 'Zur',
     nextEntry: 'Nächstes Kapitel',
+    nextEntryShort: 'Vor',
     setBookmark: 'Lesezeichen setzen',
+    setBookmarkShort: 'Merken',
     bookmarked: 'Gespeichert',
+    bookmarkedShort: 'Gespeichert',
     backToList: 'Zur Liste',
     libraryTitle: 'Regalansicht',
     libraryBody:
@@ -3769,13 +3777,20 @@ function App() {
             type="button"
           >
             <AppIcon name="back" />
-            {text.previousEntry}
+            <span className="reader-overlay__button-label" data-short-label={text.previousEntryShort}>
+              {text.previousEntry}
+            </span>
           </button>
           <div className="reader-overlay__progress">
             {progressLabel && <span>{progressLabel}</span>}
             <button className="primary-button" onClick={() => void handleSetBookmark()} type="button">
               <AppIcon name="check" />
-              {bookmarkJustSet ? text.bookmarked : text.setBookmark}
+              <span
+                className="reader-overlay__button-label"
+                data-short-label={bookmarkJustSet ? text.bookmarkedShort : text.setBookmarkShort}
+              >
+                {bookmarkJustSet ? text.bookmarked : text.setBookmark}
+              </span>
             </button>
           </div>
           <button
@@ -3784,7 +3799,9 @@ function App() {
             onClick={() => moveEntry(1)}
             type="button"
           >
-            {text.nextEntry}
+            <span className="reader-overlay__button-label" data-short-label={text.nextEntryShort}>
+              {text.nextEntry}
+            </span>
             <AppIcon name="chevronRight" />
           </button>
         </section>

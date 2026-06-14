@@ -4707,6 +4707,12 @@ button:disabled {
   background: rgba(255, 255, 255, 0.04);
 }
 
+.reader-overlay__button-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .reader-overlay__title {
   min-width: 0;
   display: grid;
@@ -4855,6 +4861,24 @@ button:disabled {
     line-height: 1.12;
   }
 
+  .reader-overlay--bottom .ghost-button {
+    gap: 6px;
+  }
+
+  .reader-overlay--bottom .reader-overlay__button-label {
+    font-size: 0;
+  }
+
+  .reader-overlay--bottom .reader-overlay__button-label::before {
+    content: attr(data-short-label);
+    font-size: 0.78rem;
+  }
+
+  .reader-overlay--bottom .primary-button .reader-overlay__button-label::before {
+    color: #051018;
+    font-weight: 800;
+  }
+
   .reader-overlay__progress {
     min-width: 0;
     display: grid;
@@ -4984,7 +5008,7 @@ button:disabled {
     width: auto;
     max-height: min(64dvh, calc(100dvh - 148px - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
     grid-template-columns: 1fr;
-    gap: 8px;
+    gap: 10px;
     padding: 10px;
     border-radius: 18px;
   }
@@ -4999,15 +5023,16 @@ button:disabled {
   }
 
   .app-shell--reader .cbz-viewer__settings-group {
-    grid-template-columns: minmax(88px, 0.38fr) minmax(0, 1fr);
-    align-items: center;
-    gap: 8px;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 5px;
   }
 
   .app-shell--reader .cbz-viewer__settings-label {
     font-size: 0.68rem;
     letter-spacing: 0.06em;
     line-height: 1.1;
+    white-space: nowrap;
   }
 
   .app-shell--reader .cbz-viewer__settings-menu .cbz-viewer__mode-toggle {
@@ -5017,17 +5042,13 @@ button:disabled {
   }
 
   .app-shell--reader .cbz-viewer__settings-menu .cbz-viewer__mode-button {
-    min-height: 34px;
-    padding: 5px 7px;
-    font-size: 0.8rem;
+    min-height: 36px;
+    padding: 6px 8px;
+    font-size: 0.84rem;
     line-height: 1.1;
-  }
-
-  @media (max-width: 360px) {
-    .app-shell--reader .cbz-viewer__settings-group {
-      grid-template-columns: 1fr;
-      gap: 5px;
-    }
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .app-shell--reader .player-track-bar {
