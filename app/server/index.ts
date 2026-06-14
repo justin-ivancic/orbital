@@ -14,6 +14,11 @@ import {
 import { getEntryEmbeddedMediaTracks, renderEmbeddedSubtitleTrack, streamEmbeddedAudioTrack } from './embeddedMedia'
 import { openDatabase } from './database'
 import {
+  buildVersionedMediaPath,
+  isCurrentMediaVersion,
+  isStaleMediaVersion,
+} from './mediaVersion'
+import {
   assertRateLimitAllowed,
   clearRateLimitBuckets,
   consumeRateLimit,
@@ -773,27 +778,6 @@ const setPrivateVersionedCacheHeaders = (response: Response, version: unknown) =
   )
 }
 
-const getQueryStringValue = (value: unknown) => {
-  if (Array.isArray(value)) {
-    return typeof value[0] === 'string' ? value[0] : ''
-  }
-
-  return typeof value === 'string' ? value : ''
-}
-
-const rejectStaleMediaVersion = (request: Request, response: Response, currentVersion: string) => {
-  const requestedVersion = getQueryStringValue(request.query.v).trim()
-
-  if (!requestedVersion || requestedVersion === currentVersion) {
-    return false
-  }
-
-  response.status(410).json({
-    error: 'This media version is stale. Reopen the reader after the next library refresh.',
-  })
-  return true
-}
-
 app.get('/api/state', requireAuth, (request, response) => {
   const typedRequest = request as RequestWithUser
   response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
@@ -1264,13 +1248,13 @@ app.get('/api/media/cbz/:entryId/manifest', requireAuth, async (request, respons
     const stats = await fsPromises.stat(entry.filePath)
     const currentVersion = getCbzMediaVersion(stats)
 
-    if (rejectStaleMediaVersion(request, response, currentVersion)) {
-      return
-    }
-
     const archive = await loadCbzArchiveManifest(entry.filePath, stats)
     const versionQuery = `?v=${encodeURIComponent(currentVersion)}`
-    setPrivateVersionedCacheHeaders(response, request.query.v || currentVersion)
+    if (isCurrentMediaVersion(request.query, currentVersion)) {
+      setPrivateVersionedCacheHeaders(response, currentVersion)
+    } else {
+      response.setHeader('Cache-Control', 'private, no-cache')
+    }
     response.json({
       version: currentVersion,
       pageCount: archive.pageCount,
@@ -1303,7 +1287,9 @@ app.get('/api/media/cbz/:entryId/pages/:pageNumber', requireAuth, async (request
     const stats = await fsPromises.stat(entry.filePath)
     const currentVersion = getCbzMediaVersion(stats)
 
-    if (rejectStaleMediaVersion(request, response, currentVersion)) {
+    if (isStaleMediaVersion(request.query, currentVersion)) {
+      response.setHeader('Cache-Control', 'no-store')
+      response.redirect(307, buildVersionedMediaPath(request.originalUrl, currentVersion))
       return
     }
 
@@ -1314,7 +1300,10 @@ app.get('/api/media/cbz/:entryId/pages/:pageNumber', requireAuth, async (request
       throw new Error('Requested CBZ page was not found.')
     }
 
-    setPrivateVersionedCacheHeaders(response, request.query.v || currentVersion)
+    setPrivateVersionedCacheHeaders(
+      response,
+      isCurrentMediaVersion(request.query, currentVersion) ? currentVersion : '',
+    )
     await sendCbzPageImage(response, entry.filePath, page)
   } catch (error) {
     if (!response.headersSent) {

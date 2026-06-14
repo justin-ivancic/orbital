@@ -13,9 +13,10 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "start": "tsx server/index.ts",
-    "test": "npm run test:auth && npm run test:cbz && npm run test:rate-limit && npm run test:scan-status && npm run test:search",
+    "test": "npm run test:auth && npm run test:cbz && npm run test:media-version && npm run test:rate-limit && npm run test:scan-status && npm run test:search",
     "test:auth": "tsx --test server/authSecurity.test.ts",
     "test:cbz": "tsx --test server/cbzArchive.test.ts",
+    "test:media-version": "tsx --test server/mediaVersion.test.ts",
     "test:rate-limit": "tsx --test server/rateLimit.test.ts",
     "test:scan-status": "tsx --test server/scanStatus.test.ts",
     "test:search": "tsx --test server/searchIndex.test.ts"
