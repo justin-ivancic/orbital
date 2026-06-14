@@ -79,9 +79,11 @@ After the container starts:
 
 Container health:
 
-- `GET /healthz` returns a DB-backed health payload.
+- `GET /healthz` returns a cheap DB-backed liveness payload.
+- `GET /readyz` checks DB access, app data write access, cover cache write access, and the configured media root.
 - `GET /api/health` is kept for compatibility.
-- the Docker image includes a healthcheck against `/healthz`.
+- `GET /api/ready` is kept for environments that prefer API-prefixed probes.
+- the Docker image includes a healthcheck against `/readyz`.
 - the container runs as a non-root user, drops Linux capabilities, and defaults to localhost-only port binding.
 
 ## Persistence

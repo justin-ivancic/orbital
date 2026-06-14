@@ -758,8 +758,48 @@ const sendHealthResponse = (_request: Request, response: Response) => {
   }
 }
 
+const checkDirectoryAccess = (directoryPath: string, mode: number) => {
+  try {
+    fs.accessSync(directoryPath, mode)
+    return 'ok'
+  } catch {
+    return 'unavailable'
+  }
+}
+
+const sendReadyResponse = (_request: Request, response: Response) => {
+  response.setHeader('Cache-Control', 'no-store')
+
+  const readiness = {
+    database: 'unavailable',
+    dataDirectory: checkDirectoryAccess(dataDirectory, fs.constants.R_OK | fs.constants.W_OK),
+    coversDirectory: checkDirectoryAccess(coversDirectory, fs.constants.R_OK | fs.constants.W_OK),
+    mediaRoot: config.managedSourceRoot
+      ? checkDirectoryAccess(config.managedSourceRoot.storagePath, fs.constants.R_OK)
+      : 'not-configured',
+  }
+
+  try {
+    db.prepare('SELECT 1 AS ok').get()
+    readiness.database = 'ok'
+  } catch {
+    readiness.database = 'unavailable'
+  }
+
+  const ok = Object.values(readiness).every((status) => status === 'ok' || status === 'not-configured')
+
+  response.status(ok ? 200 : 503).json({
+    ok,
+    appName: config.appName,
+    checks: readiness,
+    now: new Date().toISOString(),
+  })
+}
+
 app.get('/api/health', sendHealthResponse)
 app.get('/healthz', sendHealthResponse)
+app.get('/api/ready', sendReadyResponse)
+app.get('/readyz', sendReadyResponse)
 
 app.post('/api/auth/login', async (request, response) => {
   const username = String(request.body?.username || '')
