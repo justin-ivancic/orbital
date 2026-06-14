@@ -103,6 +103,19 @@ const readerChromeInteractionSelector = [
 const isReaderChromeInteractionTarget = (target: EventTarget | null) =>
   target instanceof Element && Boolean(target.closest(readerChromeInteractionSelector))
 
+const preloadedPosterUrls = new Set<string>()
+
+const preloadPosterImage = (url: string) => {
+  if (typeof window === 'undefined' || preloadedPosterUrls.has(url)) {
+    return
+  }
+
+  preloadedPosterUrls.add(url)
+  const image = new Image()
+  image.decoding = 'async'
+  image.src = url
+}
+
 const ui = {
   en: {
     brandName: 'Orbital Library',
@@ -1134,6 +1147,20 @@ function App() {
   const sessionUser = appState?.user ?? bootstrapState?.user ?? null
   const authenticated = Boolean(sessionUser)
   const library = appState?.library ?? emptyLibrary
+
+  useEffect(() => {
+    if (!authenticated || !appState?.bookmarks.length) {
+      return
+    }
+
+    const coverUrlsBySeriesId = new Map(library.map((series) => [series.id, series.coverUrl]))
+    const bookmarkedCoverUrls = appState.bookmarks
+      .map((bookmark) => coverUrlsBySeriesId.get(bookmark.seriesId))
+      .filter((coverUrl): coverUrl is string => Boolean(coverUrl))
+
+    bookmarkedCoverUrls.slice(0, 48).forEach(preloadPosterImage)
+  }, [authenticated, appState?.bookmarks, library])
+
   const visibleLibrary = library.filter((series) => isReaderCategory(series.category))
   const selectedSeriesSummary =
     library.find((series) => series.id === selectedSeriesId) ?? null
@@ -2535,6 +2562,7 @@ function App() {
           <img
             alt=""
             className="poster__image"
+            decoding="async"
             loading="lazy"
             onError={(event) => {
               event.currentTarget.style.display = 'none'

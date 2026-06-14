@@ -1758,6 +1758,7 @@ const applyMetadataOverrideToPresentation = (
 
   const nextPresentation = { ...presentation }
   let hasMetadataTextOverride = false
+  let hasCoverOverride = false
 
   if (metadataOverride.year != null) {
     nextPresentation.year = metadataOverride.year
@@ -1793,10 +1794,15 @@ const applyMetadataOverrideToPresentation = (
     nextPresentation.coverMime =
       metadataOverride.cover_mime || mime.lookup(metadataOverride.cover_path) || 'application/octet-stream'
     nextPresentation.coverSource = 'Admin override cover'
+    hasCoverOverride = true
   }
 
   if (hasMetadataTextOverride) {
     nextPresentation.metadataSource = withAdminOverrideSuffix(nextPresentation.metadataSource)
+  }
+
+  if (hasMetadataTextOverride || hasCoverOverride) {
+    nextPresentation.metadataRefreshedAt = metadataOverride.updated_at || nowIso()
   }
 
   return nextPresentation
@@ -2419,11 +2425,43 @@ const formatSourceItemCount = (category: CategoryId, count: number) => {
   return `${count} indexed books`
 }
 
+const pickNewestTimestamp = (...timestamps: Array<string | null | undefined>) =>
+  timestamps.reduce<string | null>((newest, timestamp) => {
+    if (!timestamp) {
+      return newest
+    }
+
+    if (!newest) {
+      return timestamp
+    }
+
+    const timestampTime = new Date(timestamp).getTime()
+    const newestTime = new Date(newest).getTime()
+
+    if (!Number.isFinite(timestampTime)) {
+      return newest
+    }
+
+    if (!Number.isFinite(newestTime) || timestampTime > newestTime) {
+      return timestamp
+    }
+
+    return newest
+  }, null)
+
+const buildMediaVersionSuffix = (
+  media: { last_scan_at: string | null; metadata_refreshed_at?: string | null },
+) => {
+  const version = pickNewestTimestamp(media.last_scan_at, media.metadata_refreshed_at)
+
+  return version ? `?v=${encodeURIComponent(version)}` : ''
+}
+
 const mapSeriesRowToSummary = (
   series: SeriesRow,
   entryCount = series.file_count,
 ): SeriesSummary => {
-  const coverVersion = series.last_scan_at ? `?v=${encodeURIComponent(series.last_scan_at)}` : ''
+  const mediaVersion = buildMediaVersionSuffix(series)
 
   return {
     id: series.id,
@@ -2436,8 +2474,8 @@ const mapSeriesRowToSummary = (
     progressLabel: buildProgressLabel(series.category, entryCount),
     description: series.description,
     folder: series.folder_path,
-    coverUrl: series.cover_path ? `/api/media/cover/${series.id}${coverVersion}` : null,
-    bannerUrl: series.banner_path ? `/api/media/banner/${series.id}${coverVersion}` : null,
+    coverUrl: series.cover_path ? `/api/media/cover/${series.id}${mediaVersion}` : null,
+    bannerUrl: series.banner_path ? `/api/media/banner/${series.id}${mediaVersion}` : null,
     coverSource: series.cover_source,
     metadataSource: series.metadata_source,
     externalUrl: series.external_url,
@@ -2518,7 +2556,7 @@ const getMetadataQueue = (db: Database): MetadataQueueItem[] =>
     .prepare(
       `
         SELECT id, category, title, cover_source, metadata_source, remote_provider,
-               source_name, description, cover_path, last_scan_at
+               source_name, description, cover_path, last_scan_at, metadata_refreshed_at
         FROM series
         ORDER BY
           CASE
@@ -2541,12 +2579,13 @@ const getMetadataQueue = (db: Database): MetadataQueueItem[] =>
     description: string
     cover_path: string | null
     last_scan_at: string | null
+    metadata_refreshed_at: string | null
   }>).map((item) => ({
     id: item.id,
     category: item.category,
     title: item.title,
     coverUrl: item.cover_path && fileExists(item.cover_path)
-      ? `/api/media/cover/${item.id}${item.last_scan_at ? `?v=${encodeURIComponent(item.last_scan_at)}` : ''}`
+      ? `/api/media/cover/${item.id}${buildMediaVersionSuffix(item)}`
       : null,
     coverSource: item.cover_source,
     metadataSource: item.metadata_source,
