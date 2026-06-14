@@ -3700,6 +3700,7 @@ function App() {
       return (
         <div className="reader-layout">
           <CbzReader
+            entryId={currentVariant.id}
             fileUrl={currentVariant.fileUrl}
             initialPage={currentReaderStartPosition?.page ?? 1}
             initialPageOrderMode={useMangaPaging ? 'archive' : 'filename'}

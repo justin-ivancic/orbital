@@ -5,6 +5,11 @@ import { parse as parseCookie, serialize as serializeCookie } from 'cookie'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import mime from 'mime-types'
 import type { ScanLogEntry, ScanStatus } from '../src/appTypes.ts'
+import {
+  getCbzMediaVersion,
+  loadCbzArchiveManifest,
+  sendCbzPageImage,
+} from './cbzArchive'
 import { getEntryEmbeddedMediaTracks, renderEmbeddedSubtitleTrack, streamEmbeddedAudioTrack } from './embeddedMedia'
 import { openDatabase } from './database'
 import {
@@ -31,6 +36,7 @@ import {
   renderSubtitleTrackForBrowser,
   resetUserPassword,
   resolveEntryFilePath,
+  resolveEntryMediaFile,
   resolveSeriesBannerPath,
   resolveEntryTrack,
   resolveSeriesCoverPath,
@@ -441,6 +447,27 @@ const setPrivateVersionedCacheHeaders = (response: Response, version: unknown) =
   )
 }
 
+const getQueryStringValue = (value: unknown) => {
+  if (Array.isArray(value)) {
+    return typeof value[0] === 'string' ? value[0] : ''
+  }
+
+  return typeof value === 'string' ? value : ''
+}
+
+const rejectStaleMediaVersion = (request: Request, response: Response, currentVersion: string) => {
+  const requestedVersion = getQueryStringValue(request.query.v).trim()
+
+  if (!requestedVersion || requestedVersion === currentVersion) {
+    return false
+  }
+
+  response.status(410).json({
+    error: 'This media version is stale. Reopen the reader after the next library refresh.',
+  })
+  return true
+}
+
 app.get('/api/state', requireAuth, (request, response) => {
   const typedRequest = request as RequestWithUser
   response.json(getStatePayload(typedRequest.sessionUser))
@@ -770,6 +797,76 @@ app.get('/api/media/banner/:seriesId', requireAuth, async (request, response) =>
     await sendMediaFile(response, banner.filePath)
   } catch (error) {
     sendError(response, error, 404)
+  }
+})
+
+app.get('/api/media/cbz/:entryId/manifest', requireAuth, async (request, response) => {
+  try {
+    const entry = resolveEntryMediaFile(db, request.params.entryId)
+
+    if (entry.format !== 'cbz') {
+      throw new Error('Requested entry is not a CBZ archive.')
+    }
+
+    const stats = await fsPromises.stat(entry.filePath)
+    const currentVersion = getCbzMediaVersion(stats)
+
+    if (rejectStaleMediaVersion(request, response, currentVersion)) {
+      return
+    }
+
+    const archive = await loadCbzArchiveManifest(entry.filePath, stats)
+    const versionQuery = `?v=${encodeURIComponent(currentVersion)}`
+    setPrivateVersionedCacheHeaders(response, request.query.v || currentVersion)
+    response.json({
+      version: currentVersion,
+      pageCount: archive.pageCount,
+      pages: archive.pages.map((page) => ({
+        archiveIndex: page.archiveIndex,
+        name: page.name,
+        pageNumber: page.pageNumber,
+        url: `/api/media/cbz/${encodeURIComponent(entry.entryId)}/pages/${page.pageNumber}${versionQuery}`,
+      })),
+    })
+  } catch (error) {
+    sendError(response, error, 404)
+  }
+})
+
+app.get('/api/media/cbz/:entryId/pages/:pageNumber', requireAuth, async (request, response) => {
+  try {
+    const entry = resolveEntryMediaFile(db, request.params.entryId)
+
+    if (entry.format !== 'cbz') {
+      throw new Error('Requested entry is not a CBZ archive.')
+    }
+
+    const pageNumber = Number(request.params.pageNumber)
+
+    if (!Number.isInteger(pageNumber) || pageNumber < 1) {
+      throw new Error('Requested CBZ page was not found.')
+    }
+
+    const stats = await fsPromises.stat(entry.filePath)
+    const currentVersion = getCbzMediaVersion(stats)
+
+    if (rejectStaleMediaVersion(request, response, currentVersion)) {
+      return
+    }
+
+    const archive = await loadCbzArchiveManifest(entry.filePath, stats)
+    const page = archive.pages[pageNumber - 1]
+
+    if (!page) {
+      throw new Error('Requested CBZ page was not found.')
+    }
+
+    setPrivateVersionedCacheHeaders(response, request.query.v || currentVersion)
+    await sendCbzPageImage(response, entry.filePath, page)
+  } catch (error) {
+    if (!response.headersSent) {
+      sendError(response, error, 404)
+    }
   }
 })
 

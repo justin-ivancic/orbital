@@ -4383,15 +4383,33 @@ export const renderSubtitleTrackForBrowser = async (
 }
 
 export const resolveEntryFilePath = (db: Database, entryId: string) => {
+  return resolveEntryMediaFile(db, entryId).filePath
+}
+
+export const resolveEntryMediaFile = (db: Database, entryId: string) => {
   const entry = db
-    .prepare(`SELECT id, file_path FROM entries WHERE id = ? LIMIT 1`)
-    .get(entryId) as { id: string; file_path: string } | undefined
+    .prepare(`SELECT id, file_path, format, size, mtime_ms FROM entries WHERE id = ? LIMIT 1`)
+    .get(entryId) as
+    | {
+        id: string
+        file_path: string
+        format: EntryFormat
+        size: number
+        mtime_ms: number
+      }
+    | undefined
 
   if (!entry || !fileExists(entry.file_path)) {
     throw new Error('Requested media file was not found.')
   }
 
-  return entry.file_path
+  return {
+    entryId: entry.id,
+    filePath: entry.file_path,
+    format: entry.format,
+    size: entry.size,
+    mtimeMs: entry.mtime_ms,
+  }
 }
 
 export const resolveSeriesCoverPath = (db: Database, seriesId: string) => {

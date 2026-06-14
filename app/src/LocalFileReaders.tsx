@@ -1,4 +1,3 @@
-import JSZip from 'jszip'
 import ePub, {
   type Book as EpubBook,
   type Location as EpubLocation,
@@ -65,6 +64,7 @@ type PdfEmbedProps = {
 }
 
 type CbzReaderProps = {
+  entryId: string
   fileUrl: string
   title: string
   initialPage?: number
@@ -115,6 +115,16 @@ type CbzPage = {
   url: string
 }
 
+type CbzManifestResponse = {
+  pageCount: number
+  pages: Array<{
+    archiveIndex: number
+    name: string
+    pageNumber: number
+    url: string
+  }>
+}
+
 type CbzDisplayPage = {
   logicalPage: number
   slot: 'left' | 'right' | 'single'
@@ -128,6 +138,21 @@ type CbzScaleMode = 'manual' | 'fit-width'
 
 const naturalSort = (left: string, right: string) =>
   left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
+
+const getMediaVersionQuery = (fileUrl: string) => {
+  if (typeof window === 'undefined') {
+    return ''
+  }
+
+  try {
+    const url = new URL(fileUrl, window.location.origin)
+    const version = url.searchParams.get('v')
+
+    return version ? `?v=${encodeURIComponent(version)}` : ''
+  } catch {
+    return ''
+  }
+}
 
 const clampPage = (page: number, totalPages: number) =>
   Math.min(Math.max(page, 1), Math.max(totalPages, 1))
@@ -1241,6 +1266,7 @@ export function EpubReader({
 }
 
 export function CbzReader({
+  entryId,
   fileUrl,
   title,
   initialPage = 1,
@@ -1370,7 +1396,6 @@ export function CbzReader({
 
   useEffect(() => {
     let disposed = false
-    let activeUrls: string[] = []
 
     const load = async () => {
       setLoading(true)
@@ -1380,38 +1405,36 @@ export function CbzReader({
       didInitialScrollRef.current = false
 
       try {
-        const response = await fetch(fileUrl)
-
-        if (!response.ok) {
-          throw new Error(`Failed to load archive (${response.status})`)
-        }
-
-        const archive = await JSZip.loadAsync(await response.arrayBuffer())
-        const imageFiles = Object.values(archive.files).filter(
-          (entry) => !entry.dir && imagePattern.test(entry.name),
+        const response = await fetch(
+          `/api/media/cbz/${encodeURIComponent(entryId)}/manifest${getMediaVersionQuery(fileUrl)}`,
+          {
+            credentials: 'same-origin',
+          },
         )
 
-        if (imageFiles.length === 0) {
+        if (!response.ok) {
+          const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null
+          throw new Error(errorPayload?.error || `Failed to load CBZ manifest (${response.status})`)
+        }
+
+        const manifest = (await response.json()) as CbzManifestResponse
+
+        if (!manifest.pages.length) {
           throw new Error('No readable image pages found in this CBZ file.')
         }
 
-        const pageSources = await Promise.all(
-          imageFiles.map(async (entry, archiveIndex) => {
-            const blob = await entry.async('blob')
-            return {
-              archiveIndex,
-              name: entry.name,
-              url: URL.createObjectURL(blob),
-            }
-          }),
-        )
+        const pageSources = manifest.pages
+          .filter((page) => imagePattern.test(page.name))
+          .map((page, index) => ({
+            archiveIndex: Number.isFinite(page.archiveIndex) ? page.archiveIndex : index,
+            name: page.name,
+            url: page.url,
+          }))
 
         if (disposed) {
-          pageSources.forEach((page) => URL.revokeObjectURL(page.url))
           return
         }
 
-        activeUrls = pageSources.map((page) => page.url)
         setPages(pageSources)
         setVisiblePage(clampPage(initialPage, pageSources.length))
       } catch (loadError) {
@@ -1431,9 +1454,8 @@ export function CbzReader({
 
     return () => {
       disposed = true
-      activeUrls.forEach((url) => URL.revokeObjectURL(url))
     }
-  }, [fileUrl, initialPage])
+  }, [entryId, fileUrl, initialPage])
 
   const orderedPages = useMemo(
     () => orderCbzPages(pages, pageOrderMode),

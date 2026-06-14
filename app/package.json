@@ -13,8 +13,9 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "start": "tsx server/index.ts",
-    "test": "npm run test:auth",
-    "test:auth": "tsx --test server/authSecurity.test.ts"
+    "test": "npm run test:auth && npm run test:cbz",
+    "test:auth": "tsx --test server/authSecurity.test.ts",
+    "test:cbz": "tsx --test server/cbzArchive.test.ts"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.97",
