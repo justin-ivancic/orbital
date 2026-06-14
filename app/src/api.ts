@@ -13,6 +13,7 @@ import type {
   ResetPasswordPayload,
   SavedReadingPosition,
   ScopeId,
+  ScanStatusResponse,
   SearchResponse,
   SeriesResponse,
   UpdateSourcePayload,
@@ -134,6 +135,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(sourceId ? { sourceId } : {}),
     }),
+  getScanStatus: () => request<ScanStatusResponse>('/api/admin/scan/status'),
   resetPassword: (userId: string, payload: ResetPasswordPayload) =>
     request<AppState>(`/api/admin/users/${userId}/reset-password`, {
       method: 'POST',

@@ -36,9 +36,11 @@ import {
   findSessionContext,
   getAppState,
   getEntrySidecarMediaTracks,
+  getLatestScanStatus,
   getSeriesDetail,
   listDirectoriesForRoot,
   loginUser,
+  markInterruptedScans,
   maybeSeedDemoContent,
   clearMetadataOverride,
   removeBookmark,
@@ -80,6 +82,7 @@ const {
   coversDirectory,
 } = openDatabase(dataDirectory)
 pruneRateLimitBuckets(db)
+markInterruptedScans(db)
 
 const minutes = (value: number) => value * 60 * 1000
 const hours = (value: number) => value * 60 * 60 * 1000
@@ -223,6 +226,33 @@ let activeScanStatus: ScanStatus | null = null
 let activeScanPromise: Promise<void> | null = null
 
 const trimScanEvents = (events: ScanLogEntry[]) => events.slice(-120)
+const scanEventClients = new Set<Response>()
+
+const getCurrentScanStatus = () => activeScanStatus ?? getLatestScanStatus(db)
+
+const writeScanStreamEvent = (response: Response, eventName: string, payload: unknown) => {
+  response.write(`event: ${eventName}\n`)
+  response.write(`data: ${JSON.stringify(payload)}\n\n`)
+}
+
+const broadcastScanStreamEvent = (eventName: string, payload: unknown) => {
+  for (const response of scanEventClients) {
+    if (response.destroyed) {
+      scanEventClients.delete(response)
+      continue
+    }
+
+    try {
+      writeScanStreamEvent(response, eventName, payload)
+    } catch {
+      scanEventClients.delete(response)
+    }
+  }
+}
+
+const broadcastScanStatus = () => {
+  broadcastScanStreamEvent('status', getCurrentScanStatus())
+}
 
 const getStatePayload = (user: RequestWithUser['sessionUser'], csrfToken?: string | null) => ({
   ...getAppState(db, config, user, activeScanStatus),
@@ -257,6 +287,7 @@ const startBackgroundScan = (sourceId?: string) => {
     summary: sourceId ? 'Preparing folder scan…' : 'Preparing library scan…',
     events: [],
   }
+  broadcastScanStatus()
 
   const scanReporter = {
     onRunStarted: ({ runId, startedAt, totalSources }) => {
@@ -285,6 +316,7 @@ const startBackgroundScan = (sourceId?: string) => {
         currentSeries: null,
         summary: totalSources === 0 ? 'Nothing to scan.' : 'Scan started',
       }
+      broadcastScanStatus()
     },
     onProgress: ({
       runId,
@@ -324,6 +356,7 @@ const startBackgroundScan = (sourceId?: string) => {
         currentSeries,
         summary,
       }
+      broadcastScanStatus()
     },
     onEvent: (event) => {
       activeScanStatus = {
@@ -344,6 +377,8 @@ const startBackgroundScan = (sourceId?: string) => {
         }),
         events: trimScanEvents([...(activeScanStatus?.events || []), event]),
       }
+      broadcastScanStreamEvent('scan-event', event)
+      broadcastScanStatus()
     },
     onRunFinished: ({ runId, finishedAt, summary }) => {
       activeScanStatus = {
@@ -371,6 +406,7 @@ const startBackgroundScan = (sourceId?: string) => {
         summary,
         events: trimScanEvents(activeScanStatus?.events || []),
       }
+      broadcastScanStatus()
     },
   }
 
@@ -404,6 +440,7 @@ const startBackgroundScan = (sourceId?: string) => {
         currentSeries: null,
         summary: error instanceof Error ? error.message : 'Scan failed.',
       }
+      broadcastScanStatus()
     })
     .finally(() => {
       activeScanPromise = null
@@ -990,6 +1027,36 @@ app.post('/api/admin/scan', requireAdmin, async (request, response) => {
   } catch (error) {
     sendError(response, error)
   }
+})
+
+app.get('/api/admin/scan/status', requireAdmin, (_request, response) => {
+  response.json({ scanStatus: getCurrentScanStatus() })
+})
+
+app.get('/api/admin/scan/events', requireAdmin, (request, response) => {
+  response.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+  response.setHeader('Cache-Control', 'no-store')
+  response.setHeader('Connection', 'keep-alive')
+  response.setHeader('X-Accel-Buffering', 'no')
+  response.flushHeaders?.()
+  response.write('retry: 2000\n\n')
+  writeScanStreamEvent(response, 'status', getCurrentScanStatus())
+  scanEventClients.add(response)
+
+  const heartbeat = setInterval(() => {
+    if (response.destroyed) {
+      clearInterval(heartbeat)
+      scanEventClients.delete(response)
+      return
+    }
+
+    response.write(': heartbeat\n\n')
+  }, 15000)
+
+  request.on('close', () => {
+    clearInterval(heartbeat)
+    scanEventClients.delete(response)
+  })
 })
 
 app.post('/api/admin/users/:userId/reset-password', requireAdmin, async (request, response) => {

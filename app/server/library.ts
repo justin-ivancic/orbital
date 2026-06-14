@@ -1719,6 +1719,38 @@ const getStoredScanStatus = (db: Database): ScanStatus => {
   }
 }
 
+export const getLatestScanStatus = (db: Database) => getStoredScanStatus(db)
+
+export const markInterruptedScans = (db: Database) => {
+  const interruptedRuns = db
+    .prepare(
+      `
+        SELECT id
+        FROM scan_runs
+        WHERE status = 'running'
+      `,
+    )
+    .all() as Array<{ id: string }>
+
+  if (!interruptedRuns.length) {
+    return
+  }
+
+  const finishedAt = nowIso()
+  const summary = 'Scan was interrupted before completion.'
+
+  for (const run of interruptedRuns) {
+    appendScanEvent(db, run.id, 'error', summary)
+    db.prepare(
+      `
+        UPDATE scan_runs
+        SET finished_at = ?, status = 'error', summary = ?
+        WHERE id = ?
+      `,
+    ).run(finishedAt, summary, run.id)
+  }
+}
+
 const getMetadataOverride = (db: Database, seriesId: string) =>
   db
     .prepare(

@@ -54,6 +54,7 @@ import type {
   ReaderProgress,
   SavedReadingPosition,
   ScanLogEntry,
+  ScanStatus,
   ScopeId,
   SeriesDetail,
   SeriesSummary,
@@ -1140,6 +1141,7 @@ function App() {
   const readerTouchStartRef = useRef<{ edge: 'left' | 'right' | null; x: number; y: number } | null>(null)
   const lastReaderTouchToggleRef = useRef(0)
   const readerChromeTimerRef = useRef<number | null>(null)
+  const scanStreamWasActiveRef = useRef(false)
   const [readerChromeVisible, setReaderChromeVisible] = useState(true)
 
   const text = ui[language]
@@ -1379,32 +1381,52 @@ function App() {
 
     const pollState = async () => {
       try {
-        const nextState = await api.getState()
+        const { scanStatus: nextScanStatus } = await api.getScanStatus()
 
         if (!active) {
           return
         }
 
-        setAppState(nextState)
-        setSeriesCache((previousCache) => {
-          const validSeriesIds = new Set(nextState.library.map((series) => series.id))
-
-          return Object.fromEntries(
-            Object.entries(previousCache).filter(([seriesId]) => validSeriesIds.has(seriesId)),
-          )
-        })
-        setSelectedSeriesId((previousSeriesId) =>
-          previousSeriesId && nextState.library.some((series) => series.id === previousSeriesId)
-            ? previousSeriesId
-            : firstSeriesId(nextState),
+        setAppState((previousState) =>
+          previousState
+            ? {
+                ...previousState,
+                scanStatus: nextScanStatus,
+              }
+            : previousState,
         )
 
+        if (!nextScanStatus.active && (scanIsActive || scanPollUntil != null)) {
+          const nextState = await api.getState()
+
+          if (!active) {
+            return
+          }
+
+          api.setCsrfToken(nextState.csrfToken)
+          setBootstrapState(toBootstrapState(nextState))
+          setAppState(nextState)
+          setSeriesCache((previousCache) => {
+            const validSeriesIds = new Set(nextState.library.map((series) => series.id))
+
+            return Object.fromEntries(
+              Object.entries(previousCache).filter(([seriesId]) => validSeriesIds.has(seriesId)),
+            )
+          })
+          setSelectedSeriesId((previousSeriesId) =>
+            previousSeriesId && nextState.library.some((series) => series.id === previousSeriesId)
+              ? previousSeriesId
+              : firstSeriesId(nextState),
+          )
+          setScanClientNotice(null)
+        }
+
         const shouldKeepPolling =
-          nextState.scanStatus.active ||
+          nextScanStatus.active ||
           (scanPollUntil != null && Date.now() < scanPollUntil)
 
         if (shouldKeepPolling) {
-          timeout = window.setTimeout(pollState, nextState.scanStatus.active ? 1250 : 2000)
+          timeout = window.setTimeout(pollState, nextScanStatus.active ? 1250 : 2000)
         } else if (scanPollUntil != null) {
           setScanPollUntil(null)
         }
@@ -1429,6 +1451,84 @@ function App() {
       window.clearTimeout(timeout)
     }
   }, [appState?.user?.role, authenticated, scanIsActive, scanPollUntil])
+
+  useEffect(() => {
+    if (
+      !authenticated ||
+      appState?.user?.role !== 'admin' ||
+      typeof EventSource === 'undefined'
+    ) {
+      return
+    }
+
+    let active = true
+    scanStreamWasActiveRef.current = false
+    const eventSource = new EventSource('/api/admin/scan/events', { withCredentials: true })
+
+    const refreshFullState = async () => {
+      try {
+        const nextState = await api.getState()
+
+        if (!active) {
+          return
+        }
+
+        api.setCsrfToken(nextState.csrfToken)
+        setBootstrapState({
+          appName: nextState.appName,
+          bootstrapAdmin: nextState.bootstrapAdmin,
+          openSignup: nextState.openSignup,
+          user: nextState.user,
+          csrfToken: nextState.csrfToken,
+        })
+        setAppState(nextState)
+        setSeriesCache((previousCache) => {
+          const validSeriesIds = new Set(nextState.library.map((series) => series.id))
+
+          return Object.fromEntries(
+            Object.entries(previousCache).filter(([seriesId]) => validSeriesIds.has(seriesId)),
+          )
+        })
+        setSelectedSeriesId((previousSeriesId) =>
+          previousSeriesId && nextState.library.some((series) => series.id === previousSeriesId)
+            ? previousSeriesId
+            : firstSeriesId(nextState),
+        )
+      } catch {
+        setScanPollUntil(Date.now() + 30000)
+      }
+    }
+
+    eventSource.addEventListener('status', (message) => {
+      const nextScanStatus = JSON.parse((message as MessageEvent<string>).data) as ScanStatus
+      const wasActive = scanStreamWasActiveRef.current
+      scanStreamWasActiveRef.current = nextScanStatus.active
+
+      setAppState((previousState) =>
+        previousState
+          ? {
+              ...previousState,
+              scanStatus: nextScanStatus,
+            }
+          : previousState,
+      )
+
+      if (!nextScanStatus.active && wasActive) {
+        setScanPollUntil(null)
+        setScanClientNotice(null)
+        void refreshFullState()
+      }
+    })
+
+    eventSource.addEventListener('error', () => {
+      setScanPollUntil(Date.now() + 30000)
+    })
+
+    return () => {
+      active = false
+      eventSource.close()
+    }
+  }, [appState?.user?.role, authenticated])
 
   useEffect(() => {
     if (!selectedSeries || selectedSeries.category !== 'anime') {
