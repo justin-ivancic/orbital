@@ -67,6 +67,7 @@ type CbzReaderProps = {
   entryId: string
   fileUrl: string
   title: string
+  offlinePages?: CbzPage[]
   initialPage?: number
   initialViewMode?: ReaderViewMode
   initialReadingDirection?: 'ltr' | 'rtl'
@@ -1262,6 +1263,7 @@ export function CbzReader({
   entryId,
   fileUrl,
   title,
+  offlinePages,
   initialPage = 1,
   initialViewMode = 'single',
   initialReadingDirection = 'rtl',
@@ -1290,6 +1292,9 @@ export function CbzReader({
   const groupRefs = useRef<Array<HTMLDivElement | null>>([])
   const didInitialScrollRef = useRef(false)
   const settingsStorageKey = preferenceKey ? `cbz-reader-settings:${preferenceKey}` : null
+  const offlinePageSignature = offlinePages
+    ? offlinePages.map((page) => `${page.archiveIndex}:${page.url}`).join('|')
+    : ''
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -1398,6 +1403,28 @@ export function CbzReader({
       didInitialScrollRef.current = false
 
       try {
+        if (offlinePages?.length) {
+          const pageSources = offlinePages
+            .filter((page) => imagePattern.test(page.name))
+            .map((page, index) => ({
+              archiveIndex: Number.isFinite(page.archiveIndex) ? page.archiveIndex : index,
+              name: page.name,
+              url: page.url,
+            }))
+
+          if (!pageSources.length) {
+            throw new Error('No downloaded image pages found for this chapter.')
+          }
+
+          if (disposed) {
+            return
+          }
+
+          setPages(pageSources)
+          setVisiblePage(clampPage(initialPage, pageSources.length))
+          return
+        }
+
         const response = await fetch(
           `/api/media/cbz/${encodeURIComponent(entryId)}/manifest?refresh=${Date.now()}`,
           {
@@ -1449,7 +1476,7 @@ export function CbzReader({
     return () => {
       disposed = true
     }
-  }, [entryId, fileUrl, initialPage])
+  }, [entryId, fileUrl, initialPage, offlinePageSignature, offlinePages])
 
   const orderedPages = useMemo(
     () => orderCbzPages(pages, pageOrderMode),

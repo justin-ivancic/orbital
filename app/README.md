@@ -14,6 +14,8 @@ Orbital Library is a self-hosted media library for browsing and reading locally 
 - Incremental scanning for anime, manga, novels, books, and magazines
 - Authenticated local media serving
 - Local cover fallbacks for folders, PDFs, CBZ files, and generated placeholders
+- PWA app shell with explicit offline downloads for chapters, books, and series
+- Downloads management with estimated size, verified local bytes, browser quota, repair, and delete controls
 
 The repository does not include personal media, databases, logs, generated builds, or local environment files.
 
@@ -86,6 +88,14 @@ Container health:
 - the Docker image includes a healthcheck against `/healthz`; keep stricter readiness checks out of Docker routing so a slow or temporarily unavailable media mount does not make the app disappear for new clients.
 - the container entrypoint repairs `/app/data` ownership for existing persistent volumes, then runs the app as the non-root `node` user when possible.
 - the provided Compose file drops Linux capabilities and defaults to localhost-only port binding.
+
+PWA and offline download routing:
+
+- `/sw.js` is served from the site root with `Service-Worker-Allowed: /` and `Cache-Control: no-cache`.
+- `/api/offline/capabilities`, `/api/offline/estimate`, and `/api/offline/manifests` describe authenticated download packages without creating server-side archives.
+- `/api/offline/manifests/:manifestId/resources/:resourceKey` streams versioned package resources with private immutable headers.
+- The browser stores downloaded package metadata and blobs in IndexedDB. Server files, bookmarks, users, and scans are not changed by deleting a device download.
+- Reverse proxies and Cloudflare rules should bypass cache for `/api/*`, `/api/media/*`, and `/api/offline/*`. Cache only built static assets such as `/assets/*`.
 
 ## Persistence
 

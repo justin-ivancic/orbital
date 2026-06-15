@@ -10,6 +10,10 @@ import type {
   DirectoryListing,
   MetadataOverridePayload,
   MediaTracksResponse,
+  OfflineCapabilities,
+  OfflineDownloadEstimate,
+  OfflineDownloadManifest,
+  OfflineDownloadTarget,
   ResetPasswordPayload,
   SavedReadingPosition,
   ScopeId,
@@ -74,6 +78,17 @@ export const api = {
   getSeries: (seriesId: string) => request<SeriesResponse>(`/api/series/${seriesId}`),
   getEntryTracks: (entryId: string) =>
     request<MediaTracksResponse>(`/api/media-tracks/${entryId}`),
+  getOfflineCapabilities: () => request<OfflineCapabilities>('/api/offline/capabilities'),
+  estimateOfflineDownload: (target: OfflineDownloadTarget) =>
+    request<OfflineDownloadEstimate>('/api/offline/estimate', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    }),
+  createOfflineManifest: (target: OfflineDownloadTarget) =>
+    request<OfflineDownloadManifest>('/api/offline/manifests', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    }),
   search: (query: string, scope: ScopeId) =>
     request<SearchResponse>(
       `/api/search?q=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}`,

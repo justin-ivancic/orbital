@@ -2,7 +2,7 @@ export const categoryOrder = ['anime', 'manga', 'novels', 'books', 'magazines'] 
 
 export type CategoryId = (typeof categoryOrder)[number]
 export type Language = 'en' | 'de'
-export type ViewId = 'bookmarks' | 'library' | 'search' | 'series' | 'reader' | 'creator' | 'profile' | 'admin'
+export type ViewId = 'bookmarks' | 'library' | 'search' | 'downloads' | 'series' | 'reader' | 'creator' | 'profile' | 'admin'
 export type SeriesTabId = 'overview' | 'entries' | 'comments'
 export type ScopeId = 'all' | CategoryId
 export type Role = 'admin' | 'member'
@@ -131,6 +131,121 @@ export type EntryVariant = {
   fileUrl: string
   downloadUrl: string
   mediaTracks: MediaTrackCollection
+}
+
+export type OfflineDownloadTarget =
+  | {
+      type: 'entry'
+      entryId: string
+    }
+  | {
+      type: 'series'
+      seriesId: string
+    }
+
+export type OfflineResourceKind = 'cbz-page' | 'file' | 'cover' | 'banner'
+
+export type OfflineDownloadResource = {
+  key: string
+  kind: OfflineResourceKind
+  entryId?: string
+  seriesId?: string
+  pageNumber?: number
+  label: string
+  url: string
+  onlineUrl: string
+  contentType: string
+  size: number
+  version: string
+  required: boolean
+}
+
+export type OfflineManifestEntry = {
+  entryId: string
+  label: string
+  title: string
+  format: EntryFormat
+  version: string
+  pageCount: number | null
+  resourceKeys: string[]
+}
+
+export type OfflineDownloadManifest = {
+  protocolVersion: 1
+  manifestId: string
+  serverInstanceId: string
+  ownerUserId: string
+  ownerUsername: string
+  target: OfflineDownloadTarget
+  contentKey: string
+  title: string
+  seriesTitle: string
+  subtitle: string
+  category: CategoryId
+  createdAt: string
+  estimatedBytes: number
+  resourceCount: number
+  entryCount: number
+  entries: OfflineManifestEntry[]
+  resources: OfflineDownloadResource[]
+}
+
+export type OfflineDownloadEstimate = {
+  target: OfflineDownloadTarget
+  title: string
+  subtitle: string
+  category: CategoryId
+  estimatedBytes: number
+  resourceCount: number
+  entryCount: number
+}
+
+export type OfflineCapabilities = {
+  protocolVersion: 1
+  serverInstanceId: string
+  appName: string
+  supports: {
+    cbzPages: boolean
+    wholeFiles: boolean
+    seriesPackages: boolean
+    rangeRequests: boolean
+  }
+}
+
+export type OfflineDownloadStatus =
+  | 'queued'
+  | 'downloading'
+  | 'ready'
+  | 'partial'
+  | 'failed'
+  | 'stale'
+  | 'deleting'
+
+export type OfflineDownloadRecord = {
+  id: string
+  manifest: OfflineDownloadManifest
+  ownerUserId: string
+  ownerUsername: string
+  status: OfflineDownloadStatus
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
+  downloadedBytes: number
+  verifiedBytes: number
+  resourceCount: number
+  downloadedResourceCount: number
+  failureReason: string | null
+}
+
+export type OfflineStorageSummary = {
+  downloadedBytes: number
+  verifiedBytes: number
+  downloadCount: number
+  readyCount: number
+  partialCount: number
+  browserUsageBytes: number | null
+  browserQuotaBytes: number | null
+  persistent: boolean | null
 }
 
 export type SeriesComment = {

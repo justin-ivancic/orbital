@@ -19,6 +19,12 @@ import {
   isStaleMediaVersion,
 } from './mediaVersion'
 import {
+  buildOfflineEstimate,
+  buildOfflineManifest,
+  getOfflineCapabilities,
+  resolveOfflineResource,
+} from './offline'
+import {
   assertRateLimitAllowed,
   clearRateLimitBuckets,
   consumeRateLimit,
@@ -721,12 +727,14 @@ const sendMediaFile = async (
   const entityTag = buildMediaEntityTag(stats)
 
   if (!response.hasHeader('Cache-Control')) {
-    response.setHeader('Cache-Control', 'private, max-age=0, must-revalidate')
+    response.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate, no-transform')
   }
 
   response.setHeader('Accept-Ranges', 'bytes')
   response.setHeader('ETag', entityTag)
   response.setHeader('Last-Modified', stats.mtime.toUTCString())
+  response.setHeader('X-Content-Type-Options', 'nosniff')
+  response.setHeader('Vary', 'Cookie, Authorization')
   response.setHeader(
     'Content-Disposition',
     `inline; filename*=UTF-8''${safeFileName}`,
@@ -774,8 +782,11 @@ const hasCacheVersion = (version: unknown) => typeof version === 'string' && ver
 const setPrivateVersionedCacheHeaders = (response: Response, version: unknown) => {
   response.setHeader(
     'Cache-Control',
-    hasCacheVersion(version) ? 'private, max-age=2592000, immutable' : 'private, max-age=300',
+    hasCacheVersion(version)
+      ? 'private, max-age=2592000, immutable, no-transform'
+      : 'private, no-cache, max-age=0, must-revalidate, no-transform',
   )
+  response.setHeader('Vary', 'Cookie, Authorization')
 }
 
 app.get('/api/state', requireAuth, (request, response) => {
@@ -1215,6 +1226,92 @@ app.post('/api/admin/series/:seriesId/metadata-refresh', requireAdmin, async (re
   }
 })
 
+app.get('/api/offline/capabilities', requireAuth, (request, response) => {
+  void request
+  response.setHeader('Cache-Control', 'no-store')
+  response.json(getOfflineCapabilities(db, config.appName))
+})
+
+app.post('/api/offline/estimate', requireAuth, async (request, response) => {
+  try {
+    const typedRequest = request as RequestWithUser
+    response.setHeader('Cache-Control', 'no-store')
+    response.json(await buildOfflineEstimate(db, typedRequest.sessionUser, request.body?.target))
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
+app.post('/api/offline/manifests', requireAuth, async (request, response) => {
+  try {
+    const typedRequest = request as RequestWithUser
+    response.setHeader('Cache-Control', 'no-store')
+    response.json(await buildOfflineManifest(db, typedRequest.sessionUser, request.body?.target))
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
+const setOfflineResourceHeaders = (response: Response, entityTag: string) => {
+  response.setHeader('Cache-Control', 'private, max-age=31536000, immutable, no-transform')
+  response.setHeader('ETag', entityTag)
+  response.setHeader('Vary', 'Cookie, Authorization')
+  response.setHeader('X-Content-Type-Options', 'nosniff')
+}
+
+const requestMatchesEntityTag = (request: Request, entityTag: string) =>
+  request
+    .get('if-none-match')
+    ?.split(',')
+    .map((tag) => tag.trim())
+    .includes(entityTag) ?? false
+
+const sendOfflineResource = async (request: Request, response: Response) => {
+  try {
+    const typedRequest = request as RequestWithUser
+    const resource = await resolveOfflineResource(
+      db,
+      typedRequest.sessionUser,
+      request.params.resourceKey,
+    )
+
+    setOfflineResourceHeaders(response, resource.entityTag)
+
+    if (requestMatchesEntityTag(request, resource.entityTag)) {
+      response.status(304).end()
+      return
+    }
+
+    if (resource.kind === 'file') {
+      response.setHeader('Content-Type', resource.contentType)
+      await sendMediaFile(request, response, resource.filePath, request.headers.range)
+      return
+    }
+
+    response.setHeader('Content-Type', resource.page.contentType)
+    response.setHeader('Content-Length', resource.page.uncompressedSize)
+    response.setHeader(
+      'Content-Disposition',
+      `inline; filename*=UTF-8''${encodeURIComponent(resource.page.fileName)}`,
+    )
+
+    if (request.method === 'HEAD') {
+      response.status(200).end()
+      return
+    }
+
+    await sendCbzPageImage(response, resource.filePath, resource.page)
+  } catch (error) {
+    if (!response.headersSent) {
+      const message = error instanceof Error ? error.message : ''
+      sendError(response, error, message.includes('stale') ? 409 : 404)
+    }
+  }
+}
+
+app.head('/api/offline/manifests/:manifestId/resources/:resourceKey', requireAuth, sendOfflineResource)
+app.get('/api/offline/manifests/:manifestId/resources/:resourceKey', requireAuth, sendOfflineResource)
+
 app.get('/api/media/cover/:seriesId', requireAuth, async (request, response) => {
   try {
     const cover = resolveSeriesCoverPath(db, request.params.seriesId)
@@ -1385,6 +1482,13 @@ if (fs.existsSync(distDirectory)) {
     express.static(distDirectory, {
       setHeaders: (response, filePath) => {
         const relativePath = path.relative(distDirectory, filePath).replace(/\\/g, '/')
+
+        if (relativePath === 'sw.js') {
+          response.setHeader('Cache-Control', 'no-cache, max-age=0, must-revalidate')
+          response.setHeader('Service-Worker-Allowed', '/')
+          response.setHeader('Content-Type', 'text/javascript; charset=utf-8')
+          return
+        }
 
         if (relativePath.startsWith('assets/')) {
           response.setHeader('Cache-Control', 'public, max-age=31536000, immutable')

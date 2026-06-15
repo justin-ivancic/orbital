@@ -189,6 +189,12 @@ export const openDatabase = (dataDirectory: string) => {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_expiry
       ON rate_limit_buckets (window_reset_at, blocked_until);
   `)

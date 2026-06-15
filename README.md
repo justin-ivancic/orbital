@@ -12,6 +12,8 @@ The repository ships as an empty library app. It does not include personal media
 - Authenticated file streaming from mounted local folders
 - Reader and player support for books, novels, manga, magazines, and video
 - Bookmark and reading-position tracking per user
+- Device-local offline downloads for chapters, books, and series through the PWA
+- Downloads screen with estimated size, verified local bytes, browser quota, repair, and delete controls
 - Series comments and basic account management
 - Optional metadata refresh through remote providers
 - Docker-friendly deployment with bind-mounted media and app data
@@ -109,6 +111,7 @@ Orbital is built around local ownership:
 
 - media files remain in your mounted folder
 - SQLite data stays in the configured app data directory
+- offline downloads are explicit per-device browser storage, scoped to the signed-in Orbital user
 - `.env`, databases, generated builds, logs, test artifacts, and media folders are ignored by Git
 - demo seeding is disabled unless explicitly configured with `APP_ENABLE_DEMO_SEED=1`
 
@@ -132,6 +135,9 @@ app/
 - Mount media read-only when possible.
 - Keep the default localhost Docker bind unless a reverse proxy or firewall protects the app.
 - Use `/healthz` for container and reverse-proxy health checks.
+- Serve `/sw.js` with `Service-Worker-Allowed: /` and `Cache-Control: no-cache`; the bundled server does this automatically.
+- Do not edge-cache `/api/*`, `/api/media/*`, `/api/offline/*`, or other authenticated media routes. Cache only immutable built assets such as `/assets/*`.
+- Keep proxy compression/transforms off for media responses so range requests and offline byte verification remain stable.
 - Keep `data/` backed up if bookmarks, users, comments, and scan state matter.
 - Do not commit `.env`, local databases, media folders, or generated builds.
 

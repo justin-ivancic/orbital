@@ -7,6 +7,7 @@ import {
   useDeferredValue,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -24,7 +25,9 @@ import {
   Check,
   ChevronRight,
   Compass,
+  Download,
   FolderOpen,
+  HardDrive,
   KeyRound,
   Languages,
   LayoutGrid,
@@ -32,12 +35,16 @@ import {
   List as ListIcon,
   LogOut,
   MoreVertical,
+  Pause,
+  Play,
   RefreshCw,
   Search as SearchIcon,
   Settings as SettingsIcon,
   ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   UserRound,
+  WifiOff,
   X,
   type LucideIcon,
 } from 'lucide-react'
@@ -48,9 +55,14 @@ import type {
   Bookmark,
   BootstrapState,
   CategoryId,
+  EntryFormat,
   EntryVariant,
   Language,
   LibraryEntry,
+  OfflineDownloadManifest,
+  OfflineDownloadRecord,
+  OfflineDownloadTarget,
+  OfflineStorageSummary,
   ReaderProgress,
   SavedReadingPosition,
   ScanLogEntry,
@@ -62,6 +74,18 @@ import type {
   ViewId,
 } from './appTypes'
 import { categoryOrder } from './appTypes'
+import {
+  createOfflineDownloadRecord,
+  deleteAllOfflineDownloadsForUser,
+  deleteOfflineDownload,
+  getLastOfflineProfile,
+  getOfflineResourceUrl,
+  getOfflineStorageSummary,
+  listOfflineDownloads,
+  putOfflineDownload,
+  putOfflineResource,
+  requestOfflineStoragePersistence,
+} from './offlineStorage'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
 
 const CbzReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.CbzReader })))
@@ -366,6 +390,36 @@ const ui = {
     resetLocalCache: 'Reset local cache',
     resetLocalCacheBusy: 'Resetting cache...',
     resetLocalCacheHelp: 'Clears this device’s reader cache and reloads Orbital. Server bookmarks, accounts, and scans stay intact.',
+    downloadsTitle: 'Downloads',
+    downloadsBody: 'Downloaded items live only on this device so Orbital can open them offline.',
+    downloadsEmpty: 'Nothing downloaded on this device yet.',
+    downloadsStorage: 'Device storage',
+    downloadsReady: 'Available offline',
+    downloadsPartial: 'Needs attention',
+    downloadsActive: 'Downloading',
+    downloadsAll: 'All downloads',
+    downloadForOffline: 'Download',
+    downloadSeries: 'Download series',
+    downloadEntry: 'Download chapter',
+    downloadBook: 'Download book',
+    downloadAgain: 'Download again',
+    openOffline: 'Open offline',
+    deleteDownload: 'Delete download',
+    deleteAllDownloads: 'Delete all downloads',
+    requestPersistentStorage: 'Protect downloads',
+    persistentStorageGranted: 'Protected by browser storage',
+    persistentStorageHelp: 'Ask the browser not to evict downloaded media when space is low.',
+    offlineMode: 'Offline mode',
+    offlineModeHelp: 'The server is unreachable, so only downloads stored on this device are available.',
+    downloadedBytes: 'Downloaded',
+    estimatedBytes: 'Estimated',
+    verifiedBytes: 'Verified',
+    browserStorageUsed: 'Browser storage used',
+    browserStorageQuota: 'Browser storage limit',
+    downloadFailed: 'Download failed',
+    downloadStale: 'Server copy changed',
+    repairDownload: 'Repair',
+    downloadsDeviceOnly: 'Server files, bookmarks, and accounts stay unchanged.',
     authAction: 'Open library',
     adminBootstrap: 'Reserved bootstrap admin',
     searchPlaceholder: 'Search every shelf, series, and file',
@@ -379,6 +433,7 @@ const ui = {
     },
     nav: {
       bookmarks: 'Bookmarks',
+      downloads: 'Downloads',
       anime: 'Anime',
       manga: 'Manga',
       novels: 'Novels',
@@ -389,6 +444,7 @@ const ui = {
       library: 'Library',
       discover: 'Discover',
       search: 'Search',
+      downloads: 'Downloads',
       profile: 'Profile',
     },
     profile: 'Profile',
@@ -604,6 +660,36 @@ const ui = {
     resetLocalCache: 'Lokalen Cache zurücksetzen',
     resetLocalCacheBusy: 'Cache wird zurückgesetzt...',
     resetLocalCacheHelp: 'Leert den Reader-Cache auf diesem Gerät und lädt Orbital neu. Server-Lesezeichen, Accounts und Scans bleiben erhalten.',
+    downloadsTitle: 'Downloads',
+    downloadsBody: 'Heruntergeladene Inhalte liegen nur auf diesem Geraet, damit Orbital sie offline oeffnen kann.',
+    downloadsEmpty: 'Auf diesem Geraet ist noch nichts heruntergeladen.',
+    downloadsStorage: 'Geraetespeicher',
+    downloadsReady: 'Offline verfuegbar',
+    downloadsPartial: 'Braucht Aufmerksamkeit',
+    downloadsActive: 'Laedt herunter',
+    downloadsAll: 'Alle Downloads',
+    downloadForOffline: 'Herunterladen',
+    downloadSeries: 'Serie herunterladen',
+    downloadEntry: 'Kapitel herunterladen',
+    downloadBook: 'Buch herunterladen',
+    downloadAgain: 'Erneut herunterladen',
+    openOffline: 'Offline oeffnen',
+    deleteDownload: 'Download loeschen',
+    deleteAllDownloads: 'Alle Downloads loeschen',
+    requestPersistentStorage: 'Downloads schuetzen',
+    persistentStorageGranted: 'Vom Browser geschuetzt',
+    persistentStorageHelp: 'Bitte den Browser, heruntergeladene Medien bei wenig Speicher nicht automatisch zu entfernen.',
+    offlineMode: 'Offline-Modus',
+    offlineModeHelp: 'Der Server ist nicht erreichbar, daher sind nur Downloads auf diesem Geraet verfuegbar.',
+    downloadedBytes: 'Heruntergeladen',
+    estimatedBytes: 'Geschaetzt',
+    verifiedBytes: 'Geprueft',
+    browserStorageUsed: 'Browser-Speicher genutzt',
+    browserStorageQuota: 'Browser-Speicherlimit',
+    downloadFailed: 'Download fehlgeschlagen',
+    downloadStale: 'Server-Kopie geaendert',
+    repairDownload: 'Reparieren',
+    downloadsDeviceOnly: 'Server-Dateien, Lesezeichen und Accounts bleiben unveraendert.',
     authAction: 'Bibliothek öffnen',
     adminBootstrap: 'Reservierter Bootstrap-Admin',
     searchPlaceholder: 'Alle Regale, Serien und Dateien durchsuchen',
@@ -617,6 +703,7 @@ const ui = {
     },
     nav: {
       bookmarks: 'Lesezeichen',
+      downloads: 'Downloads',
       anime: 'Anime',
       manga: 'Manga',
       novels: 'Novels',
@@ -627,6 +714,7 @@ const ui = {
       library: 'Bibliothek',
       discover: 'Entdecken',
       search: 'Suche',
+      downloads: 'Downloads',
       profile: 'Profil',
     },
     profile: 'Profil',
@@ -830,6 +918,7 @@ const posterColors: Record<CategoryId, [string, string]> = {
 type AppIconName =
   | 'library'
   | 'discover'
+  | 'download'
   | 'search'
   | 'profile'
   | 'read'
@@ -844,11 +933,16 @@ type AppIconName =
   | 'back'
   | 'up'
   | 'folder'
+  | 'hardDrive'
+  | 'pause'
+  | 'play'
   | 'refresh'
   | 'check'
+  | 'trash'
   | 'grid'
   | 'list'
   | 'filter'
+  | 'offline'
 
 const appIconComponents: Record<AppIconName, LucideIcon> = {
   admin: ShieldCheck,
@@ -857,20 +951,26 @@ const appIconComponents: Record<AppIconName, LucideIcon> = {
   chevronRight: ChevronRight,
   close: X,
   discover: Compass,
+  download: Download,
   filter: SlidersHorizontal,
   folder: FolderOpen,
   grid: LayoutGrid,
+  hardDrive: HardDrive,
   key: KeyRound,
   language: Languages,
   library: LibraryIcon,
   list: ListIcon,
   logout: LogOut,
   more: MoreVertical,
+  offline: WifiOff,
+  pause: Pause,
+  play: Play,
   profile: UserRound,
   read: BookOpen,
   refresh: RefreshCw,
   search: SearchIcon,
   settings: SettingsIcon,
+  trash: Trash2,
   up: ArrowUp,
 }
 
@@ -996,6 +1096,136 @@ const formatCountLabel = (category: CategoryId, count: number, language: Languag
   if (category === 'novels') return `${count} ${count === 1 ? 'chapter' : 'chapters'}`
   if (category === 'magazines') return `${count} ${count === 1 ? 'issue' : 'issues'}`
   return `${count} ${count === 1 ? 'file' : 'files'}`
+}
+
+const formatBytes = (value: number | null | undefined, language: Language) => {
+  if (!Number.isFinite(value) || value == null || value < 0) {
+    return language === 'de' ? 'Unbekannt' : 'Unknown'
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let size = value
+  let unitIndex = 0
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+
+  const formatter = new Intl.NumberFormat(language === 'de' ? 'de-DE' : 'en-US', {
+    maximumFractionDigits: unitIndex === 0 ? 0 : size >= 100 ? 0 : 1,
+  })
+
+  return `${formatter.format(size)} ${units[unitIndex]}`
+}
+
+const getOfflineTargetKey = (target: OfflineDownloadTarget) =>
+  target.type === 'entry' ? `entry:${target.entryId}` : `series:${target.seriesId}`
+
+const isOfflineDownloadActive = (record: OfflineDownloadRecord) =>
+  record.status === 'queued' || record.status === 'downloading'
+
+const getPrimaryResourceForEntry = (
+  manifest: OfflineDownloadManifest,
+  entryId: string,
+) => {
+  const manifestEntry = manifest.entries.find((entry) => entry.entryId === entryId)
+
+  if (!manifestEntry) {
+    return null
+  }
+
+  return manifest.resources.find((resource) => resource.key === manifestEntry.resourceKeys[0]) ?? null
+}
+
+const buildOfflinePagesForEntry = (
+  manifest: OfflineDownloadManifest,
+  entryId: string,
+) => {
+  const manifestEntry = manifest.entries.find((entry) => entry.entryId === entryId)
+
+  if (!manifestEntry || manifestEntry.format !== 'cbz') {
+    return null
+  }
+
+  return manifestEntry.resourceKeys
+    .map((resourceKey, index) => {
+      const resource = manifest.resources.find((item) => item.key === resourceKey)
+
+      if (!resource || resource.kind !== 'cbz-page') {
+        return null
+      }
+
+      return {
+        archiveIndex: index,
+        name: resource.label,
+        url: getOfflineResourceUrl(resource.key),
+      }
+    })
+    .filter((page): page is { archiveIndex: number; name: string; url: string } => Boolean(page))
+}
+
+const buildOfflineSeriesDetail = (record: OfflineDownloadRecord): SeriesDetail => {
+  const { manifest } = record
+  const seriesId =
+    manifest.target.type === 'series'
+      ? manifest.target.seriesId
+      : manifest.resources.find((resource) => resource.seriesId)?.seriesId || manifest.manifestId
+  const variants = manifest.entries.map((entry): LibraryEntry => {
+    const primaryResource = getPrimaryResourceForEntry(manifest, entry.entryId)
+    const fileUrl = primaryResource ? getOfflineResourceUrl(primaryResource.key) : '#'
+
+    return {
+      id: entry.entryId,
+      label: entry.label,
+      title: entry.title,
+      details: `${entry.format.toUpperCase()} offline copy`,
+      chapterNumber: null,
+      seasonNumber: null,
+      episodeNumber: null,
+      preferredVariantId: entry.entryId,
+      variants: [
+        {
+          id: entry.entryId,
+          variantLabel: 'offline',
+          storageFile: entry.title,
+          format: entry.format,
+          details: `${entry.format.toUpperCase()} offline copy`,
+          fileUrl,
+          downloadUrl: fileUrl,
+          mediaTracks: { audio: [], subtitles: [] },
+        },
+      ],
+    }
+  })
+
+  return {
+    id: seriesId,
+    title: manifest.seriesTitle,
+    titleShort: manifest.seriesTitle,
+    category: manifest.category,
+    year: null,
+    format: manifest.entries.map((entry) => entry.format.toUpperCase()).join(', '),
+    status: record.status === 'ready' ? 'Downloaded' : record.status,
+    progressLabel: `${manifest.entryCount} offline ${manifest.entryCount === 1 ? 'item' : 'items'}`,
+    description: manifest.subtitle,
+    folder: 'This device',
+    coverUrl: null,
+    bannerUrl: null,
+    coverSource: 'Offline package',
+    metadataSource: 'Offline package',
+    externalUrl: null,
+    sourceName: null,
+    sourceRole: null,
+    genres: [],
+    tags: [],
+    stats: {
+      fileCount: manifest.entryCount,
+      lastScanAt: record.completedAt,
+    },
+    entries: variants,
+    comments: [],
+  }
 }
 
 const buildReaderLocation = (
@@ -1343,6 +1573,14 @@ function App() {
   const [passwordChangeSuccess, setPasswordChangeSuccess] = useState<string | null>(null)
   const [currentView, setCurrentView] = useState<ViewId>('bookmarks')
   const [readerReturnView, setReaderReturnView] = useState<ReaderReturnView>('bookmarks')
+  const [offlineMode, setOfflineMode] = useState(false)
+  const [offlineDownloads, setOfflineDownloads] = useState<OfflineDownloadRecord[]>([])
+  const [offlineStorageSummary, setOfflineStorageSummary] =
+    useState<OfflineStorageSummary | null>(null)
+  const [offlineFilter, setOfflineFilter] = useState<'active' | 'ready' | 'attention' | 'all'>('all')
+  const [offlineBusyIds, setOfflineBusyIds] = useState<Record<string, string>>({})
+  const [offlineReaderDownloadId, setOfflineReaderDownloadId] = useState<string | null>(null)
+  const [persistentStorageBusy, setPersistentStorageBusy] = useState(false)
   const [currentCategory, setCurrentCategory] = useState<CategoryId>(defaultReaderCategory)
   const [bookmarkFilter, setBookmarkFilter] = useState<ScopeId>('all')
   const [openBookmarkMenuKey, setOpenBookmarkMenuKey] = useState<string | null>(null)
@@ -1415,6 +1653,14 @@ function App() {
   const sessionUser = appState?.user ?? bootstrapState?.user ?? null
   const authenticated = Boolean(sessionUser)
   const library = appState?.library ?? emptyLibrary
+  const activeOfflineDownload =
+    offlineReaderDownloadId
+      ? offlineDownloads.find((record) => record.id === offlineReaderDownloadId) ?? null
+      : null
+  const activeOfflineSeries = useMemo(
+    () => (activeOfflineDownload ? buildOfflineSeriesDetail(activeOfflineDownload) : null),
+    [activeOfflineDownload],
+  )
 
   useEffect(() => {
     if (!authenticated || !appState?.bookmarks.length) {
@@ -1468,14 +1714,16 @@ function App() {
   }, [authenticated, library])
 
   const selectedSeriesSummary =
-    library.find((series) => series.id === selectedSeriesId) ?? null
+    library.find((series) => series.id === selectedSeriesId) ??
+    (activeOfflineSeries?.id === selectedSeriesId ? activeOfflineSeries : null)
   const selectedSeriesDisplayTitle = selectedSeriesSummary
     ? getSeriesDisplayTitle(selectedSeriesSummary)
     : null
   const scanStatus = appState?.scanStatus ?? null
   const scanIsActive = Boolean(scanStatus?.active)
   const selectedSeries =
-    (selectedSeriesId ? seriesCache[selectedSeriesId] : null) || null
+    (selectedSeriesId ? seriesCache[selectedSeriesId] : null) ||
+    (activeOfflineSeries?.id === selectedSeriesId ? activeOfflineSeries : null)
   const currentEntry =
     selectedSeries?.entries.find((entry) => entry.id === selectedEntryId) ??
     selectedSeries?.entries[0] ??
@@ -1501,6 +1749,13 @@ function App() {
     currentVariant && readerResumeVariantId === currentVariant.id
       ? readerResumePosition
       : currentSavedPosition ?? null
+  const currentOfflinePages = useMemo(
+    () =>
+      activeOfflineDownload?.status === 'ready' && currentVariant
+        ? buildOfflinePagesForEntry(activeOfflineDownload.manifest, currentVariant.id)
+        : null,
+    [activeOfflineDownload?.manifest, activeOfflineDownload?.status, currentVariant],
+  )
   const metadataReviewItems = appState?.metadataQueue ?? emptyMetadataReviewItems
   const metadataSearchResults = metadataSearchQuery.trim()
     ? library
@@ -1595,6 +1850,7 @@ function App() {
 
         api.setCsrfToken(nextState.csrfToken)
         setBootstrapState(nextState)
+        setOfflineMode(false)
         const cachedReaderState = readCachedReaderState(nextState)
 
         if (cachedReaderState) {
@@ -1612,6 +1868,43 @@ function App() {
           return
         }
 
+        const offlineProfile = await getLastOfflineProfile().catch(() => null)
+
+        if (offlineProfile) {
+          const offlineBootstrap: BootstrapState = {
+            appName: 'Orbital Library',
+            bootstrapAdmin: '',
+            openSignup: false,
+            user: offlineProfile,
+            csrfToken: null,
+          }
+          const offlineState: AppState = {
+            appName: offlineBootstrap.appName,
+            bootstrapAdmin: offlineBootstrap.bootstrapAdmin,
+            openSignup: false,
+            user: offlineProfile,
+            csrfToken: null,
+            scanSummary: { lastScanAt: null, changedFiles: 0, sourceRootCount: 0, sourceFolderCount: 0 },
+            scanStatus: emptyScanStatus,
+            library: [],
+            bookmarks: [],
+            readingPositions: {},
+            sourceRoots: [],
+            sourceFolders: [],
+            users: [],
+            metadataQueue: [],
+          }
+
+          api.setCsrfToken(null)
+          setBootstrapState(offlineBootstrap)
+          setAppState(offlineState)
+          setOfflineMode(true)
+          setCurrentView('downloads')
+          setCachedStateNeedsRefresh(false)
+          setStateError(text.offlineModeHelp)
+          return
+        }
+
         setStateError(error instanceof Error ? error.message : text.authErrorFallback)
       } finally {
         if (active) {
@@ -1625,9 +1918,15 @@ function App() {
     return () => {
       active = false
     }
-  }, [text.authErrorFallback])
+  }, [text.authErrorFallback, text.offlineModeHelp])
 
   useEffect(() => {
+    if (offlineMode) {
+      setStateLoading(false)
+      setCachedStateNeedsRefresh(false)
+      return
+    }
+
     if (!bootstrapState?.user) {
       setStateLoading(false)
       setCachedStateNeedsRefresh(false)
@@ -1674,7 +1973,33 @@ function App() {
     return () => {
       active = false
     }
-  }, [appState, bootstrapState, cachedStateNeedsRefresh, text.authErrorFallback])
+  }, [appState, bootstrapState, cachedStateNeedsRefresh, offlineMode, text.authErrorFallback])
+
+  const refreshOfflineDownloads = useCallback(async () => {
+    if (!sessionUser) {
+      setOfflineDownloads([])
+      setOfflineStorageSummary(null)
+      return
+    }
+
+    try {
+      const [downloads, summary] = await Promise.all([
+        listOfflineDownloads(sessionUser.id),
+        getOfflineStorageSummary(sessionUser.id),
+      ])
+
+      setOfflineDownloads(downloads)
+      setOfflineStorageSummary(summary)
+    } catch (error) {
+      if (!offlineMode) {
+        setStateError(error instanceof Error ? error.message : text.authErrorFallback)
+      }
+    }
+  }, [offlineMode, sessionUser, text.authErrorFallback])
+
+  useEffect(() => {
+    void refreshOfflineDownloads()
+  }, [refreshOfflineDownloads])
 
   useEffect(() => {
     const shouldPollForTransportRecovery =
@@ -2004,7 +2329,12 @@ function App() {
   }, [appState?.user?.role, authenticated, browsePath, currentView, selectedRootId])
 
   useEffect(() => {
-    if (!selectedSeriesId || !authenticated || seriesCache[selectedSeriesId]) {
+    if (
+      !selectedSeriesId ||
+      !authenticated ||
+      seriesCache[selectedSeriesId] ||
+      activeOfflineSeries?.id === selectedSeriesId
+    ) {
       return
     }
 
@@ -2051,7 +2381,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [authenticated, selectedSeriesId, seriesCache, text.loadingSeries])
+  }, [activeOfflineSeries?.id, authenticated, selectedSeriesId, seriesCache, text.loadingSeries])
 
   useEffect(() => {
     if (!selectedSeries || !selectedSeries.entries.length) {
@@ -2096,6 +2426,10 @@ function App() {
   }, [currentEntry, selectedVariantId])
 
   useEffect(() => {
+    if (activeOfflineSeries?.id === selectedSeriesId) {
+      return
+    }
+
     if (!library.length) {
       return
     }
@@ -2109,7 +2443,7 @@ function App() {
     if (!selectedSeriesId || !selectedSeriesStillExists || !selectedSeriesStillVisible) {
       setSelectedSeriesId(firstVisibleSeries?.id || library[0].id)
     }
-  }, [library, selectedSeriesId])
+  }, [activeOfflineSeries?.id, library, selectedSeriesId])
 
   useEffect(() => {
     if (!selectedCreatorKey) {
@@ -2337,12 +2671,201 @@ function App() {
     window.location.replace(resetUrl.toString())
   }
 
+  const updateOfflineRecord = async (record: OfflineDownloadRecord) => {
+    await putOfflineDownload(record)
+    setOfflineDownloads((previousDownloads) => {
+      const withoutRecord = previousDownloads.filter((download) => download.id !== record.id)
+      return [record, ...withoutRecord].sort(
+        (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+      )
+    })
+    if (sessionUser) {
+      getOfflineStorageSummary(sessionUser.id)
+        .then(setOfflineStorageSummary)
+        .catch(() => undefined)
+    }
+  }
+
+  const setOfflineBusy = (busyKey: string, label: string | null) => {
+    setOfflineBusyIds((previousBusyIds) => {
+      const nextBusyIds = { ...previousBusyIds }
+
+      if (label) {
+        nextBusyIds[busyKey] = label
+      } else {
+        delete nextBusyIds[busyKey]
+      }
+
+      return nextBusyIds
+    })
+  }
+
+  const startOfflineDownload = async (target: OfflineDownloadTarget) => {
+    if (!sessionUser) {
+      setStateError(text.authErrorFallback)
+      return
+    }
+
+    const busyKey = getOfflineTargetKey(target)
+
+    if (offlineBusyIds[busyKey]) {
+      return
+    }
+
+    let record: OfflineDownloadRecord | null = null
+    setOfflineBusy(busyKey, text.downloadForOffline)
+
+    try {
+      await requestOfflineStoragePersistence().catch(() => null)
+      const manifest = await api.createOfflineManifest(target)
+      record = createOfflineDownloadRecord(manifest)
+      await deleteOfflineDownload(record.id).catch(() => undefined)
+      record.status = 'downloading'
+      record.updatedAt = new Date().toISOString()
+      await updateOfflineRecord(record)
+
+      for (const resource of manifest.resources) {
+        const response = await fetch(resource.url, {
+          cache: 'no-store',
+          credentials: 'same-origin',
+        })
+
+        if (!response.ok) {
+          const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null
+          throw new Error(errorPayload?.error || `Download failed with ${response.status}`)
+        }
+
+        const blob = await response.blob()
+
+        if (resource.size > 0 && blob.size !== resource.size) {
+          throw new Error(`Downloaded size mismatch for ${resource.label}.`)
+        }
+
+        await putOfflineResource(record.id, record.ownerUserId, resource, blob)
+        record = {
+          ...record,
+          status: 'downloading',
+          downloadedBytes: record.downloadedBytes + blob.size,
+          verifiedBytes: record.verifiedBytes + (resource.size || blob.size),
+          downloadedResourceCount: record.downloadedResourceCount + 1,
+          updatedAt: new Date().toISOString(),
+        }
+        await updateOfflineRecord(record)
+      }
+
+      record = {
+        ...record,
+        status: 'ready',
+        completedAt: new Date().toISOString(),
+        failureReason: null,
+        updatedAt: new Date().toISOString(),
+      }
+      await updateOfflineRecord(record)
+    } catch (error) {
+      if (record) {
+        const message = error instanceof Error ? error.message : text.downloadFailed
+        record = {
+          ...record,
+          status: message.toLowerCase().includes('stale')
+            ? 'stale'
+            : record.downloadedResourceCount > 0
+              ? 'partial'
+              : 'failed',
+          failureReason: message,
+          updatedAt: new Date().toISOString(),
+        }
+        await updateOfflineRecord(record).catch(() => undefined)
+      }
+
+      setStateError(error instanceof Error ? error.message : text.downloadFailed)
+    } finally {
+      setOfflineBusy(busyKey, null)
+      void refreshOfflineDownloads()
+    }
+  }
+
+  const handleDeleteDownload = async (downloadId: string) => {
+    setOfflineBusy(downloadId, text.deleteDownload)
+
+    try {
+      await deleteOfflineDownload(downloadId)
+      if (offlineReaderDownloadId === downloadId) {
+        setOfflineReaderDownloadId(null)
+        setCurrentView('downloads')
+      }
+      await refreshOfflineDownloads()
+    } catch (error) {
+      setStateError(error instanceof Error ? error.message : text.authErrorFallback)
+    } finally {
+      setOfflineBusy(downloadId, null)
+    }
+  }
+
+  const handleDeleteAllDownloads = async () => {
+    if (!sessionUser) {
+      return
+    }
+
+    setOfflineBusy('all-downloads', text.deleteAllDownloads)
+
+    try {
+      await deleteAllOfflineDownloadsForUser(sessionUser.id)
+      setOfflineReaderDownloadId(null)
+      await refreshOfflineDownloads()
+    } catch (error) {
+      setStateError(error instanceof Error ? error.message : text.authErrorFallback)
+    } finally {
+      setOfflineBusy('all-downloads', null)
+    }
+  }
+
+  const handleRequestPersistentStorage = async () => {
+    setPersistentStorageBusy(true)
+
+    try {
+      await requestOfflineStoragePersistence()
+      await refreshOfflineDownloads()
+    } catch (error) {
+      setStateError(error instanceof Error ? error.message : text.authErrorFallback)
+    } finally {
+      setPersistentStorageBusy(false)
+    }
+  }
+
+  const openOfflineDownload = (record: OfflineDownloadRecord) => {
+    if (record.status !== 'ready') {
+      return
+    }
+
+    const offlineSeries = buildOfflineSeriesDetail(record)
+    const firstEntry = offlineSeries.entries[0]
+
+    startTransition(() => {
+      setSeriesCache((previousCache) => ({
+        ...previousCache,
+        [offlineSeries.id]: offlineSeries,
+      }))
+      setOfflineReaderDownloadId(record.id)
+      setSelectedSeriesId(offlineSeries.id)
+      setCurrentCategory(offlineSeries.category)
+      setSelectedEntryId(firstEntry?.id ?? null)
+      setSelectedVariantId(firstEntry?.preferredVariantId ?? null)
+      setReaderReturnView('downloads')
+      setReaderProgress(null)
+      setReaderResumePosition(null)
+      setReaderResumeVariantId(firstEntry?.preferredVariantId ?? null)
+      setSearchOpen(false)
+      setCurrentView('reader')
+    })
+  }
+
   const goToLibrary = (category: CategoryId) => {
     const nextCategory = resolveReaderCategory(category)
 
     startTransition(() => {
       setCurrentCategory(nextCategory)
       setCurrentView('library')
+      setOfflineReaderDownloadId(null)
       setFilterSheetOpen(false)
       setSearchOpen(false)
       setSearchQuery('')
@@ -2399,6 +2922,7 @@ function App() {
       setSelectedSeriesId(seriesId)
       setCurrentCategory(nextSummary.category)
       setActiveTab(tab)
+      setOfflineReaderDownloadId(null)
       setFilterSheetOpen(false)
       setSearchOpen(false)
       if (selectedSeriesId !== seriesId) {
@@ -2433,6 +2957,7 @@ function App() {
       setCurrentCategory(nextSummary.category)
       setFilterSheetOpen(false)
       setSearchOpen(false)
+      setOfflineReaderDownloadId(null)
       setSelectedEntryId(nextEntry?.id ?? null)
       setSelectedVariantId(nextVariant?.id ?? null)
       primeReaderResume(nextVariant?.id ?? null)
@@ -2482,6 +3007,10 @@ function App() {
   }
 
   const persistCurrentReaderPosition = useCallback(async (manual = false) => {
+    if (offlineReaderDownloadId) {
+      return
+    }
+
     if (!selectedSeriesSummary || !currentEntry || !currentVariant || !appState?.user) {
       return
     }
@@ -2553,6 +3082,7 @@ function App() {
     currentEntry,
     currentReaderStartPosition,
     currentVariant,
+    offlineReaderDownloadId,
     readerProgress,
     selectedEntryIndex,
     selectedSeriesSummary,
@@ -2617,6 +3147,9 @@ function App() {
   const handleReaderBack = async () => {
     await persistCurrentReaderPosition(false)
     setCurrentView(readerReturnView)
+    if (offlineReaderDownloadId) {
+      setOfflineReaderDownloadId(null)
+    }
   }
 
   const handleReaderTouchStart = (event: TouchEvent<HTMLDivElement>) => {
@@ -3031,16 +3564,41 @@ function App() {
     )
   }
 
+  const currentEntryOfflineTarget = currentVariant
+    ? ({
+        type: 'entry',
+        entryId: currentVariant.id,
+      } satisfies OfflineDownloadTarget)
+    : null
+  const currentEntryDownloadBusy = currentEntryOfflineTarget
+    ? offlineBusyIds[getOfflineTargetKey(currentEntryOfflineTarget)]
+    : null
   const readerToolbarAccessory =
-    currentEntry && currentEntry.variants.length > 1 && currentVariant ? (
-      <ReaderVariantMenu
-        onSelect={(variantId) => {
-          setSelectedVariantId(variantId)
-          primeReaderResume(variantId)
-        }}
-        selectedVariantId={currentVariant.id}
-        variants={currentEntry.variants}
-      />
+    currentVariant ? (
+      <>
+        {currentEntry && currentEntry.variants.length > 1 && (
+          <ReaderVariantMenu
+            onSelect={(variantId) => {
+              setSelectedVariantId(variantId)
+              primeReaderResume(variantId)
+            }}
+            selectedVariantId={currentVariant.id}
+            variants={currentEntry.variants}
+          />
+        )}
+        {!offlineReaderDownloadId && currentEntryOfflineTarget && (
+          <button
+            className="ghost-button"
+            disabled={Boolean(currentEntryDownloadBusy)}
+            onClick={() => void startOfflineDownload(currentEntryOfflineTarget)}
+            type="button"
+          >
+            <AppIcon name="download" />
+            {currentEntryDownloadBusy ||
+              getEntryDownloadLabel(currentVariant.format, selectedSeriesSummary?.category ?? currentCategory)}
+          </button>
+        )}
+      </>
     ) : null
 
   const filteredCategoryLibrary = visibleLibrary.filter((series) => {
@@ -3160,9 +3718,18 @@ function App() {
       cue: bookmark.progress,
     }
   }
+  const getEntryDownloadLabel = (format: EntryFormat, category: CategoryId) => {
+    if (category === 'manga' || format === 'cbz') {
+      return text.downloadEntry
+    }
+
+    return text.downloadBook
+  }
   const pageTitle =
     currentView === 'bookmarks'
       ? text.nav.bookmarks
+      : currentView === 'downloads'
+        ? text.downloadsTitle
       : currentView === 'library'
         ? `${text.libraryTitle} / ${text.scopes[currentCategory]}${
             currentCategory === 'books' && bookTopicFilters.length > 0 ? ` / ${bookTopicFilters.join(', ')}` : ''
@@ -3181,6 +3748,8 @@ function App() {
   const pageBody =
     currentView === 'bookmarks'
       ? text.bookmarksBody
+      : currentView === 'downloads'
+        ? text.downloadsBody
       : currentView === 'library'
         ? text.libraryBody
         : currentView === 'search'
@@ -3337,6 +3906,200 @@ function App() {
     </div>
   )
 
+  const renderDownloads = () => {
+    const filteredDownloads = offlineDownloads.filter((record) => {
+      if (offlineFilter === 'active') {
+        return isOfflineDownloadActive(record)
+      }
+
+      if (offlineFilter === 'ready') {
+        return record.status === 'ready'
+      }
+
+      if (offlineFilter === 'attention') {
+        return ['failed', 'partial', 'stale'].includes(record.status)
+      }
+
+      return true
+    })
+    const storageRatio =
+      offlineStorageSummary?.browserQuotaBytes && offlineStorageSummary.browserQuotaBytes > 0
+        ? Math.min(1, (offlineStorageSummary.browserUsageBytes || 0) / offlineStorageSummary.browserQuotaBytes)
+        : 0
+
+    return (
+      <div className="page page--downloads">
+        {offlineMode && (
+          <article className="panel panel--padded offline-mode-banner">
+            <span className="settings-row__icon">
+              <AppIcon name="offline" />
+            </span>
+            <div>
+              <strong>{text.offlineMode}</strong>
+              <p>{text.offlineModeHelp}</p>
+            </div>
+          </article>
+        )}
+
+        <section className="downloads-hero">
+          <div>
+            <p className="section-kicker">{text.downloadsStorage}</p>
+            <h2>{formatBytes(offlineStorageSummary?.downloadedBytes ?? 0, language)}</h2>
+            <p>{text.downloadsDeviceOnly}</p>
+          </div>
+          <div className="downloads-storage-card">
+            <div className="downloads-storage-card__row">
+              <span>{text.downloadedBytes}</span>
+              <strong>{formatBytes(offlineStorageSummary?.downloadedBytes ?? 0, language)}</strong>
+            </div>
+            <div className="downloads-storage-card__row">
+              <span>{text.verifiedBytes}</span>
+              <strong>{formatBytes(offlineStorageSummary?.verifiedBytes ?? 0, language)}</strong>
+            </div>
+            <div className="downloads-storage-card__row">
+              <span>{text.browserStorageUsed}</span>
+              <strong>{formatBytes(offlineStorageSummary?.browserUsageBytes, language)}</strong>
+            </div>
+            <div className="downloads-storage-meter" aria-hidden="true">
+              <span style={{ width: `${storageRatio * 100}%` }} />
+            </div>
+            <div className="downloads-storage-card__row">
+              <span>{text.browserStorageQuota}</span>
+              <strong>{formatBytes(offlineStorageSummary?.browserQuotaBytes, language)}</strong>
+            </div>
+            <div className="downloads-storage-card__actions">
+              <button
+                className="ghost-button ghost-button--small"
+                disabled={persistentStorageBusy || offlineStorageSummary?.persistent === true}
+                onClick={() => void handleRequestPersistentStorage()}
+                type="button"
+              >
+                <AppIcon name="hardDrive" />
+                {offlineStorageSummary?.persistent ? text.persistentStorageGranted : text.requestPersistentStorage}
+              </button>
+              <button
+                className="ghost-button ghost-button--small"
+                disabled={!offlineDownloads.length || Boolean(offlineBusyIds['all-downloads'])}
+                onClick={() => void handleDeleteAllDownloads()}
+                type="button"
+              >
+                <AppIcon name="trash" />
+                {text.deleteAllDownloads}
+              </button>
+            </div>
+            <p className="helper-text">{text.persistentStorageHelp}</p>
+          </div>
+        </section>
+
+        <section className="bookmark-filter-bar downloads-filter-bar" role="tablist" aria-label={text.downloadsTitle}>
+          {[
+            { id: 'all' as const, label: text.downloadsAll },
+            { id: 'active' as const, label: text.downloadsActive },
+            { id: 'ready' as const, label: text.downloadsReady },
+            { id: 'attention' as const, label: text.downloadsPartial },
+          ].map((item) => (
+            <button
+              className={`tab-button ${offlineFilter === item.id ? 'is-active' : ''}`}
+              key={item.id}
+              onClick={() => setOfflineFilter(item.id)}
+              type="button"
+            >
+              {item.label}
+            </button>
+          ))}
+        </section>
+
+        <section className="downloads-list">
+          {filteredDownloads.length === 0 ? (
+            <article className="panel panel--padded">{text.downloadsEmpty}</article>
+          ) : (
+            filteredDownloads.map((record) => {
+              const progressRatio = record.manifest.estimatedBytes
+                ? Math.min(1, record.downloadedBytes / record.manifest.estimatedBytes)
+                : record.resourceCount
+                  ? record.downloadedResourceCount / record.resourceCount
+                  : 0
+              const statusLabel =
+                record.status === 'ready'
+                  ? text.downloadsReady
+                  : record.status === 'downloading'
+                    ? text.downloadsActive
+                    : record.status === 'stale'
+                      ? text.downloadStale
+                      : record.status === 'failed'
+                        ? text.downloadFailed
+                        : record.status
+              const targetBusy = offlineBusyIds[getOfflineTargetKey(record.manifest.target)]
+              const rowBusy = offlineBusyIds[record.id] || targetBusy
+
+              return (
+                <article className={`download-card download-card--${record.status}`} key={record.id}>
+                  <div className="download-card__main">
+                    <div className="download-card__icon">
+                      <AppIcon name={record.status === 'ready' ? 'download' : record.status === 'downloading' ? 'refresh' : 'offline'} />
+                    </div>
+                    <div>
+                      <div className="download-card__topline">
+                        <span className="section-kicker">{categoryLabel(record.manifest.category)}</span>
+                        <span className="chip">{statusLabel}</span>
+                      </div>
+                      <h3>{record.manifest.title}</h3>
+                      <p>{record.manifest.subtitle}</p>
+                    </div>
+                  </div>
+                  <div className="download-card__meter" aria-hidden="true">
+                    <span style={{ width: `${progressRatio * 100}%` }} />
+                  </div>
+                  <div className="download-card__stats">
+                    <span>
+                      {text.downloadedBytes}: {formatBytes(record.downloadedBytes, language)}
+                    </span>
+                    <span>
+                      {text.estimatedBytes}: {formatBytes(record.manifest.estimatedBytes, language)}
+                    </span>
+                    <span>
+                      {record.downloadedResourceCount} / {record.resourceCount}
+                    </span>
+                  </div>
+                  {record.failureReason && <p className="download-card__error">{record.failureReason}</p>}
+                  <div className="download-card__actions">
+                    <button
+                      className="primary-button"
+                      disabled={record.status !== 'ready'}
+                      onClick={() => openOfflineDownload(record)}
+                      type="button"
+                    >
+                      <AppIcon name="read" />
+                      {text.openOffline}
+                    </button>
+                    <button
+                      className="ghost-button"
+                      disabled={Boolean(rowBusy)}
+                      onClick={() => void startOfflineDownload(record.manifest.target)}
+                      type="button"
+                    >
+                      <AppIcon name="refresh" />
+                      {record.status === 'ready' ? text.downloadAgain : text.repairDownload}
+                    </button>
+                    <button
+                      className="ghost-button"
+                      disabled={Boolean(rowBusy)}
+                      onClick={() => void handleDeleteDownload(record.id)}
+                      type="button"
+                    >
+                      <AppIcon name="trash" />
+                      {text.deleteDownload}
+                    </button>
+                  </div>
+                </article>
+              )
+            })
+          )}
+        </section>
+      </div>
+    )
+  }
+
   const renderProfile = () => (
     <div className="page page--profile">
       <section className="profile-hero-panel">
@@ -3403,6 +4166,19 @@ function App() {
               </span>
             </button>
           )}
+
+          <button className="settings-row settings-row--button" onClick={() => setCurrentView('downloads')} type="button">
+            <span className="settings-row__icon">
+              <AppIcon name="download" />
+            </span>
+            <div>
+              <strong>{text.downloadsTitle}</strong>
+              <p>{text.downloadsBody}</p>
+            </div>
+            <span className="settings-row__chevron">
+              <AppIcon name="chevronRight" />
+            </span>
+          </button>
 
           <button
             className="settings-row settings-row--button"
@@ -3859,6 +4635,15 @@ function App() {
             <button className="primary-button" onClick={() => void openReader(selectedSeriesSummary.id)}>
               {text.openReader}
             </button>
+            <button
+              className="ghost-button"
+              disabled={Boolean(offlineBusyIds[getOfflineTargetKey({ type: 'series', seriesId: selectedSeriesSummary.id })])}
+              onClick={() => void startOfflineDownload({ type: 'series', seriesId: selectedSeriesSummary.id })}
+              type="button"
+            >
+              <AppIcon name="download" />
+              {offlineBusyIds[getOfflineTargetKey({ type: 'series', seriesId: selectedSeriesSummary.id })] || text.downloadSeries}
+            </button>
             <button className="ghost-button" onClick={() => setActiveTab('comments')}>
               {text.comments}
             </button>
@@ -3934,9 +4719,26 @@ function App() {
                 <td data-label={text.entryTitle}>{formatDisplayEntryTitle(entry.title)}</td>
                 <td data-label={text.entryDetails}>{entry.details}</td>
                 <td data-label={text.entryAction}>
-                  <button className="ghost-button" onClick={() => void openReader(selectedSeries.id, entry.id)}>
-                    {text.openReader}
-                  </button>
+                  <div className="entry-table__actions">
+                    <button className="ghost-button" onClick={() => void openReader(selectedSeries.id, entry.id)}>
+                      {text.openReader}
+                    </button>
+                    <button
+                      className="ghost-button"
+                      disabled={Boolean(offlineBusyIds[getOfflineTargetKey({ type: 'entry', entryId: entry.preferredVariantId })])}
+                      onClick={() => void startOfflineDownload({ type: 'entry', entryId: entry.preferredVariantId })}
+                      type="button"
+                    >
+                      <AppIcon name="download" />
+                      {offlineBusyIds[getOfflineTargetKey({ type: 'entry', entryId: entry.preferredVariantId })] ||
+                        getEntryDownloadLabel(
+                          entry.variants.find((variant) => variant.id === entry.preferredVariantId)?.format ||
+                            entry.variants[0]?.format ||
+                            'pdf',
+                          selectedSeries.category,
+                        )}
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -4148,6 +4950,7 @@ function App() {
           <CbzReader
             entryId={currentVariant.id}
             fileUrl={currentVariant.fileUrl}
+            offlinePages={currentOfflinePages ?? undefined}
             initialPage={currentReaderStartPosition?.page ?? 1}
             initialPageOrderMode={useMangaPaging ? 'archive' : 'filename'}
             initialReadingDirection={useMangaPaging ? 'rtl' : 'ltr'}
@@ -4322,13 +5125,28 @@ function App() {
           </button>
           <div className="reader-overlay__progress">
             {progressLabel && <span>{progressLabel}</span>}
-            <button className="primary-button" onClick={() => void handleSetBookmark()} type="button">
-              <AppIcon name="check" />
+            <button
+              className="primary-button"
+              disabled={Boolean(offlineReaderDownloadId)}
+              onClick={() => void handleSetBookmark()}
+              type="button"
+            >
+              <AppIcon name={offlineReaderDownloadId ? 'offline' : 'check'} />
               <span
                 className="reader-overlay__button-label"
-                data-short-label={bookmarkJustSet ? text.bookmarkedShort : text.setBookmarkShort}
+                data-short-label={
+                  offlineReaderDownloadId
+                    ? text.offlineMode
+                    : bookmarkJustSet
+                      ? text.bookmarkedShort
+                      : text.setBookmarkShort
+                }
               >
-                {bookmarkJustSet ? text.bookmarked : text.setBookmark}
+                {offlineReaderDownloadId
+                  ? text.openOffline
+                  : bookmarkJustSet
+                    ? text.bookmarked
+                    : text.setBookmark}
               </span>
             </button>
           </div>
@@ -5287,7 +6105,10 @@ function App() {
           </div>
 
           <nav className="window-tabs">
-            {[{ id: 'bookmarks' as const, label: text.nav.bookmarks }, ...readerCategoryOrder.map((category) => ({
+            {[
+              { id: 'bookmarks' as const, label: text.nav.bookmarks },
+              { id: 'downloads' as const, label: text.nav.downloads },
+              ...readerCategoryOrder.map((category) => ({
               id: category,
               label: text.nav[category],
             }))].map((item) => (
@@ -5297,6 +6118,10 @@ function App() {
                     ? currentView === 'bookmarks'
                       ? 'is-active'
                       : ''
+                    : item.id === 'downloads'
+                      ? currentView === 'downloads'
+                        ? 'is-active'
+                        : ''
                     : currentView === 'library' && currentCategory === item.id
                       ? 'is-active'
                       : ''
@@ -5305,6 +6130,11 @@ function App() {
                 onClick={() => {
                   if (item.id === 'bookmarks') {
                     setCurrentView('bookmarks')
+                    return
+                  }
+
+                  if (item.id === 'downloads') {
+                    setCurrentView('downloads')
                     return
                   }
 
@@ -5397,6 +6227,7 @@ function App() {
         )}
 
         {currentView === 'bookmarks' && renderBookmarks()}
+        {currentView === 'downloads' && renderDownloads()}
         {currentView === 'library' && renderLibrary()}
         {currentView === 'search' && renderSearchPage()}
         {currentView === 'series' && renderSeries()}
@@ -5440,6 +6271,17 @@ function App() {
           >
             <AppIcon name="search" />
             <span>{text.mobileNav.search}</span>
+          </button>
+          <button
+            className={currentView === 'downloads' ? 'is-active' : ''}
+            onClick={() => {
+              setCurrentView('downloads')
+              setSearchOpen(false)
+            }}
+            type="button"
+          >
+            <AppIcon name="download" />
+            <span>{text.mobileNav.downloads}</span>
           </button>
           <button
             className={currentView === 'profile' || currentView === 'admin' ? 'is-active' : ''}
