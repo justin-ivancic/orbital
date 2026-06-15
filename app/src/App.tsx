@@ -104,6 +104,8 @@ const readerChromeInteractionSelector = [
 const isReaderChromeInteractionTarget = (target: EventTarget | null) =>
   target instanceof Element && Boolean(target.closest(readerChromeInteractionSelector))
 
+type ReaderReturnView = Exclude<ViewId, 'reader'>
+
 const preloadedPosterUrls = new Set<string>()
 const appStateCacheVersion = 2
 const maxCachedSeriesDetails = 24
@@ -440,7 +442,7 @@ const ui = {
     setBookmarkShort: 'Bookmark',
     bookmarked: 'Bookmarked',
     bookmarkedShort: 'Saved',
-    backToList: 'Back to list',
+    back: 'Back',
     libraryTitle: 'Shelf browsing',
     libraryBody:
       'Cover-first cards, compact metadata, and search that can span every linked folder or just one category.',
@@ -678,7 +680,7 @@ const ui = {
     setBookmarkShort: 'Merken',
     bookmarked: 'Gespeichert',
     bookmarkedShort: 'Gespeichert',
-    backToList: 'Zur Liste',
+    back: 'Zurück',
     libraryTitle: 'Regalansicht',
     libraryBody:
       'Cover-zentrierte Karten, kompakte Metadaten und eine Suche, die über alle verknüpften Ordner oder nur eine Kategorie gehen kann.',
@@ -1340,6 +1342,7 @@ function App() {
   const [passwordChangeError, setPasswordChangeError] = useState<string | null>(null)
   const [passwordChangeSuccess, setPasswordChangeSuccess] = useState<string | null>(null)
   const [currentView, setCurrentView] = useState<ViewId>('bookmarks')
+  const [readerReturnView, setReaderReturnView] = useState<ReaderReturnView>('bookmarks')
   const [currentCategory, setCurrentCategory] = useState<CategoryId>(defaultReaderCategory)
   const [bookmarkFilter, setBookmarkFilter] = useState<ScopeId>('all')
   const [openBookmarkMenuKey, setOpenBookmarkMenuKey] = useState<string | null>(null)
@@ -2406,6 +2409,9 @@ function App() {
     })
   }
 
+  const resolveReaderReturnView = (view: ViewId): ReaderReturnView =>
+    view === 'reader' ? readerReturnView : view
+
   const openReader = async (seriesId: string, entryId?: string) => {
     const nextSummary = library.find((series) => series.id === seriesId)
 
@@ -2430,6 +2436,7 @@ function App() {
       setSelectedEntryId(nextEntry?.id ?? null)
       setSelectedVariantId(nextVariant?.id ?? null)
       primeReaderResume(nextVariant?.id ?? null)
+      setReaderReturnView(resolveReaderReturnView(currentView))
       setCurrentView('reader')
     })
   }
@@ -2607,12 +2614,9 @@ function App() {
     selectedSeriesSummary,
   ])
 
-  const handleReaderBackToList = async () => {
+  const handleReaderBack = async () => {
     await persistCurrentReaderPosition(false)
-
-    if (selectedSeriesSummary) {
-      await openSeries(selectedSeriesSummary.id, 'entries')
-    }
+    setCurrentView(readerReturnView)
   }
 
   const handleReaderTouchStart = (event: TouchEvent<HTMLDivElement>) => {
@@ -2647,7 +2651,7 @@ function App() {
     const isEdgeSwipe = start.edge && Math.abs(deltaY) <= 72 && Math.abs(deltaX) >= 84
 
     if (isEdgeSwipe && start.edge === 'left' && deltaX > 0) {
-      void handleReaderBackToList()
+      void handleReaderBack()
       return
     }
 
@@ -4284,11 +4288,11 @@ function App() {
         <section className="reader-overlay reader-overlay--top">
           <button
             className="reader-overlay__button"
-            onClick={() => void handleReaderBackToList()}
+            onClick={() => void handleReaderBack()}
             type="button"
           >
             <AppIcon name="back" />
-            {text.backToList}
+            <span>{text.back}</span>
           </button>
           <div className="reader-overlay__title">
             <span>{selectedSeriesDisplayTitle || text.loadingSeries}</span>
