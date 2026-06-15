@@ -147,21 +147,6 @@ const getInitialCbzScaleMode = (): CbzScaleMode => {
 const naturalSort = (left: string, right: string) =>
   left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
 
-const getMediaVersionQuery = (fileUrl: string) => {
-  if (typeof window === 'undefined') {
-    return ''
-  }
-
-  try {
-    const url = new URL(fileUrl, window.location.origin)
-    const version = url.searchParams.get('v')
-
-    return version ? `?v=${encodeURIComponent(version)}` : ''
-  } catch {
-    return ''
-  }
-}
-
 const clampPage = (page: number, totalPages: number) =>
   Math.min(Math.max(page, 1), Math.max(totalPages, 1))
 
@@ -1414,8 +1399,9 @@ export function CbzReader({
 
       try {
         const response = await fetch(
-          `/api/media/cbz/${encodeURIComponent(entryId)}/manifest${getMediaVersionQuery(fileUrl)}`,
+          `/api/media/cbz/${encodeURIComponent(entryId)}/manifest?refresh=${Date.now()}`,
           {
+            cache: 'no-store',
             credentials: 'same-origin',
           },
         )

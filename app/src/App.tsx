@@ -105,11 +105,17 @@ const isReaderChromeInteractionTarget = (target: EventTarget | null) =>
   target instanceof Element && Boolean(target.closest(readerChromeInteractionSelector))
 
 const preloadedPosterUrls = new Set<string>()
-const appStateCacheVersion = 1
+const appStateCacheVersion = 2
 const maxCachedSeriesDetails = 24
 const appStateCachePrefix = `orbital:reader-cache:v${appStateCacheVersion}`
 const legacyAppStateCachePrefix = 'orbital:reader-cache:'
 let legacyAppStateCachePruned = false
+const readerSessionStorageKeyPrefixes = [legacyAppStateCachePrefix, 'video-progress:']
+const readerPersistentStorageKeyPrefixes = [
+  legacyAppStateCachePrefix,
+  'cbz-reader-settings:',
+  'video-progress:',
+]
 
 const preloadPosterImage = (url: string) => {
   if (typeof window === 'undefined' || preloadedPosterUrls.has(url)) {
@@ -154,6 +160,12 @@ const getAppStateCacheKey = (userId: string) => `${appStateCachePrefix}:${userId
 
 const getReaderCacheStorage = () => window.sessionStorage
 
+const clearStorageKeysByPrefix = (storage: Storage, prefixes: string[]) => {
+  Object.keys(storage)
+    .filter((key) => prefixes.some((prefix) => key.startsWith(prefix)))
+    .forEach((key) => storage.removeItem(key))
+}
+
 const pruneLegacyPersistentReaderCaches = () => {
   if (typeof window === 'undefined' || legacyAppStateCachePruned) {
     return
@@ -162,9 +174,7 @@ const pruneLegacyPersistentReaderCaches = () => {
   legacyAppStateCachePruned = true
 
   try {
-    Object.keys(window.localStorage)
-      .filter((key) => key.startsWith(legacyAppStateCachePrefix) || key.startsWith('video-progress:'))
-      .forEach((key) => window.localStorage.removeItem(key))
+    clearStorageKeysByPrefix(window.localStorage, [legacyAppStateCachePrefix, 'video-progress:'])
   } catch {
     // Storage may be unavailable; cache cleanup is best-effort.
   }
@@ -176,11 +186,46 @@ const clearReaderSessionCaches = () => {
   }
 
   try {
-    Object.keys(window.sessionStorage)
-      .filter((key) => key.startsWith(legacyAppStateCachePrefix) || key.startsWith('video-progress:'))
-      .forEach((key) => window.sessionStorage.removeItem(key))
+    clearStorageKeysByPrefix(window.sessionStorage, readerSessionStorageKeyPrefixes)
   } catch {
     // Storage may be unavailable; the server session remains authoritative.
+  }
+}
+
+const resetOrbitalLocalCaches = async () => {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  clearReaderSessionCaches()
+
+  try {
+    clearStorageKeysByPrefix(window.localStorage, readerPersistentStorageKeyPrefixes)
+  } catch {
+    // Browser storage can be blocked; continue with the rest of the reset.
+  }
+
+  if ('caches' in window) {
+    try {
+      const cacheNames = await window.caches.keys()
+      await Promise.all(cacheNames.map((cacheName) => window.caches.delete(cacheName)))
+    } catch {
+      // Cache Storage is best-effort and may be unavailable in private contexts.
+    }
+  }
+
+  if ('serviceWorker' in navigator) {
+    try {
+      const originScopePrefix = `${window.location.origin}/`
+      const registrations = await navigator.serviceWorker.getRegistrations()
+      await Promise.all(
+        registrations
+          .filter((registration) => registration.scope.startsWith(originScopePrefix))
+          .map((registration) => registration.unregister()),
+      )
+    } catch {
+      // Orbital does not currently register a service worker; this keeps future resets robust.
+    }
   }
 }
 
@@ -316,6 +361,9 @@ const ui = {
     passwordChangeHelp: 'Update your own password here. Admin resets stay available in Admin.',
     passwordChangeSuccess: 'Password updated.',
     passwordMismatch: 'New password and confirmation do not match.',
+    resetLocalCache: 'Reset local cache',
+    resetLocalCacheBusy: 'Resetting cache...',
+    resetLocalCacheHelp: 'Clears this device’s reader cache and reloads Orbital. Server bookmarks, accounts, and scans stay intact.',
     authAction: 'Open library',
     adminBootstrap: 'Reserved bootstrap admin',
     searchPlaceholder: 'Search every shelf, series, and file',
@@ -551,6 +599,9 @@ const ui = {
     passwordChangeHelp: 'Hier kannst du dein eigenes Passwort ändern. Admin-Resets bleiben im Admin-Bereich.',
     passwordChangeSuccess: 'Passwort aktualisiert.',
     passwordMismatch: 'Neues Passwort und Bestätigung stimmen nicht überein.',
+    resetLocalCache: 'Lokalen Cache zurücksetzen',
+    resetLocalCacheBusy: 'Cache wird zurückgesetzt...',
+    resetLocalCacheHelp: 'Leert den Reader-Cache auf diesem Gerät und lädt Orbital neu. Server-Lesezeichen, Accounts und Scans bleiben erhalten.',
     authAction: 'Bibliothek öffnen',
     adminBootstrap: 'Reservierter Bootstrap-Admin',
     searchPlaceholder: 'Alle Regale, Serien und Dateien durchsuchen',
@@ -1285,6 +1336,7 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState<string | null>(null)
   const [passwordChangeBusy, setPasswordChangeBusy] = useState(false)
+  const [cacheResetBusy, setCacheResetBusy] = useState(false)
   const [passwordChangeError, setPasswordChangeError] = useState<string | null>(null)
   const [passwordChangeSuccess, setPasswordChangeSuccess] = useState<string | null>(null)
   const [currentView, setCurrentView] = useState<ViewId>('bookmarks')
@@ -2260,6 +2312,26 @@ function App() {
     setReaderProgress(null)
     setStateLoading(false)
     setCurrentView('bookmarks')
+  }
+
+  const handleResetLocalCache = async () => {
+    setCacheResetBusy(true)
+
+    if (cacheWriteTimerRef.current) {
+      window.clearTimeout(cacheWriteTimerRef.current)
+      cacheWriteTimerRef.current = null
+    }
+
+    setSeriesCache({})
+    setReaderProgress(null)
+    setReaderResumeVariantId(null)
+    setReaderResumePosition(null)
+
+    await resetOrbitalLocalCaches()
+
+    const resetUrl = new URL(window.location.href)
+    resetUrl.searchParams.set('cacheReset', String(Date.now()))
+    window.location.replace(resetUrl.toString())
   }
 
   const goToLibrary = (category: CategoryId) => {
@@ -3327,6 +3399,24 @@ function App() {
               </span>
             </button>
           )}
+
+          <button
+            className="settings-row settings-row--button"
+            disabled={cacheResetBusy}
+            onClick={() => void handleResetLocalCache()}
+            type="button"
+          >
+            <span className="settings-row__icon">
+              <AppIcon name="refresh" />
+            </span>
+            <div>
+              <strong>{cacheResetBusy ? text.resetLocalCacheBusy : text.resetLocalCache}</strong>
+              <p>{text.resetLocalCacheHelp}</p>
+            </div>
+            <span className="settings-row__chevron">
+              <AppIcon name="chevronRight" />
+            </span>
+          </button>
 
           <button className="settings-row settings-row--button" onClick={() => void handleLogout()} type="button">
             <span className="settings-row__icon">
