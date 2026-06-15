@@ -461,7 +461,6 @@ const ui = {
     adminTools: 'Admin tools',
     quickResults: 'Quick results',
     searchTitle: 'Search',
-    searchEmpty: 'Type to search your whole library.',
     searchNoMatches: 'No matches yet.',
     searching: 'Searching...',
     searchAction: 'Search',
@@ -731,7 +730,6 @@ const ui = {
     adminTools: 'Admin-Werkzeuge',
     quickResults: 'Schnellergebnisse',
     searchTitle: 'Suche',
-    searchEmpty: 'Tippe, um deine gesamte Bibliothek zu durchsuchen.',
     searchNoMatches: 'Noch keine Treffer.',
     searching: 'Suche...',
     searchAction: 'Suche',
@@ -4316,9 +4314,7 @@ function App() {
               <section className="series-grid series-grid--shelf search-scope-grid">
                 {searchPageBrowseResults.map((series) => renderSeriesCard(series))}
               </section>
-            ) : (
-              <article className="panel panel--padded search-state">{text.searchEmpty}</article>
-            )
+            ) : null
           ) : searchLoading ? (
             <article className="panel panel--padded search-state">{text.searching}</article>
           ) : searchPreview.length === 0 ? (
