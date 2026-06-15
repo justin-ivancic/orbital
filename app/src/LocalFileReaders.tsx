@@ -17,16 +17,17 @@ import type { ReaderProgress, ReaderViewMode } from './appTypes'
 
 const imagePattern = /\.(avif|gif|jpe?g|png|webp)$/i
 const minReaderWidth = 280
-const maxPdfCanvasWidth = 760
-const maxPdfPixelRatio = 1.5
-const maxTouchPdfPixelRatio = 1
+const maxPdfCanvasWidth = 1120
+const maxPdfCanvasPixelWidth = 2400
+const maxPdfPixelRatio = 2.25
+const maxTouchPdfPixelRatio = 2
 const pdfNativeFallbackDelayMs = 6500
-const pdfDesktopImmediateRenderRadius = 5
-const pdfTouchImmediateRenderRadius = 6
-const pdfDesktopPrefetchRenderRadius = 10
-const pdfTouchPrefetchRenderRadius = 12
-const pdfDesktopCachedPageLimit = 56
-const pdfTouchCachedPageLimit = 72
+const pdfDesktopImmediateRenderRadius = 3
+const pdfTouchImmediateRenderRadius = 4
+const pdfDesktopPrefetchRenderRadius = 6
+const pdfTouchPrefetchRenderRadius = 7
+const pdfDesktopCachedPageLimit = 26
+const pdfTouchCachedPageLimit = 30
 const minCbzZoom = 70
 const maxCbzZoom = 170
 const cbzZoomStep = 10
@@ -53,6 +54,17 @@ const shouldUseTouchPdfCompatibility = () => {
     looksLikeTouchMac ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
   )
+}
+
+const getPdfRenderPixelRatio = () => {
+  if (typeof window === 'undefined') {
+    return 1
+  }
+
+  const devicePixelRatio = window.devicePixelRatio || 1
+  const viewportScale = window.visualViewport?.scale || 1
+
+  return devicePixelRatio * Math.max(1, Math.min(viewportScale, 2))
 }
 
 type PdfEmbedProps = {
@@ -535,6 +547,7 @@ const orderCbzPages = (pages: CbzPage[], pageOrderMode: CbzPageOrderMode) => {
 }
 
 type PdfPageCanvasProps = {
+  browserPixelRatio: number
   estimatedHeight: number
   pdfDocument: PDFDocumentProxy
   pageNumber: number
@@ -546,6 +559,7 @@ type PdfPageCanvasProps = {
 }
 
 function PdfPageCanvas({
+  browserPixelRatio,
   estimatedHeight,
   pdfDocument,
   pageNumber,
@@ -594,7 +608,14 @@ function PdfPageCanvas({
           throw new Error('Failed to prepare the PDF canvas.')
         }
 
-        const pixelRatio = Math.min(window.devicePixelRatio || 1, pixelRatioLimit)
+        const pixelRatio = Math.max(
+          1,
+          Math.min(
+            browserPixelRatio || 1,
+            pixelRatioLimit,
+            maxPdfCanvasPixelWidth / Math.max(1, viewport.width),
+          ),
+        )
 
         canvas.width = Math.floor(viewport.width * pixelRatio)
         canvas.height = Math.floor(viewport.height * pixelRatio)
@@ -634,7 +655,7 @@ function PdfPageCanvas({
       renderTask?.cancel()
       pdfPage?.cleanup()
     }
-  }, [estimatedHeight, onError, onRendered, pageNumber, pdfDocument, pixelRatioLimit, targetWidth])
+  }, [browserPixelRatio, estimatedHeight, onError, onRendered, pageNumber, pdfDocument, pixelRatioLimit, targetWidth])
 
   return (
     <canvas
@@ -665,6 +686,7 @@ export function PdfEmbed({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [viewportWidth, setViewportWidth] = useState(0)
+  const [browserPixelRatio, setBrowserPixelRatio] = useState(() => getPdfRenderPixelRatio())
   const [visiblePage, setVisiblePage] = useState(initialPage)
   const [renderedPdfPages, setRenderedPdfPages] = useState<Set<number>>(() => new Set())
   const [firstPageReady, setFirstPageReady] = useState(false)
@@ -749,7 +771,7 @@ export function PdfEmbed({
     let frame = 0
     let timeout = 0
     let observer: ResizeObserver | null = null
-    const updateWidth = () => {
+    const updateViewportMetrics = () => {
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(() => {
         const nextWidth = Math.round(
@@ -759,24 +781,34 @@ export function PdfEmbed({
         setViewportWidth((previousWidth) => (
           previousWidth === nextWidth ? previousWidth : nextWidth
         ))
+        setBrowserPixelRatio((previousPixelRatio) => {
+          const nextPixelRatio = getPdfRenderPixelRatio()
+
+          return Math.abs(previousPixelRatio - nextPixelRatio) < 0.05
+            ? previousPixelRatio
+            : nextPixelRatio
+        })
       })
     }
+    const visualViewport = window.visualViewport ?? null
 
-    updateWidth()
-    timeout = window.setTimeout(updateWidth, 140)
-    window.addEventListener('resize', updateWidth, { passive: true })
-    window.addEventListener('orientationchange', updateWidth)
+    updateViewportMetrics()
+    timeout = window.setTimeout(updateViewportMetrics, 140)
+    window.addEventListener('resize', updateViewportMetrics, { passive: true })
+    window.addEventListener('orientationchange', updateViewportMetrics)
+    visualViewport?.addEventListener('resize', updateViewportMetrics, { passive: true })
 
     if (typeof ResizeObserver !== 'undefined') {
-      observer = new ResizeObserver(() => updateWidth())
+      observer = new ResizeObserver(() => updateViewportMetrics())
       observer.observe(element)
     }
 
     return () => {
       cancelAnimationFrame(frame)
       window.clearTimeout(timeout)
-      window.removeEventListener('resize', updateWidth)
-      window.removeEventListener('orientationchange', updateWidth)
+      window.removeEventListener('resize', updateViewportMetrics)
+      window.removeEventListener('orientationchange', updateViewportMetrics)
+      visualViewport?.removeEventListener('resize', updateViewportMetrics)
       observer?.disconnect()
     }
   }, [error, loading, nativeFallback, pageCount])
@@ -1001,6 +1033,7 @@ export function PdfEmbed({
                 >
                   {shouldRender ? (
                     <PdfPageCanvas
+                      browserPixelRatio={browserPixelRatio}
                       estimatedHeight={estimatedHeight}
                       onError={setError}
                       onRendered={handlePageRendered}

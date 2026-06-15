@@ -1983,7 +1983,7 @@ select {
 }
 
 .document-frame__placeholder {
-  width: min(100%, 760px);
+  width: min(100%, 1120px);
   display: grid;
   place-items: center;
   border-radius: 18px;

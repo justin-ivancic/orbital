@@ -1659,6 +1659,45 @@ function App() {
     () => (activeOfflineDownload ? buildOfflineSeriesDetail(activeOfflineDownload) : null),
     [activeOfflineDownload],
   )
+  const readyOfflineDownloads = useMemo(
+    () => offlineDownloads.filter((record) => record.status === 'ready'),
+    [offlineDownloads],
+  )
+  const getReadyOfflineDownloadForEntry = useCallback(
+    (entryId: string | null | undefined) => {
+      if (!entryId) {
+        return null
+      }
+
+      return readyOfflineDownloads.find((record) => (
+        record.manifest.entries.some((entry) => entry.entryId === entryId)
+      )) ?? null
+    },
+    [readyOfflineDownloads],
+  )
+  const getReadyOfflineDownloadForSeries = useCallback(
+    (series: SeriesSummary | null | undefined, seriesDetail: SeriesDetail | null | undefined) => {
+      if (!series) {
+        return null
+      }
+
+      const directSeriesDownload = readyOfflineDownloads.find((record) => (
+        record.manifest.target.type === 'series' && record.manifest.target.seriesId === series.id
+      ))
+
+      if (directSeriesDownload) {
+        return directSeriesDownload
+      }
+
+      const entries = seriesDetail?.entries ?? []
+      if (series.category === 'books' && entries.length === 1) {
+        return getReadyOfflineDownloadForEntry(entries[0].preferredVariantId)
+      }
+
+      return null
+    },
+    [getReadyOfflineDownloadForEntry, readyOfflineDownloads],
+  )
 
   useEffect(() => {
     if (!authenticated || !appState?.bookmarks.length) {
@@ -2830,13 +2869,18 @@ function App() {
     }
   }
 
-  const openOfflineDownload = (record: OfflineDownloadRecord) => {
+  const openOfflineDownload = (record: OfflineDownloadRecord, preferredEntryId?: string | null) => {
     if (record.status !== 'ready') {
       return
     }
 
     const offlineSeries = buildOfflineSeriesDetail(record)
-    const firstEntry = offlineSeries.entries[0]
+    const entryToOpen =
+      preferredEntryId
+        ? offlineSeries.entries.find((entry) => (
+            entry.id === preferredEntryId || entry.preferredVariantId === preferredEntryId
+          )) ?? offlineSeries.entries[0]
+        : offlineSeries.entries[0]
 
     startTransition(() => {
       setSeriesCache((previousCache) => ({
@@ -2846,12 +2890,12 @@ function App() {
       setOfflineReaderDownloadId(record.id)
       setSelectedSeriesId(offlineSeries.id)
       setCurrentCategory(offlineSeries.category)
-      setSelectedEntryId(firstEntry?.id ?? null)
-      setSelectedVariantId(firstEntry?.preferredVariantId ?? null)
+      setSelectedEntryId(entryToOpen?.id ?? null)
+      setSelectedVariantId(entryToOpen?.preferredVariantId ?? null)
       setReaderReturnView('downloads')
       setReaderProgress(null)
       setReaderResumePosition(null)
-      setReaderResumeVariantId(firstEntry?.preferredVariantId ?? null)
+      setReaderResumeVariantId(entryToOpen?.preferredVariantId ?? null)
       setSearchOpen(false)
       setCurrentView('reader')
     })
@@ -3568,6 +3612,9 @@ function App() {
         entryId: currentVariant.id,
       } satisfies OfflineDownloadTarget)
     : null
+  const currentEntryOfflineDownload = currentVariant
+    ? getReadyOfflineDownloadForEntry(currentVariant.id)
+    : null
   const currentEntryDownloadBusy = currentEntryOfflineTarget
     ? offlineBusyIds[getOfflineTargetKey(currentEntryOfflineTarget)]
     : null
@@ -3588,12 +3635,18 @@ function App() {
           <button
             className="ghost-button"
             disabled={Boolean(currentEntryDownloadBusy)}
-            onClick={() => void startOfflineDownload(currentEntryOfflineTarget)}
+            onClick={() => (
+              currentEntryOfflineDownload
+                ? openOfflineDownload(currentEntryOfflineDownload, currentVariant.id)
+                : void startOfflineDownload(currentEntryOfflineTarget)
+            )}
             type="button"
           >
-            <AppIcon name="download" />
+            <AppIcon name={currentEntryOfflineDownload ? 'offline' : 'download'} />
             {currentEntryDownloadBusy ||
-              getEntryDownloadLabel(currentVariant.format, selectedSeriesSummary?.category ?? currentCategory)}
+              (currentEntryOfflineDownload
+                ? text.openOffline
+                : getEntryDownloadLabel(currentVariant.format, selectedSeriesSummary?.category ?? currentCategory))}
           </button>
         )}
       </>
@@ -4508,6 +4561,12 @@ function App() {
     }
 
     const visibleTags = getVisibleSeriesTags(selectedSeriesSummary)
+    const seriesOfflineTarget = {
+      type: 'series',
+      seriesId: selectedSeriesSummary.id,
+    } satisfies OfflineDownloadTarget
+    const seriesOfflineBusy = offlineBusyIds[getOfflineTargetKey(seriesOfflineTarget)]
+    const seriesOfflineDownload = getReadyOfflineDownloadForSeries(selectedSeriesSummary, selectedSeries)
 
     return (
       <div className="series-tab-grid">
@@ -4633,12 +4692,16 @@ function App() {
             </button>
             <button
               className="ghost-button"
-              disabled={Boolean(offlineBusyIds[getOfflineTargetKey({ type: 'series', seriesId: selectedSeriesSummary.id })])}
-              onClick={() => void startOfflineDownload({ type: 'series', seriesId: selectedSeriesSummary.id })}
+              disabled={Boolean(seriesOfflineBusy)}
+              onClick={() => (
+                seriesOfflineDownload
+                  ? openOfflineDownload(seriesOfflineDownload)
+                  : void startOfflineDownload(seriesOfflineTarget)
+              )}
               type="button"
             >
-              <AppIcon name="download" />
-              {offlineBusyIds[getOfflineTargetKey({ type: 'series', seriesId: selectedSeriesSummary.id })] || text.downloadSeries}
+              <AppIcon name={seriesOfflineDownload ? 'offline' : 'download'} />
+              {seriesOfflineBusy || (seriesOfflineDownload ? text.openOffline : text.downloadSeries)}
             </button>
             <button className="ghost-button" onClick={() => setActiveTab('comments')}>
               {text.comments}
@@ -4709,35 +4772,49 @@ function App() {
             </tr>
           </thead>
           <tbody>
-            {visibleSeriesEntries.map((entry) => (
-              <tr key={entry.id}>
-                <td data-label={text.entryLabel}>{entry.label}</td>
-                <td data-label={text.entryTitle}>{formatDisplayEntryTitle(entry.title)}</td>
-                <td data-label={text.entryDetails}>{entry.details}</td>
-                <td data-label={text.entryAction}>
-                  <div className="entry-table__actions">
-                    <button className="ghost-button" onClick={() => void openReader(selectedSeries.id, entry.id)}>
-                      {text.openReader}
-                    </button>
-                    <button
-                      className="ghost-button"
-                      disabled={Boolean(offlineBusyIds[getOfflineTargetKey({ type: 'entry', entryId: entry.preferredVariantId })])}
-                      onClick={() => void startOfflineDownload({ type: 'entry', entryId: entry.preferredVariantId })}
-                      type="button"
-                    >
-                      <AppIcon name="download" />
-                      {offlineBusyIds[getOfflineTargetKey({ type: 'entry', entryId: entry.preferredVariantId })] ||
-                        getEntryDownloadLabel(
-                          entry.variants.find((variant) => variant.id === entry.preferredVariantId)?.format ||
-                            entry.variants[0]?.format ||
-                            'pdf',
-                          selectedSeries.category,
+            {visibleSeriesEntries.map((entry) => {
+              const entryOfflineTarget = {
+                type: 'entry',
+                entryId: entry.preferredVariantId,
+              } satisfies OfflineDownloadTarget
+              const entryOfflineBusy = offlineBusyIds[getOfflineTargetKey(entryOfflineTarget)]
+              const entryOfflineDownload = getReadyOfflineDownloadForEntry(entry.preferredVariantId)
+              const preferredFormat =
+                entry.variants.find((variant) => variant.id === entry.preferredVariantId)?.format ||
+                entry.variants[0]?.format ||
+                'pdf'
+
+              return (
+                <tr key={entry.id}>
+                  <td data-label={text.entryLabel}>{entry.label}</td>
+                  <td data-label={text.entryTitle}>{formatDisplayEntryTitle(entry.title)}</td>
+                  <td data-label={text.entryDetails}>{entry.details}</td>
+                  <td data-label={text.entryAction}>
+                    <div className="entry-table__actions">
+                      <button className="ghost-button" onClick={() => void openReader(selectedSeries.id, entry.id)}>
+                        {text.openReader}
+                      </button>
+                      <button
+                        className="ghost-button"
+                        disabled={Boolean(entryOfflineBusy)}
+                        onClick={() => (
+                          entryOfflineDownload
+                            ? openOfflineDownload(entryOfflineDownload, entry.preferredVariantId)
+                            : void startOfflineDownload(entryOfflineTarget)
                         )}
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
+                        type="button"
+                      >
+                        <AppIcon name={entryOfflineDownload ? 'offline' : 'download'} />
+                        {entryOfflineBusy ||
+                          (entryOfflineDownload
+                            ? text.openOffline
+                            : getEntryDownloadLabel(preferredFormat, selectedSeries.category))}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>
