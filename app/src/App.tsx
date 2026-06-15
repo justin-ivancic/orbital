@@ -3716,7 +3716,7 @@ function App() {
       cue: bookmark.progress,
     }
   }
-  const getEntryDownloadLabel = (format: EntryFormat, category: CategoryId) => {
+  function getEntryDownloadLabel(format: EntryFormat, category: CategoryId) {
     if (category === 'manga' || format === 'cbz') {
       return text.downloadEntry
     }
