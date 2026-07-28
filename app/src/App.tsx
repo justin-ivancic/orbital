@@ -93,6 +93,7 @@ import {
   isProtectedRoute,
   isSeriesRoute,
   parseAppRoute,
+  readerContentSessionKey,
   routeForLocation,
   routeView,
   type AppRoute,
@@ -1740,7 +1741,6 @@ function App() {
   )
   const [discoverViewMode, setDiscoverViewMode] = useState<'grid' | 'list'>('grid')
   const [seriesCache, setSeriesCache] = useState<Record<string, SeriesDetail>>({})
-  const [seriesLoadingId, setSeriesLoadingId] = useState<string | null>(null)
   const [seriesError, setSeriesError] = useState<string | null>(null)
   const [readerProgress, setReaderProgress] = useState<ReaderProgress | null>(null)
   const [readerResumePosition, setReaderResumePosition] =
@@ -1788,6 +1788,7 @@ function App() {
   })
   const mainShellRef = useRef<HTMLElement | null>(null)
   const lastAutoSaveKeyRef = useRef<string | null>(null)
+  const initializedReaderResumeKeyRef = useRef<string | null>(null)
   const readerTouchStartRef = useRef<{ edge: 'left' | 'right' | null; x: number; y: number } | null>(null)
   const lastReaderTouchToggleRef = useRef(0)
   const readerChromeTimerRef = useRef<number | null>(null)
@@ -2916,7 +2917,6 @@ function App() {
     }
 
     let active = true
-    setSeriesLoadingId(selectedSeriesId)
     setSeriesError(null)
 
     void api
@@ -2949,12 +2949,6 @@ function App() {
           setSeriesError(error instanceof Error ? error.message : text.loadingSeries)
         }
       })
-      .finally(() => {
-        if (active) {
-          setSeriesLoadingId(null)
-        }
-      })
-
     return () => {
       active = false
     }
@@ -3113,10 +3107,20 @@ function App() {
 
   useEffect(() => {
     const currentVariantId = currentVariant?.id ?? null
+    const resumeKey =
+      currentView === 'reader'
+        ? readerContentSessionKey(currentRoute, currentVariantId)
+        : null
 
-    if (currentView !== 'reader' || !currentVariantId) {
+    if (!resumeKey || !currentVariantId) {
+      initializedReaderResumeKeyRef.current = null
       return
     }
+
+    if (initializedReaderResumeKeyRef.current === resumeKey) {
+      return
+    }
+    initializedReaderResumeKeyRef.current = resumeKey
 
     const savedPosition = appState?.readingPositions?.[currentVariantId] ?? null
     const resumePosition = routeReadingPosition(currentRoute, savedPosition)
@@ -3191,19 +3195,6 @@ function App() {
     ) {
       setSelectedSeriesId(firstSeriesId(nextState))
     }
-  }
-
-  const ensureSeriesLoaded = async (seriesId: string) => {
-    if (seriesCache[seriesId]) {
-      return seriesCache[seriesId]
-    }
-
-    const response = await api.getSeries(seriesId)
-    setSeriesCache((previousCache) => ({
-      ...previousCache,
-      [response.series.id]: response.series,
-    }))
-    return response.series
   }
 
   const handleAuth = async (event: FormEvent<HTMLFormElement>) => {
@@ -4288,7 +4279,6 @@ function App() {
         className="series-card"
         key={series.id}
         navigate={navigateRoute}
-        onNavigate={() => void ensureSeriesLoaded(series.id).catch(() => undefined)}
         route={seriesRoute(series)}
       >
         {renderPoster(series)}
@@ -4753,7 +4743,6 @@ function App() {
                       <RouteLink
                         className="ghost-button"
                         navigate={navigateRoute}
-                        onNavigate={() => void ensureSeriesLoaded(series.id).catch(() => undefined)}
                         route={seriesRoute(series)}
                       >
                         <AppIcon name="chevronRight" />
@@ -4778,7 +4767,6 @@ function App() {
                         navigate={navigateRoute}
                         onNavigate={() => {
                           setOpenBookmarkMenuKey(null)
-                          void ensureSeriesLoaded(series.id).catch(() => undefined)
                         }}
                         route={seriesRoute(series)}
                       >
@@ -5235,7 +5223,6 @@ function App() {
                 navigate={navigateRoute}
                 onNavigate={() => {
                   setSearchOpen(false)
-                  void ensureSeriesLoaded(series.id).catch(() => undefined)
                 }}
                 route={seriesRoute(series)}
               >
@@ -5541,7 +5528,6 @@ function App() {
                     className="list-link-button"
                     key={series.id}
                     navigate={navigateRoute}
-                    onNavigate={() => void ensureSeriesLoaded(series.id).catch(() => undefined)}
                     route={seriesRoute(series)}
                   >
                     <span>{getSeriesDisplayTitle(series)}</span>
@@ -5629,10 +5615,6 @@ function App() {
   }
 
   const renderEntriesTab = () => {
-    if (seriesLoadingId === selectedSeriesId) {
-      return <article className="panel panel--padded">{text.loadingSeries}</article>
-    }
-
     if (!selectedSeries) {
       return <article className="panel panel--padded">{seriesError || text.loadingSeries}</article>
     }
@@ -6433,7 +6415,6 @@ function App() {
               <RouteLink
                 className="ghost-button"
                 navigate={navigateRoute}
-                onNavigate={() => void ensureSeriesLoaded(selectedMetadataSeries.id).catch(() => undefined)}
                 route={seriesRoute(selectedMetadataSeries, 'overview')}
               >
                 {text.metadataOpenSeries}
@@ -7052,24 +7033,21 @@ function App() {
                   ) : searchPreview.length === 0 ? (
                     <div className="search-state">No matches yet.</div>
                   ) : (
-                      searchPreview.map((series) => (
-                        <RouteLink
-                          className="search-result"
-                          key={series.id}
-                          navigate={navigateRoute}
-                          onNavigate={() => {
-                            setSearchOpen(false)
-                            void ensureSeriesLoaded(series.id).catch(() => undefined)
-                          }}
-                          route={seriesRoute(series)}
-                        >
-                          {renderPoster(series, true)}
-                          <div>
-                            <strong>{getSeriesDisplayTitle(series)}</strong>
-                            <p>{categoryLabel(series.category)} • {series.progressLabel}</p>
-                          </div>
-                        </RouteLink>
-                      ))
+                    searchPreview.map((series) => (
+                      <RouteLink
+                        className="search-result"
+                        key={series.id}
+                        navigate={navigateRoute}
+                        onNavigate={() => setSearchOpen(false)}
+                        route={seriesRoute(series)}
+                      >
+                        {renderPoster(series, true)}
+                        <div>
+                          <strong>{getSeriesDisplayTitle(series)}</strong>
+                          <p>{categoryLabel(series.category)} • {series.progressLabel}</p>
+                        </div>
+                      </RouteLink>
+                    ))
                   )}
                 </div>
               </div>

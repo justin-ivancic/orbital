@@ -371,6 +371,22 @@ export const isSeriesRoute = (
 ): route is Extract<AppRoute, { name: 'series' | 'reader' }> =>
   route.name === 'series' || route.name === 'reader'
 
+export const readerContentSessionKey = (route: AppRoute, variantId: string | null) => {
+  if (!variantId) {
+    return null
+  }
+
+  if (route.name === 'reader') {
+    return `reader:${route.seriesId}:${variantId}`
+  }
+
+  if (route.name === 'offlineReader') {
+    return `offline-reader:${route.downloadId}:${variantId}`
+  }
+
+  return null
+}
+
 export const routeForLocation = () =>
   parseAppRoute({ pathname: window.location.pathname, search: window.location.search })
 

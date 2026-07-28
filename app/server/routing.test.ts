@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   appRoutePath,
   parseAppRoute,
+  readerContentSessionKey,
   safeInternalDestination,
   type AppRoute,
 } from '../src/routing'
@@ -79,6 +80,32 @@ test('uses the page position in preference to a conflicting percentage', () => {
       variantId: null,
     },
   )
+})
+
+test('keeps reader content mounted when only the URL position changes', () => {
+  const readerRoute: AppRoute = {
+    name: 'reader',
+    category: 'books',
+    seriesId: 'book-a82f38cc',
+    entryId: 'book-a9b123',
+    page: 1,
+    percent: null,
+    variantId: null,
+  }
+  const scrolledRoute: AppRoute = {
+    ...readerRoute,
+    page: 27,
+  }
+
+  assert.equal(
+    readerContentSessionKey(readerRoute, 'pdf-variant'),
+    readerContentSessionKey(scrolledRoute, 'pdf-variant'),
+  )
+  assert.notEqual(
+    readerContentSessionKey(readerRoute, 'pdf-variant'),
+    readerContentSessionKey(readerRoute, 'alternate-variant'),
+  )
+  assert.equal(readerContentSessionKey({ name: 'bookmarks', scope: 'all' }, 'pdf-variant'), null)
 })
 
 test('bounds malformed reader and filter state to safe defaults', () => {
