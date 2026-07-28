@@ -7022,8 +7022,12 @@ button[aria-label] {
   position: relative;
 }
 
+.app-shell--reader .cbz-viewer__viewport--fit-width .cbz-page--paged {
+  padding-inline: 0;
+}
+
 .cbz-viewer__viewport--fit-width .cbz-page--paged .cbz-page__figure {
-  place-items: start center;
+  place-items: safe center;
 }
 
 .cbz-viewer__viewport--manual .cbz-page--paged .cbz-page__figure {
@@ -7119,7 +7123,13 @@ button[aria-label] {
 }
 
 .document-frame__viewport--fit-width .document-frame__paged-group {
-  place-items: start center;
+  place-items: safe center;
+}
+
+.app-shell--reader
+  .document-frame__viewport--fit-width
+  .document-frame__paged-group {
+  padding-inline: 0;
 }
 
 .document-frame__viewport--manual .document-frame__paged-group {

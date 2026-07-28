@@ -227,6 +227,7 @@ const writeViewportCenter = (viewport: HTMLDivElement, center: ViewportCenter) =
 }
 
 type CenteredPagedViewportOptions = {
+  enabled: boolean
   fitMode: ReaderSettings['fitMode']
   pageKey: string
   recenterKey?: string
@@ -235,6 +236,7 @@ type CenteredPagedViewportOptions = {
 }
 
 const useCenteredPagedViewport = ({
+  enabled,
   fitMode,
   pageKey,
   recenterKey = '',
@@ -247,12 +249,18 @@ const useCenteredPagedViewport = ({
 
   const captureViewportCenter = useCallback(() => {
     const viewport = viewportRef.current
-    pendingCenterRef.current = viewport ? readViewportCenter(viewport) : centeredViewport
-  }, [viewportRef])
+    pendingCenterRef.current =
+      enabled && viewport ? readViewportCenter(viewport) : centeredViewport
+  }, [enabled, viewportRef])
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current
     if (!viewport) {
+      return
+    }
+
+    if (!enabled) {
+      pendingCenterRef.current = null
       return
     }
 
@@ -279,11 +287,16 @@ const useCenteredPagedViewport = ({
     const frame = requestAnimationFrame(applyCenter)
 
     return () => cancelAnimationFrame(frame)
-  }, [fitMode, pageKey, recenterKey, viewportRef, zoom])
+  }, [enabled, fitMode, pageKey, recenterKey, viewportRef, zoom])
 
   useEffect(() => {
     const viewport = viewportRef.current
-    if (!viewport || fitMode !== 'manual' || typeof ResizeObserver === 'undefined') {
+    if (
+      !enabled ||
+      !viewport ||
+      fitMode !== 'manual' ||
+      typeof ResizeObserver === 'undefined'
+    ) {
       return
     }
 
@@ -308,7 +321,7 @@ const useCenteredPagedViewport = ({
       cancelAnimationFrame(frame)
       observer.disconnect()
     }
-  }, [fitMode, pageKey, viewportRef])
+  }, [enabled, fitMode, pageKey, viewportRef])
 
   return captureViewportCenter
 }
@@ -1543,6 +1556,7 @@ export function PdfEmbed({
     settings.spreadAlignment,
   ].join(':')
   const capturePdfViewportCenter = useCenteredPagedViewport({
+    enabled: settings.layout === 'paged',
     fitMode: settings.layout === 'paged' ? settings.fitMode : 'fit-width',
     pageKey: pdfPageKey,
     recenterKey: `${viewportWidth}x${viewportHeight}`,
@@ -1576,9 +1590,11 @@ export function PdfEmbed({
   const pageColumns =
     settings.layout === 'paged' && effectiveViewMode === 'spread' ? 2 : 1
   const pagedInlinePadding =
-    measuredViewportWidth <= 720
-      ? 12
-      : Math.min(Math.max(measuredViewportWidth * 0.06, 24), 72)
+    settings.fitMode === 'fit-width'
+      ? 0
+      : measuredViewportWidth <= 720
+        ? 12
+        : Math.min(Math.max(measuredViewportWidth * 0.06, 24), 72)
   const pagedBlockPadding = measuredViewportWidth <= 720 ? 8 : 14
   const availableWidth = Math.max(
     measuredViewportWidth - pagedInlinePadding * 2,
@@ -2438,6 +2454,7 @@ export function CbzReader({
     settings.spreadAlignment,
   ].join(':')
   const captureCbzViewportCenter = useCenteredPagedViewport({
+    enabled: settings.layout === 'paged',
     fitMode: settings.layout === 'paged' ? settings.fitMode : 'fit-width',
     pageKey: cbzPageKey,
     viewportRef,
