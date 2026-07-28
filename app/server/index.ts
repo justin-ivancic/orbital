@@ -24,6 +24,7 @@ import {
   getOfflineCapabilities,
   resolveOfflineResource,
 } from './offline'
+import { getReaderPreference, saveReaderPreference } from './readerPreferences'
 import {
   assertRateLimitAllowed,
   clearRateLimitBuckets,
@@ -1027,6 +1028,37 @@ app.delete('/api/bookmarks/:seriesId', requireAuth, (request, response) => {
         request.params.seriesId,
       ),
     )
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
+app.get('/api/reader-preferences/:seriesId', requireAuth, (request, response) => {
+  try {
+    const typedRequest = request as RequestWithUser
+    response.json({
+      preference: getReaderPreference(
+        db,
+        typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>,
+        request.params.seriesId,
+      ),
+    })
+  } catch (error) {
+    sendError(response, error, 404)
+  }
+})
+
+app.put('/api/reader-preferences/:seriesId', requireAuth, (request, response) => {
+  try {
+    const typedRequest = request as RequestWithUser
+    response.json({
+      preference: saveReaderPreference(
+        db,
+        typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>,
+        request.params.seriesId,
+        request.body?.settings,
+      ),
+    })
   } catch (error) {
     sendError(response, error)
   }

@@ -11,9 +11,39 @@ import {
   type RenderTask,
 } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import pdfWorker from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
-import { ExternalLink, Maximize2, Minus, Plus, Settings2, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import type { ReaderProgress, ReaderViewMode } from './appTypes'
+import {
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  Minus,
+  Plus,
+  RotateCcw,
+  Settings2,
+  X,
+} from 'lucide-react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+  type TouchEvent as ReactTouchEvent,
+} from 'react'
+import type {
+  EntryFormat,
+  ReaderDirection,
+  ReaderProgress,
+  ReaderSettings,
+  ReaderViewMode,
+  ReadingStyle,
+} from './appTypes'
+import {
+  compatibleReadingStyles,
+  readerSettingsForStyle,
+  readingStyleLabels,
+} from './readerSettings'
 
 const imagePattern = /\.(avif|gif|jpe?g|png|webp)$/i
 const minReaderWidth = 280
@@ -72,6 +102,8 @@ type PdfEmbedProps = {
   title: string
   initialPage?: number
   onProgressChange?: (progress: ReaderProgress) => void
+  onSettingsChange: (settings: ReaderSettings) => void
+  settings: ReaderSettings
   toolbarAccessory?: ReactNode
 }
 
@@ -81,12 +113,9 @@ type CbzReaderProps = {
   title: string
   offlinePages?: CbzPage[]
   initialPage?: number
-  initialViewMode?: ReaderViewMode
-  initialReadingDirection?: 'ltr' | 'rtl'
-  initialPageOrderMode?: 'archive' | 'filename'
-  initialSpreadAlignment?: 'cover-first' | 'straight-pairs'
   onProgressChange?: (progress: ReaderProgress) => void
-  preferenceKey?: string
+  onSettingsChange: (settings: ReaderSettings) => void
+  settings: ReaderSettings
   toolbarAccessory?: ReactNode
 }
 
@@ -95,6 +124,8 @@ type HtmlChapterReaderProps = {
   title: string
   initialProgress?: number
   onProgressChange?: (progress: ReaderProgress) => void
+  onSettingsChange: (settings: ReaderSettings) => void
+  settings: ReaderSettings
   toolbarAccessory?: ReactNode
 }
 
@@ -104,6 +135,8 @@ type TextFileReaderProps = {
   format: 'md' | 'txt'
   initialProgress?: number
   onProgressChange?: (progress: ReaderProgress) => void
+  onSettingsChange: (settings: ReaderSettings) => void
+  settings: ReaderSettings
   toolbarAccessory?: ReactNode
 }
 
@@ -112,6 +145,8 @@ type EpubReaderProps = {
   title: string
   initialProgress?: number
   onProgressChange?: (progress: ReaderProgress) => void
+  onSettingsChange: (settings: ReaderSettings) => void
+  settings: ReaderSettings
   toolbarAccessory?: ReactNode
 }
 
@@ -144,18 +179,9 @@ type CbzDisplayPage = {
   url: string
 }
 
-type CbzReadingDirection = 'ltr' | 'rtl'
+type CbzReadingDirection = ReaderDirection
 type CbzPageOrderMode = 'archive' | 'filename'
 type CbzSpreadAlignment = 'cover-first' | 'straight-pairs'
-type CbzScaleMode = 'manual' | 'fit-width'
-
-const getInitialCbzScaleMode = (): CbzScaleMode => {
-  if (typeof window === 'undefined') {
-    return 'manual'
-  }
-
-  return window.matchMedia('(max-width: 1180px)').matches ? 'fit-width' : 'manual'
-}
 
 const naturalSort = (left: string, right: string) =>
   left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
@@ -166,6 +192,449 @@ const clampPage = (page: number, totalPages: number) =>
 const clampPercent = (value: number) => Math.min(Math.max(Math.round(value), 0), 100)
 const clampZoom = (value: number) =>
   Math.min(Math.max(Math.round(value), minCbzZoom), maxCbzZoom)
+
+type ReaderSettingsControlProps = {
+  fileUrl: string
+  format: EntryFormat
+  onSettingsChange: (settings: ReaderSettings) => void
+  settings: ReaderSettings
+}
+
+function ReaderSettingsControl({
+  fileUrl,
+  format,
+  onSettingsChange,
+  settings,
+}: ReaderSettingsControlProps) {
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const imageReader = format === 'cbz' || format === 'pdf'
+  const availableStyles = compatibleReadingStyles(format)
+  const settingsId = `${format}-reader-settings`
+  const updateSettings = (updates: Partial<ReaderSettings>) => {
+    onSettingsChange({ ...settings, ...updates })
+  }
+  const applyStyle = (style: ReadingStyle) => {
+    onSettingsChange(readerSettingsForStyle(style, settings))
+  }
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSettingsOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [settingsOpen])
+
+  return (
+    <div className="reader-settings">
+      <button
+        aria-controls={settingsId}
+        aria-expanded={settingsOpen}
+        aria-haspopup="dialog"
+        className={`ghost-button reader-settings__trigger ${settingsOpen ? 'is-active' : ''}`}
+        onClick={() => setSettingsOpen((isOpen) => !isOpen)}
+        type="button"
+      >
+        <Settings2 aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+        <span className="reader-settings__trigger-label">Reading style</span>
+      </button>
+
+      {settingsOpen && (
+        <div
+          aria-label="Reader settings"
+          className="reader-settings__sheet"
+          id={settingsId}
+          role="dialog"
+        >
+          <div className="reader-settings__header">
+            <div>
+              <span>Reading style</span>
+              <strong>{readingStyleLabels[settings.style]}</strong>
+            </div>
+            <button
+              aria-label="Close reader settings"
+              className="reader-settings__close"
+              onClick={() => setSettingsOpen(false)}
+              type="button"
+            >
+              <X aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+            </button>
+          </div>
+
+          <div className="reader-settings__group reader-settings__group--wide">
+            <span className="reader-settings__label">Treat this as</span>
+            <div
+              aria-label="Reading style"
+              className="reader-settings__choices reader-settings__choices--styles"
+            >
+              {availableStyles.map((style) => (
+                <button
+                  aria-pressed={settings.style === style}
+                  className={settings.style === style ? 'is-active' : ''}
+                  key={style}
+                  onClick={() => applyStyle(style)}
+                  type="button"
+                >
+                  {readingStyleLabels[style]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="reader-settings__group">
+            <span className="reader-settings__label">Layout</span>
+            <div aria-label="Reader layout" className="reader-settings__choices">
+              <button
+                aria-pressed={settings.layout === 'paged'}
+                className={settings.layout === 'paged' ? 'is-active' : ''}
+                onClick={() => updateSettings({ layout: 'paged' })}
+                type="button"
+              >
+                Paged
+              </button>
+              <button
+                aria-pressed={settings.layout === 'continuous'}
+                className={settings.layout === 'continuous' ? 'is-active' : ''}
+                onClick={() => updateSettings({ layout: 'continuous' })}
+                type="button"
+              >
+                Continuous
+              </button>
+            </div>
+          </div>
+
+          {imageReader && settings.layout === 'paged' && (
+            <div className="reader-settings__group">
+              <span className="reader-settings__label">Page view</span>
+              <div aria-label="Page view" className="reader-settings__choices">
+                <button
+                  aria-pressed={settings.viewMode === 'single'}
+                  className={settings.viewMode === 'single' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ viewMode: 'single' })}
+                  type="button"
+                >
+                  Single
+                </button>
+                <button
+                  aria-pressed={settings.viewMode === 'spread'}
+                  className={settings.viewMode === 'spread' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ viewMode: 'spread' })}
+                  type="button"
+                >
+                  Spread
+                </button>
+              </div>
+            </div>
+          )}
+
+          {imageReader && (
+            <div className="reader-settings__group reader-settings__group--wide">
+              <span className="reader-settings__label">Page fit</span>
+              <div
+                aria-label="Page fit"
+                className="reader-settings__choices reader-settings__choices--three"
+              >
+                <button
+                  aria-pressed={settings.fitMode === 'fit-page'}
+                  className={settings.fitMode === 'fit-page' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ fitMode: 'fit-page', zoom: 100 })}
+                  type="button"
+                >
+                  Whole page
+                </button>
+                <button
+                  aria-pressed={settings.fitMode === 'fit-width'}
+                  className={settings.fitMode === 'fit-width' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ fitMode: 'fit-width', zoom: 100 })}
+                  type="button"
+                >
+                  Width
+                </button>
+                <button
+                  aria-pressed={settings.fitMode === 'manual'}
+                  className={settings.fitMode === 'manual' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ fitMode: 'manual' })}
+                  type="button"
+                >
+                  Zoom
+                </button>
+              </div>
+              {settings.fitMode === 'manual' && (
+                <div className="reader-settings__stepper" aria-label="Page zoom">
+                  <button
+                    aria-label="Zoom out"
+                    disabled={settings.zoom <= minCbzZoom}
+                    onClick={() => updateSettings({ zoom: clampZoom(settings.zoom - cbzZoomStep) })}
+                    type="button"
+                  >
+                    <Minus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+                  </button>
+                  <span>{settings.zoom}%</span>
+                  <button
+                    aria-label="Zoom in"
+                    disabled={settings.zoom >= maxCbzZoom}
+                    onClick={() => updateSettings({ zoom: clampZoom(settings.zoom + cbzZoomStep) })}
+                    type="button"
+                  >
+                    <Plus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {imageReader && settings.style !== 'webtoon' && (
+            <div className="reader-settings__group">
+              <span className="reader-settings__label">Direction</span>
+              <div aria-label="Reading direction" className="reader-settings__choices">
+                <button
+                  aria-pressed={settings.direction === 'ltr'}
+                  className={settings.direction === 'ltr' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ direction: 'ltr' })}
+                  type="button"
+                >
+                  LTR
+                </button>
+                <button
+                  aria-pressed={settings.direction === 'rtl'}
+                  className={settings.direction === 'rtl' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ direction: 'rtl' })}
+                  type="button"
+                >
+                  RTL
+                </button>
+              </div>
+            </div>
+          )}
+
+          {format === 'cbz' && (
+            <div className="reader-settings__group">
+              <span className="reader-settings__label">Page order</span>
+              <div aria-label="Page order" className="reader-settings__choices">
+                <button
+                  aria-pressed={settings.pageOrder === 'archive'}
+                  className={settings.pageOrder === 'archive' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ pageOrder: 'archive' })}
+                  type="button"
+                >
+                  Archive
+                </button>
+                <button
+                  aria-pressed={settings.pageOrder === 'filename'}
+                  className={settings.pageOrder === 'filename' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ pageOrder: 'filename' })}
+                  type="button"
+                >
+                  Filename
+                </button>
+              </div>
+            </div>
+          )}
+
+          {imageReader && settings.layout === 'paged' && settings.viewMode === 'spread' && (
+            <div className="reader-settings__group">
+              <span className="reader-settings__label">Spread pairing</span>
+              <div aria-label="Spread pairing" className="reader-settings__choices">
+                <button
+                  aria-pressed={settings.spreadAlignment === 'cover-first'}
+                  className={settings.spreadAlignment === 'cover-first' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ spreadAlignment: 'cover-first' })}
+                  type="button"
+                >
+                  Cover first
+                </button>
+                <button
+                  aria-pressed={settings.spreadAlignment === 'straight-pairs'}
+                  className={settings.spreadAlignment === 'straight-pairs' ? 'is-active' : ''}
+                  onClick={() => updateSettings({ spreadAlignment: 'straight-pairs' })}
+                  type="button"
+                >
+                  Pairs
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!imageReader && (
+            <div className="reader-settings__group reader-settings__group--wide">
+              <span className="reader-settings__label">Text size</span>
+              <div className="reader-settings__stepper" aria-label="Text size">
+                <button
+                  aria-label="Decrease text size"
+                  disabled={settings.fontSize <= 80}
+                  onClick={() => updateSettings({ fontSize: Math.max(settings.fontSize - 10, 80) })}
+                  type="button"
+                >
+                  <Minus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+                </button>
+                <span>{settings.fontSize}%</span>
+                <button
+                  aria-label="Increase text size"
+                  disabled={settings.fontSize >= 160}
+                  onClick={() => updateSettings({ fontSize: Math.min(settings.fontSize + 10, 160) })}
+                  type="button"
+                >
+                  <Plus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="reader-settings__footer">
+            <button
+              className="ghost-button"
+              onClick={() => onSettingsChange(readerSettingsForStyle(settings.style))}
+              type="button"
+            >
+              <RotateCcw aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+              Reset style
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => window.open(fileUrl, '_blank', 'noopener,noreferrer')}
+              type="button"
+            >
+              <ExternalLink aria-hidden="true" className="app-icon" strokeWidth={1.9} />
+              Open original
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+type PagedReaderSurfaceProps = {
+  canNext: boolean
+  canPrevious: boolean
+  children: ReactNode
+  direction: ReaderDirection
+  onNext: () => void
+  onPrevious: () => void
+  swipeEnabled?: boolean
+}
+
+function PagedReaderSurface({
+  canNext,
+  canPrevious,
+  children,
+  direction,
+  onNext,
+  onPrevious,
+  swipeEnabled = true,
+}: PagedReaderSurfaceProps) {
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null)
+  const leftAction = direction === 'rtl' ? onNext : onPrevious
+  const rightAction = direction === 'rtl' ? onPrevious : onNext
+  const canGoLeft = direction === 'rtl' ? canNext : canPrevious
+  const canGoRight = direction === 'rtl' ? canPrevious : canNext
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(target.tagName))
+      ) {
+        return
+      }
+
+      if (event.key === 'ArrowLeft' && canGoLeft) {
+        event.preventDefault()
+        leftAction()
+      } else if ((event.key === 'ArrowRight' || event.key === 'PageDown') && canGoRight) {
+        event.preventDefault()
+        rightAction()
+      } else if (event.key === 'PageUp' && canGoLeft) {
+        event.preventDefault()
+        leftAction()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [canGoLeft, canGoRight, leftAction, rightAction])
+
+  const handleTouchStart = (event: ReactTouchEvent<HTMLDivElement>) => {
+    event.stopPropagation()
+
+    if (!swipeEnabled) {
+      touchStartRef.current = null
+      return
+    }
+
+    const touch = event.touches[0]
+    if (!touch) {
+      return
+    }
+
+    touchStartRef.current = { x: touch.clientX, y: touch.clientY }
+  }
+
+  const handleTouchEnd = (event: ReactTouchEvent<HTMLDivElement>) => {
+    event.stopPropagation()
+
+    if (!swipeEnabled) {
+      touchStartRef.current = null
+      return
+    }
+
+    const start = touchStartRef.current
+    const touch = event.changedTouches[0]
+    touchStartRef.current = null
+
+    if (!start || !touch) {
+      return
+    }
+
+    const deltaX = touch.clientX - start.x
+    const deltaY = touch.clientY - start.y
+    if (Math.abs(deltaX) < 56 || Math.abs(deltaX) <= Math.abs(deltaY) * 1.25) {
+      return
+    }
+
+    if (deltaX > 0 && canGoLeft) {
+      leftAction()
+    } else if (deltaX < 0 && canGoRight) {
+      rightAction()
+    }
+  }
+
+  return (
+    <div
+      className="reader-paged-surface"
+      onTouchEnd={handleTouchEnd}
+      onTouchStart={handleTouchStart}
+    >
+      {children}
+      <button
+        aria-label={direction === 'rtl' ? 'Next page' : 'Previous page'}
+        className="reader-page-turn reader-page-turn--left"
+        disabled={!canGoLeft}
+        onClick={leftAction}
+        type="button"
+      >
+        <ChevronLeft aria-hidden="true" strokeWidth={1.8} />
+      </button>
+      <button
+        aria-label={direction === 'rtl' ? 'Previous page' : 'Next page'}
+        className="reader-page-turn reader-page-turn--right"
+        disabled={!canGoRight}
+        onClick={rightAction}
+        type="button"
+      >
+        <ChevronRight aria-hidden="true" strokeWidth={1.8} />
+      </button>
+    </div>
+  )
+}
 
 const getCenteredPageRange = (centerPage: number, totalPages: number, radius: number) => {
   if (totalPages <= 0) {
@@ -538,6 +1007,73 @@ const buildCbzGroups = (
   return groups
 }
 
+type PdfDisplayPage = {
+  logicalPage: number
+  slot: 'left' | 'right' | 'single'
+}
+
+type PdfGroup = {
+  id: string
+  startPage: number
+  endPage: number
+  pages: PdfDisplayPage[]
+}
+
+const buildPdfGroups = (
+  pageCount: number,
+  viewMode: ReaderViewMode,
+  readingDirection: ReaderDirection,
+  spreadAlignment: CbzSpreadAlignment,
+): PdfGroup[] => {
+  const pageNumbers = Array.from({ length: pageCount }, (_, index) => index + 1)
+
+  if (viewMode === 'single') {
+    return pageNumbers.map((pageNumber) => ({
+      id: `page-${pageNumber}`,
+      startPage: pageNumber,
+      endPage: pageNumber,
+      pages: [{ logicalPage: pageNumber, slot: 'single' }],
+    }))
+  }
+
+  const groups: PdfGroup[] = []
+  const startIndex = spreadAlignment === 'cover-first' ? 1 : 0
+
+  if (spreadAlignment === 'cover-first' && pageNumbers[0]) {
+    groups.push({
+      id: 'page-1',
+      startPage: 1,
+      endPage: 1,
+      pages: [{ logicalPage: 1, slot: 'single' }],
+    })
+  }
+
+  for (let index = startIndex; index < pageNumbers.length; index += 2) {
+    const firstPage = pageNumbers[index]
+    const secondPage = pageNumbers[index + 1]
+    const displayPages: PdfDisplayPage[] = secondPage
+      ? readingDirection === 'rtl'
+        ? [
+            { logicalPage: secondPage, slot: 'left' },
+            { logicalPage: firstPage, slot: 'right' },
+          ]
+        : [
+            { logicalPage: firstPage, slot: 'left' },
+            { logicalPage: secondPage, slot: 'right' },
+          ]
+      : [{ logicalPage: firstPage, slot: 'single' }]
+
+    groups.push({
+      id: `page-${firstPage}`,
+      startPage: firstPage,
+      endPage: secondPage ?? firstPage,
+      pages: displayPages,
+    })
+  }
+
+  return groups
+}
+
 const orderCbzPages = (pages: CbzPage[], pageOrderMode: CbzPageOrderMode) => {
   if (pageOrderMode === 'archive') {
     return [...pages].sort((left, right) => left.archiveIndex - right.archiveIndex)
@@ -675,6 +1211,8 @@ export function PdfEmbed({
   title,
   initialPage = 1,
   onProgressChange,
+  onSettingsChange,
+  settings,
   toolbarAccessory,
 }: PdfEmbedProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
@@ -686,6 +1224,7 @@ export function PdfEmbed({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [viewportWidth, setViewportWidth] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(0)
   const [browserPixelRatio, setBrowserPixelRatio] = useState(() => getPdfRenderPixelRatio())
   const [visiblePage, setVisiblePage] = useState(initialPage)
   const [renderedPdfPages, setRenderedPdfPages] = useState<Set<number>>(() => new Set())
@@ -777,9 +1316,18 @@ export function PdfEmbed({
         const nextWidth = Math.round(
           element.clientWidth || element.getBoundingClientRect().width || window.innerWidth,
         )
+        const nextHeight = Math.round(
+          element.clientHeight ||
+          element.getBoundingClientRect().height ||
+          window.visualViewport?.height ||
+          window.innerHeight,
+        )
 
         setViewportWidth((previousWidth) => (
           previousWidth === nextWidth ? previousWidth : nextWidth
+        ))
+        setViewportHeight((previousHeight) => (
+          previousHeight === nextHeight ? previousHeight : nextHeight
         ))
         setBrowserPixelRatio((previousPixelRatio) => {
           const nextPixelRatio = getPdfRenderPixelRatio()
@@ -817,21 +1365,83 @@ export function PdfEmbed({
     setFirstPageReady(true)
   }, [])
 
-  const targetWidth = useMemo(
-    () => {
+  const effectiveViewMode = settings.layout === 'paged' ? settings.viewMode : 'single'
+  const pdfGroups = useMemo(
+    () => buildPdfGroups(
+      pageCount,
+      effectiveViewMode,
+      settings.direction,
+      settings.spreadAlignment,
+    ),
+    [
+      effectiveViewMode,
+      pageCount,
+      settings.direction,
+      settings.spreadAlignment,
+    ],
+  )
+  const activePdfGroupIndex = Math.max(
+    pdfGroups.findIndex(
+      (group) => visiblePage >= group.startPage && visiblePage <= group.endPage,
+    ),
+    0,
+  )
+  const activePdfGroup = pdfGroups[activePdfGroupIndex] ?? null
+
+  useEffect(() => {
+    didInitialScrollRef.current = false
+  }, [effectiveViewMode, settings.layout])
+
+  const targetWidth = useMemo(() => {
       const measuredViewportWidth =
         viewportWidth ||
         (typeof window === 'undefined'
           ? minReaderWidth + 48
           : Math.min(window.innerWidth, maxPdfCanvasWidth + 48))
+      const measuredViewportHeight =
+        viewportHeight ||
+        (typeof window === 'undefined'
+          ? 900
+          : window.visualViewport?.height || window.innerHeight)
+      const pageColumns =
+        settings.layout === 'paged' && effectiveViewMode === 'spread' ? 2 : 1
+      const availableWidth = Math.max(measuredViewportWidth - 48, minReaderWidth)
+      const availablePageWidth = Math.max(availableWidth / pageColumns, minReaderWidth / pageColumns)
+      const availableHeight = Math.max(measuredViewportHeight - 36, 240)
+      const fitPageWidth = Math.min(availablePageWidth, availableHeight / pageAspectRatio)
 
-      return Math.max(
+      if (settings.layout === 'paged') {
+        if (settings.fitMode === 'fit-width') {
+          return Math.min(availablePageWidth, maxPdfCanvasWidth)
+        }
+
+        if (settings.fitMode === 'manual') {
+          return Math.min(
+            (fitPageWidth * settings.zoom) / 100,
+            maxPdfCanvasWidth * 1.5,
+          )
+        }
+
+        return Math.min(fitPageWidth, maxPdfCanvasWidth)
+      }
+
+      const continuousWidth = Math.max(
         minReaderWidth,
         Math.min(Math.max(measuredViewportWidth - 48, minReaderWidth), maxPdfCanvasWidth),
       )
-    },
-    [viewportWidth],
-  )
+
+      return settings.fitMode === 'manual'
+        ? Math.min((continuousWidth * settings.zoom) / 100, maxPdfCanvasWidth * 1.5)
+        : continuousWidth
+    }, [
+      effectiveViewMode,
+      pageAspectRatio,
+      settings.fitMode,
+      settings.layout,
+      settings.zoom,
+      viewportHeight,
+      viewportWidth,
+    ])
 
   const estimatedHeight = useMemo(
     () => Math.max(360, Math.round(targetWidth * pageAspectRatio)),
@@ -880,7 +1490,14 @@ export function PdfEmbed({
   ])
 
   useEffect(() => {
-    if (loading || error || nativeFallback || pageCount === 0 || !viewportRef.current) {
+    if (
+      settings.layout !== 'continuous' ||
+      loading ||
+      error ||
+      nativeFallback ||
+      pageCount === 0 ||
+      !viewportRef.current
+    ) {
       return
     }
 
@@ -916,12 +1533,28 @@ export function PdfEmbed({
       cancelAnimationFrame(correctionFrame)
       window.clearTimeout(timeout)
     }
-  }, [error, initialPage, loading, nativeFallback, pageCount, targetWidth, viewportWidth])
+  }, [
+    error,
+    initialPage,
+    loading,
+    nativeFallback,
+    pageCount,
+    settings.layout,
+    targetWidth,
+    viewportWidth,
+  ])
 
   useEffect(() => {
     const viewport = viewportRef.current
 
-    if (!viewport || loading || error || nativeFallback || pageCount === 0) {
+    if (
+      settings.layout !== 'continuous' ||
+      !viewport ||
+      loading ||
+      error ||
+      nativeFallback ||
+      pageCount === 0
+    ) {
       return
     }
 
@@ -951,13 +1584,24 @@ export function PdfEmbed({
       cancelAnimationFrame(frame)
       viewport.removeEventListener('scroll', handleScroll)
     }
-  }, [error, loading, nativeFallback, pageCount, targetWidth])
+  }, [error, loading, nativeFallback, pageCount, settings.layout, targetWidth])
 
   useEffect(() => {
     if (!loading && !error && pageCount > 0) {
-      onProgressChange?.({ page: visiblePage, totalPages: pageCount })
+      onProgressChange?.({
+        page: visiblePage,
+        totalPages: pageCount,
+        viewMode: effectiveViewMode,
+      })
     }
-  }, [error, loading, onProgressChange, pageCount, visiblePage])
+  }, [
+    effectiveViewMode,
+    error,
+    loading,
+    onProgressChange,
+    pageCount,
+    visiblePage,
+  ])
 
   useEffect(() => {
     if (loading || error || nativeFallback || firstPageReady || pageCount === 0) {
@@ -981,24 +1625,35 @@ export function PdfEmbed({
     return `${fileUrl}#page=${targetPage}`
   }, [fileUrl, initialPage, pageCount, visiblePage])
 
+  const movePdfGroup = (offset: number) => {
+    const nextGroup = pdfGroups[Math.min(Math.max(activePdfGroupIndex + offset, 0), pdfGroups.length - 1)]
+    if (nextGroup) {
+      setVisiblePage(nextGroup.startPage)
+    }
+  }
+  const pdfPageIndicatorLabel =
+    activePdfGroup && activePdfGroup.endPage > activePdfGroup.startPage
+      ? `Pages ${activePdfGroup.startPage}-${activePdfGroup.endPage} of ${pageCount}`
+      : `Page ${visiblePage} of ${pageCount}`
+
   return (
     <article className="document-frame">
       <div className="document-frame__toolbar">
         <div>
           <strong>Live PDF reader</strong>
-          <p>Scroll the document directly here and bookmark the page you want to resume from.</p>
+          <p>Choose a reading style, then move through fitted pages or a continuous document.</p>
         </div>
         <div className="document-frame__toolbar-actions">
-          {!loading && !error && <span className="document-frame__page-label">Page {visiblePage} of {pageCount}</span>}
+          {!loading && !error && (
+            <span className="document-frame__page-label">{pdfPageIndicatorLabel}</span>
+          )}
+          <ReaderSettingsControl
+            fileUrl={fileUrl}
+            format="pdf"
+            onSettingsChange={onSettingsChange}
+            settings={settings}
+          />
           {toolbarAccessory}
-          <button
-            className="ghost-button"
-            onClick={() => window.open(fileUrl, '_blank', 'noopener,noreferrer')}
-            type="button"
-          >
-            <ExternalLink aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-            Open original file
-          </button>
         </div>
       </div>
 
@@ -1015,7 +1670,64 @@ export function PdfEmbed({
         </div>
       )}
 
-      {!loading && !showNativePdf && documentProxy && (
+      {!loading && !showNativePdf && documentProxy && settings.layout === 'paged' && (
+        <div
+          className={`document-frame__viewport document-frame__viewport--paged document-frame__viewport--${settings.fitMode}`}
+          ref={viewportRef}
+        >
+          <PagedReaderSurface
+            canNext={activePdfGroupIndex < pdfGroups.length - 1}
+            canPrevious={activePdfGroupIndex > 0}
+            direction={settings.direction}
+            onNext={() => movePdfGroup(1)}
+            onPrevious={() => movePdfGroup(-1)}
+            swipeEnabled={settings.fitMode !== 'manual'}
+          >
+            <div
+              className={`document-frame__paged-group ${
+                effectiveViewMode === 'spread' ? 'document-frame__paged-group--spread' : ''
+              }`}
+            >
+              {pdfGroups
+                .filter((_, index) => Math.abs(index - activePdfGroupIndex) <= 1)
+                .map((group) => (
+                  <div
+                    aria-hidden={group !== activePdfGroup}
+                    className={
+                      group === activePdfGroup
+                        ? 'document-frame__paged-sheet is-active'
+                        : 'document-frame__paged-sheet is-preloaded'
+                    }
+                    key={`${fileUrl}-${group.id}-${effectiveViewMode}`}
+                  >
+                    {group.pages.map((page) => (
+                      <div
+                        className={`document-frame__paged-panel document-frame__paged-panel--${page.slot}`}
+                        key={page.logicalPage}
+                      >
+                        <PdfPageCanvas
+                          browserPixelRatio={browserPixelRatio}
+                          estimatedHeight={estimatedHeight}
+                          onError={setError}
+                          onRendered={
+                            group === activePdfGroup ? handlePageRendered : undefined
+                          }
+                          pageNumber={page.logicalPage}
+                          pixelRatioLimit={pdfPixelRatioLimit}
+                          pdfDocument={documentProxy}
+                          targetWidth={targetWidth}
+                          title={title}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                ))}
+            </div>
+          </PagedReaderSurface>
+        </div>
+      )}
+
+      {!loading && !showNativePdf && documentProxy && settings.layout === 'continuous' && (
         <div className="document-frame__viewport" ref={viewportRef}>
           <div className="document-frame__stack">
             {Array.from({ length: pageCount }, (_, index) => {
@@ -1066,15 +1778,19 @@ export function EpubReader({
   title,
   initialProgress = 0,
   onProgressChange,
+  onSettingsChange,
+  settings,
   toolbarAccessory,
 }: EpubReaderProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const bookRef = useRef<EpubBook | null>(null)
   const renditionRef = useRef<EpubRendition | null>(null)
+  const fontSizeRef = useRef(settings.fontSize)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [visibleProgress, setVisibleProgress] = useState(clampPercent(initialProgress))
-  const [fontSize, setFontSize] = useState(100)
+  const [atStart, setAtStart] = useState(initialProgress <= 0)
+  const [atEnd, setAtEnd] = useState(initialProgress >= 100)
   const [resolvedTitle, setResolvedTitle] = useState(title)
 
   useEffect(() => {
@@ -1083,7 +1799,8 @@ export function EpubReader({
     setLoading(true)
     setError(null)
     setVisibleProgress(clampPercent(initialProgress))
-    setFontSize(100)
+    setAtStart(initialProgress <= 0)
+    setAtEnd(initialProgress >= 100)
     setResolvedTitle(title)
 
     const load = async () => {
@@ -1115,8 +1832,8 @@ export function EpubReader({
         const rendition = book.renderTo(viewportRef.current, {
           width: '100%',
           height: '100%',
-          flow: 'scrolled-doc',
-          manager: 'continuous',
+          flow: settings.layout === 'paged' ? 'paginated' : 'scrolled-doc',
+          manager: settings.layout === 'paged' ? 'default' : 'continuous',
           spread: 'none',
           minSpreadWidth: 0,
         })
@@ -1172,7 +1889,7 @@ export function EpubReader({
             paddingLeft: '1rem',
           },
         })
-        rendition.themes.fontSize('100%')
+        rendition.themes.fontSize(`${fontSizeRef.current}%`)
 
         rendition.on('relocated', (location: EpubLocation) => {
           const locationCfi = location?.start?.cfi
@@ -1185,6 +1902,8 @@ export function EpubReader({
             bookRef.current.locations.percentageFromCfi(locationCfi) * 100,
           )
 
+          setAtStart(Boolean(location.atStart))
+          setAtEnd(Boolean(location.atEnd))
           setVisibleProgress((previousProgress) =>
             previousProgress === percentage ? previousProgress : percentage,
           )
@@ -1219,11 +1938,12 @@ export function EpubReader({
       bookRef.current?.destroy()
       bookRef.current = null
     }
-  }, [fileUrl, initialProgress, title])
+  }, [fileUrl, initialProgress, settings.layout, title])
 
   useEffect(() => {
-    renditionRef.current?.themes.fontSize(`${fontSize}%`)
-  }, [fontSize])
+    fontSizeRef.current = settings.fontSize
+    renditionRef.current?.themes.fontSize(`${settings.fontSize}%`)
+  }, [settings.fontSize])
 
   useEffect(() => {
     if (loading || error) {
@@ -1254,43 +1974,44 @@ export function EpubReader({
           {!loading && !error && (
             <span className="epub-reader__progress-label">{bookmarkCopy.progressLabel}</span>
           )}
-          <div className="epub-reader__font-control" aria-label="EPUB font size">
-            <button
-              aria-label="Decrease font size"
-              className="cbz-viewer__zoom-button"
-              disabled={fontSize <= 85}
-              onClick={() => setFontSize((previousSize) => Math.max(previousSize - 10, 85))}
-              type="button"
-            >
-              <Minus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-            </button>
-            <span className="epub-reader__font-value">{fontSize}%</span>
-            <button
-              aria-label="Increase font size"
-              className="cbz-viewer__zoom-button"
-              disabled={fontSize >= 150}
-              onClick={() => setFontSize((previousSize) => Math.min(previousSize + 10, 150))}
-              type="button"
-            >
-              <Plus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-            </button>
-          </div>
+          <ReaderSettingsControl
+            fileUrl={fileUrl}
+            format="epub"
+            onSettingsChange={onSettingsChange}
+            settings={settings}
+          />
           {toolbarAccessory}
-          <button
-            className="ghost-button"
-            onClick={() => window.open(fileUrl, '_blank', 'noopener,noreferrer')}
-            type="button"
-          >
-            <ExternalLink aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-            Open original file
-          </button>
         </div>
       </div>
 
       {loading && <div className="cbz-viewer__state">Loading book from {resolvedTitle}...</div>}
       {error && <div className="cbz-viewer__state cbz-viewer__state--error">{error}</div>}
 
-      {!loading && !error && <div className="epub-reader__viewport" ref={viewportRef} />}
+      {!error && (
+        <div
+          className={`epub-reader__viewport ${
+            settings.layout === 'paged' ? 'epub-reader__viewport--paged' : ''
+          } ${loading ? 'is-loading' : ''}`}
+        >
+          {settings.layout === 'paged' ? (
+            <PagedReaderSurface
+              canNext={!atEnd}
+              canPrevious={!atStart}
+              direction="ltr"
+              onNext={() => {
+                void renditionRef.current?.next()
+              }}
+              onPrevious={() => {
+                void renditionRef.current?.prev()
+              }}
+            >
+              <div className="epub-reader__rendition" ref={viewportRef} />
+            </PagedReaderSurface>
+          ) : (
+            <div className="epub-reader__rendition" ref={viewportRef} />
+          )}
+        </div>
+      )}
     </article>
   )
 }
@@ -1301,132 +2022,21 @@ export function CbzReader({
   title,
   offlinePages,
   initialPage = 1,
-  initialViewMode = 'single',
-  initialReadingDirection = 'rtl',
-  initialPageOrderMode = 'archive',
-  initialSpreadAlignment = 'cover-first',
   onProgressChange,
-  preferenceKey,
+  onSettingsChange,
+  settings,
   toolbarAccessory,
 }: CbzReaderProps) {
   const [pages, setPages] = useState<CbzPage[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [viewMode, setViewMode] = useState<ReaderViewMode>(initialViewMode)
-  const [readingDirection, setReadingDirection] =
-    useState<CbzReadingDirection>(initialReadingDirection)
-  const [pageOrderMode, setPageOrderMode] =
-    useState<CbzPageOrderMode>(initialPageOrderMode)
-  const [spreadAlignment, setSpreadAlignment] =
-    useState<CbzSpreadAlignment>(initialSpreadAlignment)
-  const [scaleMode, setScaleMode] = useState<CbzScaleMode>(() => getInitialCbzScaleMode())
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [singlePageZoom, setSinglePageZoom] = useState(100)
-  const [spreadZoom, setSpreadZoom] = useState(100)
   const [visiblePage, setVisiblePage] = useState(initialPage)
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const groupRefs = useRef<Array<HTMLDivElement | null>>([])
   const didInitialScrollRef = useRef(false)
-  const settingsStorageKey = preferenceKey ? `cbz-reader-settings:${preferenceKey}` : null
   const offlinePageSignature = offlinePages
     ? offlinePages.map((page) => `${page.archiveIndex}:${page.url}`).join('|')
     : ''
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return
-    }
-
-    if (!settingsStorageKey) {
-      setReadingDirection(initialReadingDirection)
-      setPageOrderMode(initialPageOrderMode)
-      setSpreadAlignment(initialSpreadAlignment)
-      setScaleMode(getInitialCbzScaleMode())
-      return
-    }
-
-    const savedSettings = window.localStorage.getItem(settingsStorageKey)
-
-    if (!savedSettings) {
-      setReadingDirection(initialReadingDirection)
-      setPageOrderMode(initialPageOrderMode)
-      setSpreadAlignment(initialSpreadAlignment)
-      setScaleMode(getInitialCbzScaleMode())
-      return
-    }
-
-    try {
-      const parsedSettings = JSON.parse(savedSettings) as Partial<{
-        readingDirection: CbzReadingDirection
-        pageOrderMode: CbzPageOrderMode
-        spreadAlignment: CbzSpreadAlignment
-        scaleMode: CbzScaleMode
-      }>
-
-      setReadingDirection(parsedSettings.readingDirection ?? initialReadingDirection)
-      setPageOrderMode(parsedSettings.pageOrderMode ?? initialPageOrderMode)
-      setSpreadAlignment(parsedSettings.spreadAlignment ?? initialSpreadAlignment)
-      setScaleMode(
-        parsedSettings.scaleMode === 'fit-width' || parsedSettings.scaleMode === 'manual'
-          ? parsedSettings.scaleMode
-          : getInitialCbzScaleMode(),
-      )
-    } catch {
-      setReadingDirection(initialReadingDirection)
-      setPageOrderMode(initialPageOrderMode)
-      setSpreadAlignment(initialSpreadAlignment)
-      setScaleMode(getInitialCbzScaleMode())
-    }
-  }, [
-    initialPageOrderMode,
-    initialReadingDirection,
-    initialSpreadAlignment,
-    settingsStorageKey,
-  ])
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !settingsStorageKey) {
-      return
-    }
-
-    window.localStorage.setItem(
-      settingsStorageKey,
-      JSON.stringify({
-        pageOrderMode,
-        readingDirection,
-        scaleMode,
-        spreadAlignment,
-      }),
-    )
-  }, [pageOrderMode, readingDirection, scaleMode, settingsStorageKey, spreadAlignment])
-
-  useEffect(() => {
-    setViewMode(initialViewMode)
-  }, [fileUrl, initialViewMode])
-
-  useEffect(() => {
-    setSinglePageZoom(100)
-    setSpreadZoom(100)
-    setSettingsOpen(false)
-  }, [fileUrl])
-
-  useEffect(() => {
-    if (!settingsOpen) {
-      return
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setSettingsOpen(false)
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [settingsOpen])
 
   useEffect(() => {
     let disposed = false
@@ -1515,21 +2125,38 @@ export function CbzReader({
   }, [entryId, fileUrl, initialPage, offlinePageSignature, offlinePages])
 
   const orderedPages = useMemo(
-    () => orderCbzPages(pages, pageOrderMode),
-    [pageOrderMode, pages],
+    () => orderCbzPages(pages, settings.pageOrder),
+    [pages, settings.pageOrder],
   )
+  const effectiveViewMode = settings.layout === 'paged' ? settings.viewMode : 'single'
 
   const groups = useMemo(
-    () => buildCbzGroups(orderedPages, viewMode, readingDirection, spreadAlignment),
-    [orderedPages, readingDirection, spreadAlignment, viewMode],
+    () => buildCbzGroups(
+      orderedPages,
+      effectiveViewMode,
+      settings.direction,
+      settings.spreadAlignment,
+    ),
+    [
+      effectiveViewMode,
+      orderedPages,
+      settings.direction,
+      settings.spreadAlignment,
+    ],
   )
 
   useEffect(() => {
     didInitialScrollRef.current = false
-  }, [initialPage, viewMode])
+  }, [effectiveViewMode, initialPage, settings.layout])
 
   useEffect(() => {
-    if (loading || error || groups.length === 0 || !viewportRef.current) {
+    if (
+      settings.layout !== 'continuous' ||
+      loading ||
+      error ||
+      groups.length === 0 ||
+      !viewportRef.current
+    ) {
       return
     }
 
@@ -1571,12 +2198,18 @@ export function CbzReader({
       cancelAnimationFrame(correctionFrame)
       window.clearTimeout(timeout)
     }
-  }, [error, groups, initialPage, loading, pages.length])
+  }, [error, groups, initialPage, loading, pages.length, settings.layout])
 
   useEffect(() => {
     const viewport = viewportRef.current
 
-    if (!viewport || loading || error || groups.length === 0) {
+    if (
+      settings.layout !== 'continuous' ||
+      !viewport ||
+      loading ||
+      error ||
+      groups.length === 0
+    ) {
       return
     }
 
@@ -1606,7 +2239,7 @@ export function CbzReader({
       cancelAnimationFrame(frame)
       viewport.removeEventListener('scroll', handleScroll)
     }
-  }, [error, groups, loading])
+  }, [error, groups, loading, settings.layout])
 
   useEffect(() => {
     if (!loading && !error && pages.length > 0) {
@@ -1614,330 +2247,199 @@ export function CbzReader({
         page: visiblePage,
         totalPages: pages.length,
         endPage: groups.find((group) => group.startPage === visiblePage)?.endPage ?? visiblePage,
-        viewMode,
+        viewMode: effectiveViewMode,
       })
     }
-  }, [error, groups, loading, onProgressChange, pages.length, viewMode, visiblePage])
+  }, [
+    effectiveViewMode,
+    error,
+    groups,
+    loading,
+    onProgressChange,
+    pages.length,
+    visiblePage,
+  ])
 
-  const fitWidthActive = scaleMode === 'fit-width'
-  const activeZoom = viewMode === 'spread' ? spreadZoom : singlePageZoom
-  const activeZoomLabel = fitWidthActive ? 'Fit' : `${activeZoom}%`
-  const activeGroup = groups.find(
-    (group) => visiblePage >= group.startPage && visiblePage <= group.endPage,
+  const activeGroupIndex = Math.max(
+    groups.findIndex(
+      (group) => visiblePage >= group.startPage && visiblePage <= group.endPage,
+    ),
+    0,
   )
+  const activeGroup = groups[activeGroupIndex] ?? null
   const pageIndicatorLabel =
-    viewMode === 'spread' && activeGroup && activeGroup.endPage > activeGroup.startPage
+    effectiveViewMode === 'spread' && activeGroup && activeGroup.endPage > activeGroup.startPage
       ? `Pages ${activeGroup.startPage}-${activeGroup.endPage} of ${orderedPages.length}`
       : `Page ${visiblePage} of ${orderedPages.length}`
-  const getSheetWidth = (baseWidth: number, zoom: number) =>
-    fitWidthActive ? '100%' : `${Math.round((baseWidth * zoom) / 100)}px`
-  const decreaseZoom = () => {
-    setScaleMode('manual')
+  const getSheetWidth = (baseWidth: number) => {
+    if (settings.fitMode === 'fit-page') {
+      return '100%'
+    }
 
-    if (viewMode === 'spread') {
-      setSpreadZoom((previousZoom) => clampZoom(previousZoom - cbzZoomStep))
+    if (settings.fitMode === 'fit-width') {
+      return '100%'
+    }
+
+    return `${Math.round((baseWidth * settings.zoom) / 100)}px`
+  }
+
+  const moveGroup = (offset: number) => {
+    const nextGroup = groups[Math.min(Math.max(activeGroupIndex + offset, 0), groups.length - 1)]
+    if (nextGroup) {
+      setVisiblePage(nextGroup.startPage)
+    }
+  }
+
+  useEffect(() => {
+    if (settings.layout !== 'paged' || !activeGroup) {
       return
     }
 
-    setSinglePageZoom((previousZoom) => clampZoom(previousZoom - cbzZoomStep))
-  }
-  const increaseZoom = () => {
-    setScaleMode('manual')
+    const nearbyGroups = groups.slice(
+      Math.max(activeGroupIndex - 1, 0),
+      Math.min(activeGroupIndex + 2, groups.length),
+    )
 
-    if (viewMode === 'spread') {
-      setSpreadZoom((previousZoom) => clampZoom(previousZoom + cbzZoomStep))
-      return
-    }
+    nearbyGroups.flatMap((group) => group.pages).forEach((page) => {
+      const image = new Image()
+      image.decoding = 'async'
+      image.src = page.url
+      void image.decode?.().catch(() => undefined)
+    })
+  }, [activeGroup, activeGroupIndex, groups, settings.layout])
 
-    setSinglePageZoom((previousZoom) => clampZoom(previousZoom + cbzZoomStep))
-  }
-  const toggleFitWidth = () => {
-    setScaleMode((currentScaleMode) =>
-      currentScaleMode === 'fit-width' ? 'manual' : 'fit-width',
+  const renderCbzGroup = (group: CbzGroup, index: number, paged: boolean) => {
+    const isSinglePageGroup = group.pages.length === 1 && effectiveViewMode === 'single'
+    const isSpreadPair = group.pages.length > 1
+    const isSpreadSoloGroup = group.pages.length === 1 && effectiveViewMode === 'spread'
+    const sheetClassName = [
+      'cbz-page__sheet',
+      isSpreadPair ? 'cbz-page__sheet--spread' : '',
+      isSpreadSoloGroup ? 'cbz-page__sheet--spread-solo' : '',
+      paged ? 'cbz-page__sheet--paged' : '',
+      paged ? `cbz-page__sheet--${settings.fitMode}` : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
+    const sheetStyle:
+      | (CSSProperties &
+          Partial<
+            Record<
+              '--cbz-single-page-width' | '--cbz-spread-width' | '--cbz-spread-solo-width',
+              string
+            >
+          >)
+      | undefined =
+      isSinglePageGroup
+        ? { '--cbz-single-page-width': getSheetWidth(cbzSinglePageBaseWidth) }
+        : isSpreadPair
+          ? { '--cbz-spread-width': getSheetWidth(cbzSpreadBaseWidth) }
+          : isSpreadSoloGroup
+            ? { '--cbz-spread-solo-width': getSheetWidth(cbzSpreadSoloBaseWidth) }
+            : undefined
+    const groupDistanceFromVisiblePage =
+      visiblePage < group.startPage
+        ? group.startPage - visiblePage
+        : visiblePage > group.endPage
+          ? visiblePage - group.endPage
+          : 0
+    const shouldEagerLoadGroup =
+      paged || groupDistanceFromVisiblePage <= (effectiveViewMode === 'spread' ? 8 : 12)
+
+    return (
+      <div
+        className={paged ? 'cbz-page cbz-page--paged' : 'cbz-page'}
+        key={`${fileUrl}-${group.id}-${effectiveViewMode}-${settings.layout}`}
+        ref={(element) => {
+          groupRefs.current[index] = element
+        }}
+        data-page={group.startPage}
+      >
+        <figure
+          className={
+            group.pages.length > 1
+              ? 'cbz-page__figure cbz-page__figure--spread'
+              : 'cbz-page__figure'
+          }
+        >
+          <div className={sheetClassName} style={sheetStyle}>
+            {group.pages.map((page) => {
+              const panelClassName = [
+                'cbz-page__panel',
+                group.pages.length === 1 ? 'cbz-page__panel--single' : '',
+                group.pages.length > 1 ? 'cbz-page__panel--spread' : '',
+                page.slot === 'left' ? 'cbz-page__panel--left' : '',
+                page.slot === 'right' ? 'cbz-page__panel--right' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')
+
+              return (
+                <div className={panelClassName} key={page.url}>
+                  <img
+                    alt={`${title} page ${page.logicalPage}`}
+                    decoding="async"
+                    loading={shouldEagerLoadGroup ? 'eager' : 'lazy'}
+                    src={page.url}
+                  />
+                </div>
+              )
+            })}
+          </div>
+        </figure>
+      </div>
     )
   }
 
   return (
     <article className="cbz-viewer">
-      <div className={settingsOpen ? 'cbz-viewer__toolbar is-settings-open' : 'cbz-viewer__toolbar'}>
+      <div className="cbz-viewer__toolbar">
         <div>
           <strong>Live CBZ reader</strong>
-          <p>Switch between single pages and spreads, then bookmark the page you want to return to.</p>
+          <p>Choose a reading style, then move through fitted pages or a continuous strip.</p>
         </div>
         <div className="cbz-viewer__toolbar-actions">
           {!loading && !error && (
             <span className="cbz-viewer__page-indicator">{pageIndicatorLabel}</span>
           )}
           <div className="cbz-viewer__toolbar-right">
-            <div className="cbz-viewer__settings">
-              <button
-                aria-controls="cbz-reader-settings-popover"
-                aria-expanded={settingsOpen}
-                aria-haspopup="dialog"
-                className={`ghost-button ${settingsOpen ? 'is-active' : ''}`}
-                onClick={() => setSettingsOpen((isOpen) => !isOpen)}
-                type="button"
-              >
-                <Settings2 aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-                Settings
-              </button>
-            </div>
-            <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Reading mode">
-              <button
-                aria-pressed={viewMode === 'single'}
-                className={`cbz-viewer__mode-button ${viewMode === 'single' ? 'is-active' : ''}`}
-                onClick={() => setViewMode('single')}
-                type="button"
-              >
-                Single
-              </button>
-              <button
-                aria-pressed={viewMode === 'spread'}
-                className={`cbz-viewer__mode-button ${viewMode === 'spread' ? 'is-active' : ''}`}
-                onClick={() => setViewMode('spread')}
-                type="button"
-              >
-                Spread
-              </button>
-            </div>
-            <div className="cbz-viewer__zoom-control" aria-label="Reader zoom">
-              <button
-                aria-label="Zoom out"
-                className="cbz-viewer__zoom-button"
-                disabled={!fitWidthActive && activeZoom <= minCbzZoom}
-                onClick={decreaseZoom}
-                type="button"
-              >
-                <Minus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-              </button>
-              <span className="cbz-viewer__zoom-value">{activeZoomLabel}</span>
-              <button
-                aria-label="Zoom in"
-                className="cbz-viewer__zoom-button"
-                disabled={!fitWidthActive && activeZoom >= maxCbzZoom}
-                onClick={increaseZoom}
-                type="button"
-              >
-                <Plus aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-              </button>
-              <button
-                aria-label={fitWidthActive ? 'Use manual zoom' : 'Fit pages to width'}
-                aria-pressed={fitWidthActive}
-                className={`cbz-viewer__zoom-button ${fitWidthActive ? 'is-active' : ''}`}
-                onClick={toggleFitWidth}
-                title={fitWidthActive ? 'Use manual zoom' : 'Fit pages to width'}
-                type="button"
-              >
-                <Maximize2 aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-              </button>
-            </div>
+            <ReaderSettingsControl
+              fileUrl={fileUrl}
+              format="cbz"
+              onSettingsChange={onSettingsChange}
+              settings={settings}
+            />
             {toolbarAccessory}
-            <button
-              className="ghost-button"
-              onClick={() => window.open(fileUrl, '_blank', 'noopener,noreferrer')}
-              type="button"
-            >
-              <ExternalLink aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-              Open original file
-            </button>
           </div>
         </div>
       </div>
-
-      {settingsOpen && (
-        <div
-          aria-label="Reader settings"
-          className="cbz-viewer__settings-menu cbz-viewer__settings-menu--floating"
-          id="cbz-reader-settings-popover"
-          role="dialog"
-        >
-          <div className="cbz-viewer__settings-header">
-            <span>Reader settings</span>
-            <button
-              aria-label="Close reader settings"
-              className="cbz-viewer__settings-close"
-              onClick={() => setSettingsOpen(false)}
-              type="button"
-            >
-              <X aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-            </button>
-          </div>
-          <div className="cbz-viewer__settings-group">
-            <span className="cbz-viewer__settings-label">Page scale</span>
-            <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Page scale">
-              <button
-                aria-pressed={scaleMode === 'manual'}
-                className={`cbz-viewer__mode-button ${scaleMode === 'manual' ? 'is-active' : ''}`}
-                onClick={() => setScaleMode('manual')}
-                type="button"
-              >
-                Manual
-              </button>
-              <button
-                aria-pressed={scaleMode === 'fit-width'}
-                className={`cbz-viewer__mode-button ${scaleMode === 'fit-width' ? 'is-active' : ''}`}
-                onClick={() => setScaleMode('fit-width')}
-                type="button"
-              >
-                Fit
-              </button>
-            </div>
-          </div>
-          <div className="cbz-viewer__settings-group">
-            <span className="cbz-viewer__settings-label">Reading direction</span>
-            <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Reading direction">
-              <button
-                aria-pressed={readingDirection === 'rtl'}
-                className={`cbz-viewer__mode-button ${readingDirection === 'rtl' ? 'is-active' : ''}`}
-                onClick={() => setReadingDirection('rtl')}
-                type="button"
-              >
-                RTL
-              </button>
-              <button
-                aria-pressed={readingDirection === 'ltr'}
-                className={`cbz-viewer__mode-button ${readingDirection === 'ltr' ? 'is-active' : ''}`}
-                onClick={() => setReadingDirection('ltr')}
-                type="button"
-              >
-                LTR
-              </button>
-            </div>
-          </div>
-          <div className="cbz-viewer__settings-group">
-            <span className="cbz-viewer__settings-label">Page order</span>
-            <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Page order">
-              <button
-                aria-pressed={pageOrderMode === 'archive'}
-                className={`cbz-viewer__mode-button ${pageOrderMode === 'archive' ? 'is-active' : ''}`}
-                onClick={() => setPageOrderMode('archive')}
-                type="button"
-              >
-                Archive
-              </button>
-              <button
-                aria-pressed={pageOrderMode === 'filename'}
-                className={`cbz-viewer__mode-button ${pageOrderMode === 'filename' ? 'is-active' : ''}`}
-                onClick={() => setPageOrderMode('filename')}
-                type="button"
-              >
-                Name
-              </button>
-            </div>
-          </div>
-          <div className="cbz-viewer__settings-group">
-            <span className="cbz-viewer__settings-label">Spread alignment</span>
-            <div className="cbz-viewer__mode-toggle" role="tablist" aria-label="Spread alignment">
-              <button
-                aria-pressed={spreadAlignment === 'cover-first'}
-                className={`cbz-viewer__mode-button ${spreadAlignment === 'cover-first' ? 'is-active' : ''}`}
-                onClick={() => setSpreadAlignment('cover-first')}
-                type="button"
-              >
-                Cover
-              </button>
-              <button
-                aria-pressed={spreadAlignment === 'straight-pairs'}
-                className={`cbz-viewer__mode-button ${spreadAlignment === 'straight-pairs' ? 'is-active' : ''}`}
-                onClick={() => setSpreadAlignment('straight-pairs')}
-                type="button"
-              >
-                Pairs
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {loading && <div className="cbz-viewer__state">Loading pages from {title}...</div>}
       {error && <div className="cbz-viewer__state cbz-viewer__state--error">{error}</div>}
 
-      {!loading && !error && (
-        <div className="cbz-viewer__viewport" ref={viewportRef}>
+      {!loading && !error && settings.layout === 'paged' && activeGroup && (
+        <div
+          className={`cbz-viewer__viewport cbz-viewer__viewport--paged cbz-viewer__viewport--${settings.fitMode}`}
+          ref={viewportRef}
+        >
+          <PagedReaderSurface
+            canNext={activeGroupIndex < groups.length - 1}
+            canPrevious={activeGroupIndex > 0}
+            direction={settings.direction}
+            onNext={() => moveGroup(1)}
+            onPrevious={() => moveGroup(-1)}
+            swipeEnabled={settings.fitMode !== 'manual'}
+          >
+            <div className="cbz-viewer__pages cbz-viewer__pages--paged">
+              {renderCbzGroup(activeGroup, activeGroupIndex, true)}
+            </div>
+          </PagedReaderSurface>
+        </div>
+      )}
+
+      {!loading && !error && settings.layout === 'continuous' && (
+        <div className="cbz-viewer__viewport cbz-viewer__viewport--continuous" ref={viewportRef}>
           <div className="cbz-viewer__pages">
-            {groups.map((group, index) => {
-              const isSinglePageGroup = group.pages.length === 1 && viewMode === 'single'
-              const isSpreadPair = group.pages.length > 1
-              const isSpreadSoloGroup = group.pages.length === 1 && viewMode === 'spread'
-              const sheetClassName =
-                isSpreadPair
-                  ? 'cbz-page__sheet cbz-page__sheet--spread'
-                  : isSpreadSoloGroup
-                    ? 'cbz-page__sheet cbz-page__sheet--spread-solo'
-                    : 'cbz-page__sheet'
-              const sheetStyle:
-                | (CSSProperties &
-                    Partial<
-                      Record<
-                        '--cbz-single-page-width' | '--cbz-spread-width' | '--cbz-spread-solo-width',
-                        string
-                      >
-                    >)
-                | undefined =
-                isSinglePageGroup
-                  ? {
-                      '--cbz-single-page-width': getSheetWidth(cbzSinglePageBaseWidth, singlePageZoom),
-                    }
-                  : isSpreadPair
-                    ? {
-                        '--cbz-spread-width': getSheetWidth(cbzSpreadBaseWidth, spreadZoom),
-                      }
-                    : isSpreadSoloGroup
-                      ? {
-                          '--cbz-spread-solo-width': getSheetWidth(cbzSpreadSoloBaseWidth, spreadZoom),
-                        }
-                      : undefined
-              const groupDistanceFromVisiblePage =
-                visiblePage < group.startPage
-                  ? group.startPage - visiblePage
-                  : visiblePage > group.endPage
-                    ? visiblePage - group.endPage
-                    : 0
-              const shouldEagerLoadGroup =
-                groupDistanceFromVisiblePage <= (viewMode === 'spread' ? 8 : 12)
-
-              return (
-                <div
-                  className="cbz-page"
-                  key={`${fileUrl}-${group.id}-${viewMode}`}
-                  ref={(element) => {
-                    groupRefs.current[index] = element
-                  }}
-                  data-page={group.startPage}
-                >
-                  <figure
-                    className={
-                      group.pages.length > 1 ? 'cbz-page__figure cbz-page__figure--spread' : 'cbz-page__figure'
-                    }
-                  >
-                    <div className={sheetClassName} style={sheetStyle}>
-                      {group.pages.map((page) => {
-                        const panelClassName = [
-                          'cbz-page__panel',
-                          group.pages.length === 1 ? 'cbz-page__panel--single' : '',
-                          group.pages.length > 1 ? 'cbz-page__panel--spread' : '',
-                          page.slot === 'left' ? 'cbz-page__panel--left' : '',
-                          page.slot === 'right' ? 'cbz-page__panel--right' : '',
-                        ]
-                          .filter(Boolean)
-                          .join(' ')
-
-                        return (
-                          <div className={panelClassName} key={page.url}>
-                            <img
-                              alt={`${title} page ${page.logicalPage}`}
-                              decoding="async"
-                              loading={shouldEagerLoadGroup ? 'eager' : 'lazy'}
-                              src={page.url}
-                            />
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </figure>
-                </div>
-              )
-            })}
+            {groups.map((group, index) => renderCbzGroup(group, index, false))}
           </div>
         </div>
       )}
@@ -1950,6 +2452,8 @@ export function HtmlChapterReader({
   title,
   initialProgress = 0,
   onProgressChange,
+  onSettingsChange,
+  settings,
   toolbarAccessory,
 }: HtmlChapterReaderProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
@@ -1959,6 +2463,8 @@ export function HtmlChapterReader({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [visibleProgress, setVisibleProgress] = useState(clampPercent(initialProgress))
+  const [visibleTextPage, setVisibleTextPage] = useState(1)
+  const [textPageCount, setTextPageCount] = useState(1)
 
   useEffect(() => {
     let disposed = false
@@ -2021,6 +2527,10 @@ export function HtmlChapterReader({
   }, [fileUrl, initialProgress, title])
 
   useEffect(() => {
+    didInitialScrollRef.current = false
+  }, [settings.fontSize, settings.layout])
+
+  useEffect(() => {
     if (loading || error || !chapterHtml || !viewportRef.current) {
       return
     }
@@ -2036,8 +2546,16 @@ export function HtmlChapterReader({
     let timeout = 0
 
     const scrollToInitialProgress = () => {
-      const maxScroll = Math.max(viewport.scrollHeight - viewport.clientHeight, 0)
-      viewport.scrollTop = Math.round((maxScroll * safeProgress) / 100)
+      const maxScroll =
+        settings.layout === 'paged'
+          ? Math.max(viewport.scrollWidth - viewport.clientWidth, 0)
+          : Math.max(viewport.scrollHeight - viewport.clientHeight, 0)
+
+      if (settings.layout === 'paged') {
+        viewport.scrollLeft = Math.round((maxScroll * safeProgress) / 100)
+      } else {
+        viewport.scrollTop = Math.round((maxScroll * safeProgress) / 100)
+      }
     }
 
     frame = requestAnimationFrame(() => {
@@ -2052,7 +2570,14 @@ export function HtmlChapterReader({
       cancelAnimationFrame(correctionFrame)
       window.clearTimeout(timeout)
     }
-  }, [chapterHtml, error, initialProgress, loading])
+  }, [
+    chapterHtml,
+    error,
+    initialProgress,
+    loading,
+    settings.fontSize,
+    settings.layout,
+  ])
 
   useEffect(() => {
     const viewport = viewportRef.current
@@ -2064,9 +2589,29 @@ export function HtmlChapterReader({
     let frame = 0
 
     const updateVisibleProgress = () => {
-      const maxScroll = Math.max(viewport.scrollHeight - viewport.clientHeight, 0)
+      const paged = settings.layout === 'paged'
+      const maxScroll = paged
+        ? Math.max(viewport.scrollWidth - viewport.clientWidth, 0)
+        : Math.max(viewport.scrollHeight - viewport.clientHeight, 0)
       const nextProgress =
-        maxScroll === 0 ? 0 : clampPercent((viewport.scrollTop / maxScroll) * 100)
+        maxScroll === 0
+          ? 0
+          : clampPercent(
+              ((paged ? viewport.scrollLeft : viewport.scrollTop) / maxScroll) * 100,
+            )
+
+      if (paged) {
+        const nextPageCount = Math.max(1, Math.round(viewport.scrollWidth / viewport.clientWidth))
+        const nextPage = Math.min(
+          Math.round(viewport.scrollLeft / Math.max(viewport.clientWidth, 1)) + 1,
+          nextPageCount,
+        )
+        setTextPageCount(nextPageCount)
+        setVisibleTextPage(nextPage)
+      } else {
+        setTextPageCount(1)
+        setVisibleTextPage(1)
+      }
 
       setVisibleProgress((previousProgress) =>
         previousProgress === nextProgress ? previousProgress : nextProgress,
@@ -2079,13 +2624,22 @@ export function HtmlChapterReader({
     }
 
     viewport.addEventListener('scroll', handleScroll, { passive: true })
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(() => handleScroll())
+    resizeObserver?.observe(viewport)
+    if (viewport.firstElementChild) {
+      resizeObserver?.observe(viewport.firstElementChild)
+    }
     updateVisibleProgress()
 
     return () => {
       cancelAnimationFrame(frame)
       viewport.removeEventListener('scroll', handleScroll)
+      resizeObserver?.disconnect()
     }
-  }, [chapterHtml, error, loading])
+  }, [chapterHtml, error, loading, settings.fontSize, settings.layout])
 
   useEffect(() => {
     if (loading || error || !chapterHtml) {
@@ -2104,6 +2658,20 @@ export function HtmlChapterReader({
   }, [chapterHtml, error, loading, onProgressChange, visibleProgress])
 
   const bookmarkCopy = buildHtmlBookmarkCopy(visibleProgress)
+  const moveTextPage = (offset: number) => {
+    const viewport = viewportRef.current
+    if (!viewport) {
+      return
+    }
+
+    const nextPage = Math.min(Math.max(visibleTextPage + offset, 1), textPageCount)
+    viewport.scrollLeft = (nextPage - 1) * viewport.clientWidth
+    setVisibleTextPage(nextPage)
+  }
+  const textProgressLabel =
+    settings.layout === 'paged'
+      ? `Page ${visibleTextPage} of ${textPageCount} · ${bookmarkCopy.progressLabel}`
+      : bookmarkCopy.progressLabel
 
   return (
     <article className="html-reader">
@@ -2114,26 +2682,46 @@ export function HtmlChapterReader({
         </div>
         <div className="html-reader__toolbar-actions">
           {!loading && !error && (
-            <span className="html-reader__progress-label">{bookmarkCopy.progressLabel}</span>
+            <span className="html-reader__progress-label">{textProgressLabel}</span>
           )}
+          <ReaderSettingsControl
+            fileUrl={fileUrl}
+            format="html"
+            onSettingsChange={onSettingsChange}
+            settings={settings}
+          />
           {toolbarAccessory}
-          <button
-            className="ghost-button"
-            onClick={() => window.open(fileUrl, '_blank', 'noopener,noreferrer')}
-            type="button"
-          >
-            <ExternalLink aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-            Open original file
-          </button>
         </div>
       </div>
 
       {loading && <div className="cbz-viewer__state">Loading chapter from {resolvedTitle}...</div>}
       {error && <div className="cbz-viewer__state cbz-viewer__state--error">{error}</div>}
 
-      {!loading && !error && (
+      {!loading && !error && settings.layout === 'paged' && (
+        <PagedReaderSurface
+          canNext={visibleTextPage < textPageCount}
+          canPrevious={visibleTextPage > 1}
+          direction="ltr"
+          onNext={() => moveTextPage(1)}
+          onPrevious={() => moveTextPage(-1)}
+        >
+          <div className="html-reader__viewport html-reader__viewport--paged" ref={viewportRef}>
+            <article
+              className="html-reader__content html-reader__content--paged"
+              style={{ '--reader-font-scale': settings.fontSize / 100 } as CSSProperties}
+            >
+              <div dangerouslySetInnerHTML={{ __html: chapterHtml }} />
+            </article>
+          </div>
+        </PagedReaderSurface>
+      )}
+
+      {!loading && !error && settings.layout === 'continuous' && (
         <div className="html-reader__viewport" ref={viewportRef}>
-          <article className="html-reader__content">
+          <article
+            className="html-reader__content"
+            style={{ '--reader-font-scale': settings.fontSize / 100 } as CSSProperties}
+          >
             <div dangerouslySetInnerHTML={{ __html: chapterHtml }} />
           </article>
         </div>
@@ -2148,6 +2736,8 @@ export function TextFileReader({
   format,
   initialProgress = 0,
   onProgressChange,
+  onSettingsChange,
+  settings,
   toolbarAccessory,
 }: TextFileReaderProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
@@ -2157,6 +2747,8 @@ export function TextFileReader({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [visibleProgress, setVisibleProgress] = useState(clampPercent(initialProgress))
+  const [visibleTextPage, setVisibleTextPage] = useState(1)
+  const [textPageCount, setTextPageCount] = useState(1)
 
   useEffect(() => {
     let disposed = false
@@ -2209,6 +2801,10 @@ export function TextFileReader({
   }, [fileUrl, format, initialProgress, title])
 
   useEffect(() => {
+    didInitialScrollRef.current = false
+  }, [settings.fontSize, settings.layout])
+
+  useEffect(() => {
     if (loading || error || !documentHtml || !viewportRef.current) {
       return
     }
@@ -2224,8 +2820,16 @@ export function TextFileReader({
     let timeout = 0
 
     const scrollToInitialProgress = () => {
-      const maxScroll = Math.max(viewport.scrollHeight - viewport.clientHeight, 0)
-      viewport.scrollTop = Math.round((maxScroll * safeProgress) / 100)
+      const maxScroll =
+        settings.layout === 'paged'
+          ? Math.max(viewport.scrollWidth - viewport.clientWidth, 0)
+          : Math.max(viewport.scrollHeight - viewport.clientHeight, 0)
+
+      if (settings.layout === 'paged') {
+        viewport.scrollLeft = Math.round((maxScroll * safeProgress) / 100)
+      } else {
+        viewport.scrollTop = Math.round((maxScroll * safeProgress) / 100)
+      }
     }
 
     frame = requestAnimationFrame(() => {
@@ -2240,7 +2844,14 @@ export function TextFileReader({
       cancelAnimationFrame(correctionFrame)
       window.clearTimeout(timeout)
     }
-  }, [documentHtml, error, initialProgress, loading])
+  }, [
+    documentHtml,
+    error,
+    initialProgress,
+    loading,
+    settings.fontSize,
+    settings.layout,
+  ])
 
   useEffect(() => {
     const viewport = viewportRef.current
@@ -2252,9 +2863,29 @@ export function TextFileReader({
     let frame = 0
 
     const updateVisibleProgress = () => {
-      const maxScroll = Math.max(viewport.scrollHeight - viewport.clientHeight, 0)
+      const paged = settings.layout === 'paged'
+      const maxScroll = paged
+        ? Math.max(viewport.scrollWidth - viewport.clientWidth, 0)
+        : Math.max(viewport.scrollHeight - viewport.clientHeight, 0)
       const nextProgress =
-        maxScroll === 0 ? 0 : clampPercent((viewport.scrollTop / maxScroll) * 100)
+        maxScroll === 0
+          ? 0
+          : clampPercent(
+              ((paged ? viewport.scrollLeft : viewport.scrollTop) / maxScroll) * 100,
+            )
+
+      if (paged) {
+        const nextPageCount = Math.max(1, Math.round(viewport.scrollWidth / viewport.clientWidth))
+        const nextPage = Math.min(
+          Math.round(viewport.scrollLeft / Math.max(viewport.clientWidth, 1)) + 1,
+          nextPageCount,
+        )
+        setTextPageCount(nextPageCount)
+        setVisibleTextPage(nextPage)
+      } else {
+        setTextPageCount(1)
+        setVisibleTextPage(1)
+      }
 
       setVisibleProgress((previousProgress) =>
         previousProgress === nextProgress ? previousProgress : nextProgress,
@@ -2267,13 +2898,22 @@ export function TextFileReader({
     }
 
     viewport.addEventListener('scroll', handleScroll, { passive: true })
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(() => handleScroll())
+    resizeObserver?.observe(viewport)
+    if (viewport.firstElementChild) {
+      resizeObserver?.observe(viewport.firstElementChild)
+    }
     updateVisibleProgress()
 
     return () => {
       cancelAnimationFrame(frame)
       viewport.removeEventListener('scroll', handleScroll)
+      resizeObserver?.disconnect()
     }
-  }, [documentHtml, error, loading])
+  }, [documentHtml, error, loading, settings.fontSize, settings.layout])
 
   useEffect(() => {
     if (loading || error || !documentHtml) {
@@ -2293,6 +2933,20 @@ export function TextFileReader({
 
   const bookmarkCopy = buildTextBookmarkCopy(visibleProgress)
   const readerLabel = format === 'md' ? 'Markdown reader' : 'Text reader'
+  const moveTextPage = (offset: number) => {
+    const viewport = viewportRef.current
+    if (!viewport) {
+      return
+    }
+
+    const nextPage = Math.min(Math.max(visibleTextPage + offset, 1), textPageCount)
+    viewport.scrollLeft = (nextPage - 1) * viewport.clientWidth
+    setVisibleTextPage(nextPage)
+  }
+  const textProgressLabel =
+    settings.layout === 'paged'
+      ? `Page ${visibleTextPage} of ${textPageCount} · ${bookmarkCopy.progressLabel}`
+      : bookmarkCopy.progressLabel
 
   return (
     <article className="html-reader">
@@ -2303,26 +2957,46 @@ export function TextFileReader({
         </div>
         <div className="html-reader__toolbar-actions">
           {!loading && !error && (
-            <span className="html-reader__progress-label">{bookmarkCopy.progressLabel}</span>
+            <span className="html-reader__progress-label">{textProgressLabel}</span>
           )}
+          <ReaderSettingsControl
+            fileUrl={fileUrl}
+            format={format}
+            onSettingsChange={onSettingsChange}
+            settings={settings}
+          />
           {toolbarAccessory}
-          <button
-            className="ghost-button"
-            onClick={() => window.open(fileUrl, '_blank', 'noopener,noreferrer')}
-            type="button"
-          >
-            <ExternalLink aria-hidden="true" className="app-icon" strokeWidth={1.9} />
-            Open original file
-          </button>
         </div>
       </div>
 
       {loading && <div className="cbz-viewer__state">Loading document from {resolvedTitle}...</div>}
       {error && <div className="cbz-viewer__state cbz-viewer__state--error">{error}</div>}
 
-      {!loading && !error && (
+      {!loading && !error && settings.layout === 'paged' && (
+        <PagedReaderSurface
+          canNext={visibleTextPage < textPageCount}
+          canPrevious={visibleTextPage > 1}
+          direction="ltr"
+          onNext={() => moveTextPage(1)}
+          onPrevious={() => moveTextPage(-1)}
+        >
+          <div className="html-reader__viewport html-reader__viewport--paged" ref={viewportRef}>
+            <article
+              className="html-reader__content html-reader__content--paged"
+              style={{ '--reader-font-scale': settings.fontSize / 100 } as CSSProperties}
+            >
+              <div dangerouslySetInnerHTML={{ __html: documentHtml }} />
+            </article>
+          </div>
+        </PagedReaderSurface>
+      )}
+
+      {!loading && !error && settings.layout === 'continuous' && (
         <div className="html-reader__viewport" ref={viewportRef}>
-          <article className="html-reader__content">
+          <article
+            className="html-reader__content"
+            style={{ '--reader-font-scale': settings.fontSize / 100 } as CSSProperties}
+          >
             <div dangerouslySetInnerHTML={{ __html: documentHtml }} />
           </article>
         </div>

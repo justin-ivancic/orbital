@@ -64,6 +64,7 @@ import type {
   OfflineDownloadTarget,
   OfflineStorageSummary,
   ReaderProgress,
+  ReaderSettings,
   SavedReadingPosition,
   ScanLogEntry,
   ScanStatus,
@@ -74,6 +75,12 @@ import type {
   ViewId,
 } from './appTypes'
 import { categoryOrder } from './appTypes'
+import {
+  defaultReaderSettings,
+  migrateLegacyCbzSettings,
+  normalizeReaderSettings,
+  settingsForFormat,
+} from './readerSettings'
 import {
   createOfflineDownloadRecord,
   deleteAllOfflineDownloadsForUser,
@@ -133,6 +140,7 @@ const readerChromeInteractionSelector = [
   '.cbz-viewer__toolbar',
   '.epub-reader__toolbar',
   '.html-reader__toolbar',
+  '.reader-settings__sheet',
   '.variant-menu__panel',
   '.cbz-viewer__settings-menu',
 ].join(', ')
@@ -1743,6 +1751,8 @@ function App() {
   const [seriesCache, setSeriesCache] = useState<Record<string, SeriesDetail>>({})
   const [seriesError, setSeriesError] = useState<string | null>(null)
   const [readerProgress, setReaderProgress] = useState<ReaderProgress | null>(null)
+  const [readerPreferences, setReaderPreferences] =
+    useState<Record<string, ReaderSettings>>({})
   const [readerResumePosition, setReaderResumePosition] =
     useState<SavedReadingPosition | null>(null)
   const [readerResumeVariantId, setReaderResumeVariantId] = useState<string | null>(null)
@@ -1792,6 +1802,9 @@ function App() {
   const readerTouchStartRef = useRef<{ edge: 'left' | 'right' | null; x: number; y: number } | null>(null)
   const lastReaderTouchToggleRef = useRef(0)
   const readerChromeTimerRef = useRef<number | null>(null)
+  const readerPreferenceLoadsRef = useRef(new Set<string>())
+  const readerPreferenceSaveTimersRef = useRef(new Map<string, number>())
+  const pendingReaderPreferencesRef = useRef(new Map<string, ReaderSettings>())
   const scanStreamWasActiveRef = useRef(false)
   const cacheWriteTimerRef = useRef<number | null>(null)
   const [readerChromeVisible, setReaderChromeVisible] = useState(true)
@@ -2057,6 +2070,18 @@ function App() {
     currentVariant && readerResumeVariantId === currentVariant.id
       ? readerResumePosition
       : currentSavedPosition ?? null
+  const defaultCurrentReaderSettings =
+    selectedSeriesSummary && currentVariant
+      ? defaultReaderSettings(selectedSeriesSummary.category, currentVariant.format)
+      : defaultReaderSettings(defaultReaderCategory, 'pdf')
+  const currentReaderSettings =
+    selectedSeriesSummary && currentVariant
+      ? settingsForFormat(
+          readerPreferences[selectedSeriesSummary.id] ?? defaultCurrentReaderSettings,
+          selectedSeriesSummary.category,
+          currentVariant.format,
+        )
+      : defaultCurrentReaderSettings
   const currentOfflinePages = useMemo(
     () =>
       activeOfflineDownload?.status === 'ready' && currentVariant
@@ -2065,6 +2090,167 @@ function App() {
     [activeOfflineDownload?.manifest, activeOfflineDownload?.status, currentVariant],
   )
   const metadataReviewItems = appState?.metadataQueue ?? emptyMetadataReviewItems
+
+  useEffect(() => {
+    setReaderPreferences({})
+    readerPreferenceLoadsRef.current.clear()
+    readerPreferenceSaveTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+    readerPreferenceSaveTimersRef.current.clear()
+    pendingReaderPreferencesRef.current.clear()
+  }, [sessionUser?.id])
+
+  useEffect(() => {
+    if (
+      !authenticated ||
+      offlineMode ||
+      currentView !== 'reader' ||
+      !selectedSeriesSummary ||
+      !currentVariant
+    ) {
+      return
+    }
+
+    const seriesId = selectedSeriesSummary.id
+    if (
+      Object.prototype.hasOwnProperty.call(readerPreferences, seriesId) ||
+      readerPreferenceLoadsRef.current.has(seriesId)
+    ) {
+      return
+    }
+
+    let disposed = false
+    readerPreferenceLoadsRef.current.add(seriesId)
+
+    void api.getReaderPreference(seriesId)
+      .then((response) => {
+        if (disposed) {
+          return
+        }
+
+        const fallback = defaultReaderSettings(
+          selectedSeriesSummary.category,
+          currentVariant.format,
+        )
+        let preference = response.preference
+          ? normalizeReaderSettings(response.preference, fallback)
+          : fallback
+
+        if (!response.preference && currentVariant.format === 'cbz') {
+          try {
+            const legacyStorageKey = `cbz-reader-settings:${seriesId}`
+            const legacySettings = window.localStorage.getItem(legacyStorageKey)
+            const migratedPreference = legacySettings
+              ? migrateLegacyCbzSettings(JSON.parse(legacySettings), fallback)
+              : null
+
+            if (migratedPreference) {
+              preference = migratedPreference
+              void api.setReaderPreference(seriesId, migratedPreference).then(() => {
+                window.localStorage.removeItem(legacyStorageKey)
+              })
+            }
+          } catch {
+            // Invalid or unavailable legacy storage must not block the reader.
+          }
+        }
+
+        setReaderPreferences((previousPreferences) => ({
+          ...previousPreferences,
+          [seriesId]: preference,
+        }))
+      })
+      .catch((loadError) => {
+        if (!disposed) {
+          setStateError(
+            loadError instanceof Error
+              ? loadError.message
+              : 'Reader preferences could not be loaded.',
+          )
+        }
+      })
+      .finally(() => {
+        readerPreferenceLoadsRef.current.delete(seriesId)
+      })
+
+    return () => {
+      disposed = true
+    }
+  }, [
+    authenticated,
+    currentVariant,
+    currentView,
+    offlineMode,
+    readerPreferences,
+    selectedSeriesSummary,
+  ])
+
+  const handleReaderSettingsChange = useCallback(
+    (nextSettings: ReaderSettings) => {
+      if (!selectedSeriesSummary || !currentVariant) {
+        return
+      }
+
+      const seriesId = selectedSeriesSummary.id
+      const normalizedSettings = settingsForFormat(
+        normalizeReaderSettings(nextSettings, defaultCurrentReaderSettings),
+        selectedSeriesSummary.category,
+        currentVariant.format,
+      )
+
+      setReaderPreferences((previousPreferences) => ({
+        ...previousPreferences,
+        [seriesId]: normalizedSettings,
+      }))
+
+      if (offlineMode) {
+        return
+      }
+
+      pendingReaderPreferencesRef.current.set(seriesId, normalizedSettings)
+      const existingTimer = readerPreferenceSaveTimersRef.current.get(seriesId)
+      if (existingTimer != null) {
+        window.clearTimeout(existingTimer)
+      }
+
+      const timer = window.setTimeout(() => {
+        readerPreferenceSaveTimersRef.current.delete(seriesId)
+        const pendingSettings = pendingReaderPreferencesRef.current.get(seriesId)
+        pendingReaderPreferencesRef.current.delete(seriesId)
+
+        if (!pendingSettings) {
+          return
+        }
+
+        void api.setReaderPreference(seriesId, pendingSettings).catch((saveError) => {
+          setStateError(
+            saveError instanceof Error
+              ? saveError.message
+              : 'Reader preferences could not be saved.',
+          )
+        })
+      }, 300)
+
+      readerPreferenceSaveTimersRef.current.set(seriesId, timer)
+    },
+    [
+      currentVariant,
+      defaultCurrentReaderSettings,
+      offlineMode,
+      selectedSeriesSummary,
+    ],
+  )
+
+  useEffect(
+    () => () => {
+      readerPreferenceSaveTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+      readerPreferenceSaveTimersRef.current.clear()
+      pendingReaderPreferencesRef.current.forEach((settings, seriesId) => {
+        void api.setReaderPreference(seriesId, settings, { keepalive: true })
+      })
+      pendingReaderPreferencesRef.current.clear()
+    },
+    [],
+  )
 
   useEffect(() => {
     setFilterSheetOpen(false)
@@ -5907,8 +6093,6 @@ function App() {
     }
 
     if (currentVariant.format === 'cbz') {
-      const useMangaPaging = selectedSeriesSummary.category === 'manga'
-
       return (
         <div className="reader-layout">
           <CbzReader
@@ -5916,12 +6100,9 @@ function App() {
             fileUrl={currentVariant.fileUrl}
             offlinePages={currentOfflinePages ?? undefined}
             initialPage={currentReaderStartPosition?.page ?? 1}
-            initialPageOrderMode={useMangaPaging ? 'archive' : 'filename'}
-            initialReadingDirection={useMangaPaging ? 'rtl' : 'ltr'}
-            initialSpreadAlignment="cover-first"
-            initialViewMode={currentReaderStartPosition?.viewMode ?? 'single'}
+            onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
-            preferenceKey={selectedSeriesSummary.id}
+            settings={currentReaderSettings}
             toolbarAccessory={readerToolbarAccessory}
             title={formatDisplayEntryTitle(currentEntry.title)}
           />
@@ -5936,7 +6117,9 @@ function App() {
             fileUrl={currentVariant.fileUrl}
             format={currentVariant.format}
             initialProgress={currentReaderStartPosition?.page ?? 0}
+            onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
+            settings={currentReaderSettings}
             toolbarAccessory={readerToolbarAccessory}
             title={formatDisplayEntryTitle(currentEntry.title)}
           />
@@ -5950,7 +6133,9 @@ function App() {
           <PdfEmbed
             fileUrl={currentVariant.fileUrl}
             initialPage={currentReaderStartPosition?.page ?? 1}
+            onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
+            settings={currentReaderSettings}
             toolbarAccessory={readerToolbarAccessory}
             title={formatDisplayEntryTitle(currentEntry.title)}
           />
@@ -5964,7 +6149,9 @@ function App() {
           <HtmlChapterReader
             fileUrl={currentVariant.fileUrl}
             initialProgress={currentReaderStartPosition?.page ?? 0}
+            onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
+            settings={currentReaderSettings}
             toolbarAccessory={readerToolbarAccessory}
             title={formatDisplayEntryTitle(currentEntry.title)}
           />
@@ -5978,7 +6165,9 @@ function App() {
           <EpubReader
             fileUrl={currentVariant.fileUrl}
             initialProgress={currentReaderStartPosition?.page ?? 0}
+            onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
+            settings={currentReaderSettings}
             toolbarAccessory={readerToolbarAccessory}
             title={formatDisplayEntryTitle(currentEntry.title)}
           />
@@ -6077,6 +6266,7 @@ function App() {
 
         <section className="reader-overlay reader-overlay--bottom">
           <button
+            aria-label={text.previousEntry}
             className="ghost-button"
             disabled={!selectedSeries || selectedEntryIndex === 0}
             onClick={() => moveEntry(-1)}
@@ -6090,6 +6280,13 @@ function App() {
           <div className="reader-overlay__progress">
             {progressLabel && <span>{progressLabel}</span>}
             <button
+              aria-label={
+                offlineReaderDownloadId
+                  ? text.openOffline
+                  : bookmarkJustSet
+                    ? text.bookmarked
+                    : text.setBookmark
+              }
               className="primary-button"
               disabled={Boolean(offlineReaderDownloadId)}
               onClick={() => void handleSetBookmark()}
@@ -6115,6 +6312,7 @@ function App() {
             </button>
           </div>
           <button
+            aria-label={text.nextEntry}
             className="ghost-button"
             disabled={!selectedSeries || selectedEntryIndex === (selectedSeries.entries.length || 1) - 1}
             onClick={() => moveEntry(1)}

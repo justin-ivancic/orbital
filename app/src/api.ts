@@ -14,6 +14,8 @@ import type {
   OfflineDownloadEstimate,
   OfflineDownloadManifest,
   OfflineDownloadTarget,
+  ReaderPreferenceResponse,
+  ReaderSettings,
   ResetPasswordPayload,
   SavedReadingPosition,
   ScopeId,
@@ -115,6 +117,23 @@ export const api = {
       `/api/bookmarks/${encodeURIComponent(seriesId)}`,
       {
         method: 'DELETE',
+      },
+    ),
+  getReaderPreference: (seriesId: string) =>
+    request<ReaderPreferenceResponse>(
+      `/api/reader-preferences/${encodeURIComponent(seriesId)}`,
+    ),
+  setReaderPreference: (
+    seriesId: string,
+    settings: ReaderSettings,
+    options?: { keepalive?: boolean },
+  ) =>
+    request<ReaderPreferenceResponse>(
+      `/api/reader-preferences/${encodeURIComponent(seriesId)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ settings }),
+        keepalive: options?.keepalive,
       },
     ),
   addComment: (payload: CreateCommentPayload) =>

@@ -9,7 +9,29 @@ export type Role = 'admin' | 'member'
 export type EntryFormat = 'video' | 'cbz' | 'epub' | 'pdf' | 'md' | 'html' | 'txt'
 export type ReaderViewMode = 'single' | 'spread'
 export type ReaderLocationType = 'page' | 'percent'
+export type ReadingStyle = 'book' | 'manga' | 'webtoon' | 'text'
+export type ReaderLayoutMode = 'paged' | 'continuous'
+export type ReaderDirection = 'ltr' | 'rtl'
+export type ReaderPageOrder = 'archive' | 'filename'
+export type ReaderSpreadAlignment = 'cover-first' | 'straight-pairs'
+export type ReaderFitMode = 'fit-page' | 'fit-width' | 'manual'
 export type MediaTrackKind = 'audio' | 'subtitle'
+
+export type ReaderSettings = {
+  style: ReadingStyle
+  layout: ReaderLayoutMode
+  viewMode: ReaderViewMode
+  direction: ReaderDirection
+  pageOrder: ReaderPageOrder
+  spreadAlignment: ReaderSpreadAlignment
+  fitMode: ReaderFitMode
+  zoom: number
+  fontSize: number
+}
+
+export type ReaderPreferenceResponse = {
+  preference: ReaderSettings | null
+}
 
 export type MediaTrackOption = {
   id: string

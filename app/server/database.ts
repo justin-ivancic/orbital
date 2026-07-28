@@ -133,6 +133,14 @@ export const openDatabase = (dataDirectory: string) => {
       PRIMARY KEY (user_id, entry_id)
     );
 
+    CREATE TABLE IF NOT EXISTS reader_preferences (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      series_id TEXT NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+      settings_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, series_id)
+    );
+
     CREATE TABLE IF NOT EXISTS comments (
       id TEXT PRIMARY KEY,
       series_id TEXT NOT NULL REFERENCES series(id) ON DELETE CASCADE,

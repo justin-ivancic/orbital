@@ -6767,6 +6767,506 @@ button[aria-label] {
   }
 }
 
+/* Reading styles and paper viewport --------------------------------------- */
+
+.reader-settings {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.app-shell--reader .document-frame__toolbar,
+.app-shell--reader .cbz-viewer__toolbar,
+.app-shell--reader .epub-reader__toolbar,
+.app-shell--reader .html-reader__toolbar {
+  z-index: 46;
+}
+
+.reader-settings__trigger.is-active {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.reader-settings__sheet {
+  position: fixed;
+  left: max(12px, env(safe-area-inset-left));
+  right: max(12px, env(safe-area-inset-right));
+  top: calc(128px + env(safe-area-inset-top));
+  z-index: 70;
+  width: min(720px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  max-height: min(68dvh, calc(100dvh - 150px - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  margin: 0 auto;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--ink);
+  border-radius: 22px;
+  color: var(--ink);
+  background: var(--paper);
+  box-shadow: 0 8px 0 rgb(0 0 0 / 0.08);
+}
+
+.reader-settings__header,
+.reader-settings__footer,
+.reader-settings__group--wide {
+  grid-column: 1 / -1;
+}
+
+.reader-settings__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 2px;
+}
+
+.reader-settings__header > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.reader-settings__header span,
+.reader-settings__label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.reader-settings__header strong {
+  font-size: 1.05rem;
+}
+
+.reader-settings__close {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+.reader-settings__group {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 7px;
+}
+
+.reader-settings__choices {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--ink);
+  border-radius: 13px;
+}
+
+.reader-settings__choices--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.reader-settings__choices--styles {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.reader-settings__choices button {
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.15;
+}
+
+.reader-settings__choices button.is-active {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.reader-settings__stepper {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 40px minmax(5ch, 1fr) 40px;
+  align-items: center;
+  border: 1px solid var(--ink);
+  border-radius: 13px;
+}
+
+.reader-settings__stepper button {
+  height: 100%;
+  min-height: 40px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+}
+
+.reader-settings__stepper span {
+  text-align: center;
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.reader-settings__footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.reader-paged-surface {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.reader-page-turn {
+  position: absolute;
+  top: 20%;
+  bottom: 20%;
+  z-index: 16;
+  width: clamp(42px, 7vw, 76px);
+  display: grid;
+  place-items: center;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  opacity: 0.16;
+}
+
+.reader-page-turn--left {
+  left: 0;
+}
+
+.reader-page-turn--right {
+  right: 0;
+}
+
+.reader-page-turn svg {
+  width: 28px;
+  height: 28px;
+  padding: 5px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: var(--paper);
+}
+
+.reader-page-turn:hover,
+.reader-page-turn:focus-visible {
+  opacity: 1;
+}
+
+.reader-page-turn:disabled {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-shell--reader .cbz-viewer__viewport--paged,
+.app-shell--reader .document-frame__viewport--paged {
+  overflow: auto;
+  scrollbar-width: none;
+  overscroll-behavior: none;
+}
+
+.app-shell--reader .cbz-viewer__viewport--paged::-webkit-scrollbar,
+.app-shell--reader .document-frame__viewport--paged::-webkit-scrollbar {
+  display: none;
+}
+
+.cbz-viewer__pages--paged,
+.cbz-page--paged,
+.cbz-page--paged .cbz-page__figure {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.cbz-page--paged {
+  contain: none;
+  padding:
+    calc(14px + env(safe-area-inset-top))
+    clamp(12px, 4vw, 42px)
+    calc(14px + env(safe-area-inset-bottom));
+}
+
+.cbz-page--paged .cbz-page__figure {
+  display: grid;
+  place-items: center;
+}
+
+.cbz-viewer__viewport--manual .cbz-page--paged .cbz-page__figure {
+  place-items: start;
+}
+
+.cbz-page__sheet--paged {
+  max-width: 100%;
+  min-width: 0;
+  min-height: 0;
+  align-items: center;
+}
+
+.cbz-page__sheet--paged.cbz-page__sheet--fit-page {
+  height: 100%;
+}
+
+.cbz-page__sheet--paged .cbz-page__panel {
+  min-width: 0;
+  min-height: 0;
+  align-items: center;
+}
+
+.cbz-page__sheet--paged.cbz-page__sheet--fit-page .cbz-page__panel {
+  height: 100%;
+}
+
+.cbz-page__sheet--paged.cbz-page__sheet--fit-page img {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.cbz-page__sheet--paged.cbz-page__sheet--fit-width,
+.cbz-page__sheet--paged.cbz-page__sheet--manual {
+  height: auto;
+  max-width: none;
+}
+
+.cbz-page__sheet--paged.cbz-page__sheet--manual {
+  width: var(--cbz-single-page-width, 980px);
+}
+
+.cbz-page__sheet--paged.cbz-page__sheet--manual.cbz-page__sheet--spread {
+  width: var(--cbz-spread-width, 1220px);
+}
+
+.cbz-page__sheet--paged.cbz-page__sheet--manual.cbz-page__sheet--spread-solo {
+  width: var(--cbz-spread-solo-width, 620px);
+}
+
+.cbz-page__sheet--paged.cbz-page__sheet--fit-width img,
+.cbz-page__sheet--paged.cbz-page__sheet--manual img {
+  width: 100%;
+  max-width: none;
+  height: auto;
+  max-height: none;
+}
+
+.document-frame__paged-group {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding:
+    calc(14px + env(safe-area-inset-top))
+    clamp(24px, 6vw, 72px)
+    calc(14px + env(safe-area-inset-bottom));
+}
+
+.document-frame__viewport--fit-width .document-frame__paged-group {
+  place-items: start center;
+}
+
+.document-frame__viewport--manual .document-frame__paged-group {
+  place-items: start;
+}
+
+.document-frame__viewport--manual .document-frame__paged-panel {
+  place-items: start;
+}
+
+.document-frame__viewport--manual .document-frame__paged-sheet {
+  place-items: start;
+}
+
+.document-frame__paged-sheet {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+}
+
+.document-frame__paged-sheet.is-preloaded {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.document-frame__paged-group--spread .document-frame__paged-sheet {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+}
+
+.document-frame__paged-panel {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+}
+
+.app-shell--reader .document-frame__viewport--paged .document-frame__canvas {
+  max-width: none;
+  border: 1px solid var(--ink);
+}
+
+.epub-reader__viewport.is-loading {
+  visibility: hidden;
+}
+
+.epub-reader__viewport--paged,
+.epub-reader__rendition,
+.epub-reader__viewport--paged .reader-paged-surface {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.html-reader > .reader-paged-surface {
+  width: 100%;
+  height: var(--reader-viewport-height);
+}
+
+.app-shell--reader .html-reader > .reader-paged-surface {
+  height: 100dvh;
+}
+
+.html-reader__content {
+  --reader-font-scale: 1;
+}
+
+.html-reader__content p,
+.html-reader__content li,
+.html-reader__content span,
+.html-reader__content blockquote,
+.html-reader__content em,
+.html-reader__content strong {
+  font-size: calc(1.02rem * var(--reader-font-scale));
+}
+
+.html-reader__viewport--paged {
+  overflow: hidden;
+  scrollbar-width: none;
+}
+
+.html-reader__content--paged {
+  --reader-page-inline: clamp(24px, 7vw, 86px);
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  min-height: 0;
+  padding:
+    calc(152px + env(safe-area-inset-top))
+    var(--reader-page-inline)
+    calc(90px + env(safe-area-inset-bottom));
+  column-width: calc(100vw - (var(--reader-page-inline) * 2));
+  column-gap: calc(var(--reader-page-inline) * 2);
+  column-fill: auto;
+}
+
+.html-reader__content--paged > div {
+  width: min(100%, 76ch);
+  margin: 0 auto;
+}
+
+@media (max-width: 720px) {
+  .reader-settings__trigger-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .reader-settings__trigger {
+    width: 38px;
+    min-width: 38px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .reader-settings__sheet {
+    top: auto;
+    bottom: calc(96px + env(safe-area-inset-bottom));
+    max-height: min(66dvh, calc(100dvh - 104px - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+    grid-template-columns: 1fr;
+    gap: 11px;
+    padding: 14px;
+    border-radius: 20px;
+  }
+
+  .reader-settings__header,
+  .reader-settings__footer,
+  .reader-settings__group--wide {
+    grid-column: auto;
+  }
+
+  .reader-settings__choices button {
+    min-height: 38px;
+    padding: 7px 8px;
+    font-size: 0.8rem;
+  }
+
+  .reader-settings__footer {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .reader-settings__footer .ghost-button {
+    min-width: 0;
+    justify-content: center;
+    padding-inline: 8px;
+  }
+
+  .reader-page-turn {
+    width: 44px;
+    opacity: 0.1;
+  }
+
+  .reader-page-turn svg {
+    width: 24px;
+    height: 24px;
+    padding: 4px;
+  }
+
+  .cbz-page--paged {
+    padding:
+      calc(8px + env(safe-area-inset-top))
+      8px
+      calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .document-frame__paged-group {
+    padding:
+      calc(8px + env(safe-area-inset-top))
+      12px
+      calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .html-reader__content--paged {
+    --reader-page-inline: clamp(18px, 7vw, 32px);
+  }
+}
+
 @media print {
   .topbar,
   .bottom-nav,
