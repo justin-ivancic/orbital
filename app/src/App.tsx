@@ -905,14 +905,6 @@ const ui = {
   },
 } as const
 
-const posterColors: Record<CategoryId, [string, string]> = {
-  anime: ['#2346a3', '#5fe2ff'],
-  manga: ['#5b74ff', '#52dbc6'],
-  novels: ['#2b966f', '#8ae6b4'],
-  books: ['#a56dff', '#ffd27a'],
-  magazines: ['#c66b4a', '#ffd07c'],
-}
-
 type AppIconName =
   | 'library'
   | 'discover'
@@ -3548,18 +3540,12 @@ function App() {
   }
 
   const renderPoster = (series: SeriesSummary, compact = false, showCover = authenticated) => {
-    const colors = posterColors[series.category]
     const hasCover = showCover && Boolean(series.coverUrl)
     const displayTitle = getSeriesDisplayTitle(series)
-    const style = {
-      '--poster-start': colors[0],
-      '--poster-end': colors[1],
-    } as CSSProperties
 
     return (
       <div
         className={`poster ${compact ? 'poster--compact' : ''} ${hasCover ? 'poster--covered' : ''}`}
-        style={style}
       >
         {hasCover && (
           <img

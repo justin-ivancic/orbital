@@ -1124,8 +1124,8 @@ export function EpubReader({
 
         rendition.themes.default({
           body: {
-            background: 'transparent',
-            color: '#eef3fb',
+            background: '#fff',
+            color: '#000',
             'font-family':
               "'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif",
             'line-height': '1.8',
@@ -1138,19 +1138,19 @@ export function EpubReader({
             margin: '0 0 1.1em',
           },
           h1: {
-            color: '#f6f8ff',
+            color: '#000',
             'font-size': '2rem',
             'line-height': '1.14',
             margin: '0 0 1rem',
           },
           h2: {
-            color: '#f6f8ff',
+            color: '#000',
             'font-size': '1.5rem',
             'line-height': '1.18',
             margin: '0 0 0.9rem',
           },
           h3: {
-            color: '#f6f8ff',
+            color: '#000',
             'font-size': '1.24rem',
             'line-height': '1.24',
             margin: '0 0 0.8rem',
@@ -1160,11 +1160,14 @@ export function EpubReader({
             height: 'auto',
           },
           a: {
-            color: '#8ee4ff',
+            color: '#000',
+            'text-decoration': 'underline',
+            'text-decoration-thickness': '0.08em',
+            'text-underline-offset': '0.16em',
           },
           blockquote: {
-            borderLeft: '2px solid rgba(98, 217, 255, 0.4)',
-            color: 'rgba(224, 233, 246, 0.86)',
+            borderLeft: '2px solid #000',
+            color: '#000',
             margin: '0 0 1.4rem',
             paddingLeft: '1rem',
           },
