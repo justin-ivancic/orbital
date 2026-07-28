@@ -93,18 +93,22 @@ export const api = {
     request<SearchResponse>(
       `/api/search?q=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}`,
     ),
-  setBookmark: (payload: {
-    seriesId: string
-    entryId: string
-    entryIndex: number
-    category: CategoryId
-    progress: string
-    cue: string
-    position: SavedReadingPosition
-  }) =>
+  setBookmark: (
+    payload: {
+      seriesId: string
+      entryId: string
+      entryIndex: number
+      category: CategoryId
+      progress: string
+      cue: string
+      position: SavedReadingPosition
+    },
+    options?: { keepalive?: boolean },
+  ) =>
     request<Pick<AppState, 'bookmarks' | 'readingPositions'>>('/api/bookmarks', {
       method: 'POST',
       body: JSON.stringify(payload),
+      keepalive: options?.keepalive,
     }),
   removeBookmark: (seriesId: string) =>
     request<Pick<AppState, 'bookmarks' | 'readingPositions'>>(

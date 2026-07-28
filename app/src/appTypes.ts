@@ -2,7 +2,7 @@ export const categoryOrder = ['anime', 'manga', 'novels', 'books', 'magazines'] 
 
 export type CategoryId = (typeof categoryOrder)[number]
 export type Language = 'en' | 'de'
-export type ViewId = 'bookmarks' | 'library' | 'search' | 'downloads' | 'series' | 'reader' | 'creator' | 'profile' | 'admin'
+export type ViewId = 'bookmarks' | 'library' | 'search' | 'downloads' | 'series' | 'reader' | 'creator' | 'profile' | 'admin' | 'notFound'
 export type SeriesTabId = 'overview' | 'entries' | 'comments'
 export type ScopeId = 'all' | CategoryId
 export type Role = 'admin' | 'member'

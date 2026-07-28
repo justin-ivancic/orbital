@@ -87,6 +87,17 @@ import {
   requestOfflineStoragePersistence,
 } from './offlineStorage'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
+import {
+  appRoutePath,
+  categoryForRoute,
+  isProtectedRoute,
+  isSeriesRoute,
+  parseAppRoute,
+  routeForLocation,
+  routeView,
+  type AppRoute,
+  type LibraryRouteCategory,
+} from './routing'
 
 const CbzReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.CbzReader })))
 const EpubReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.EpubReader })))
@@ -128,8 +139,6 @@ const readerChromeInteractionSelector = [
 const isReaderChromeInteractionTarget = (target: EventTarget | null) =>
   target instanceof Element && Boolean(target.closest(readerChromeInteractionSelector))
 
-type ReaderReturnView = Exclude<ViewId, 'reader'>
-
 const preloadedPosterUrls = new Set<string>()
 const appStateCacheVersion = 2
 const maxCachedSeriesDetails = 24
@@ -142,6 +151,99 @@ const readerPersistentStorageKeyPrefixes = [
   'cbz-reader-settings:',
   'video-progress:',
 ]
+
+type RouteNavigationOptions = {
+  replace?: boolean
+  preserveScroll?: boolean
+  focusMain?: boolean
+}
+
+type OrbitalHistoryState = {
+  orbitalIndex?: number
+  orbitalScroll?: [number, number]
+}
+
+type RouteTransition = {
+  focusMain: boolean
+  kind: 'initial' | 'push' | 'replace' | 'pop'
+  preserveScroll: boolean
+  restoreScroll: [number, number] | null
+}
+
+type RouteLinkProps = {
+  ariaCurrent?: 'page'
+  ariaLabel?: string
+  children: ReactNode
+  className?: string
+  navigate: (route: AppRoute, options?: RouteNavigationOptions) => void
+  onNavigate?: () => void
+  route: AppRoute
+  title?: string
+}
+
+const RouteLink = ({
+  ariaCurrent,
+  ariaLabel,
+  children,
+  className,
+  navigate,
+  onNavigate,
+  route,
+  title,
+}: RouteLinkProps) => (
+  <a
+    aria-current={ariaCurrent}
+    aria-label={ariaLabel}
+    className={className}
+    href={appRoutePath(route)}
+    onClick={(event) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) {
+        return
+      }
+
+      event.preventDefault()
+      onNavigate?.()
+      navigate(route)
+    }}
+    title={title}
+  >
+    {children}
+  </a>
+)
+
+const historyState = (): OrbitalHistoryState => {
+  const state = window.history.state
+  return state && typeof state === 'object' ? state as OrbitalHistoryState : {}
+}
+
+const categoryRouteId = (category: CategoryId): LibraryRouteCategory =>
+  resolveReaderCategory(category) as LibraryRouteCategory
+
+const routeReadingPosition = (
+  route: AppRoute,
+  savedPosition: SavedReadingPosition | null,
+): SavedReadingPosition | null => {
+  if (route.name !== 'reader' && route.name !== 'offlineReader') {
+    return savedPosition
+  }
+
+  if (route.page == null && route.percent == null) {
+    return savedPosition
+  }
+
+  return {
+    ...savedPosition,
+    page: route.page ?? route.percent ?? savedPosition?.page ?? 0,
+    locationType: route.percent != null ? 'percent' : 'page',
+  }
+}
 
 const preloadPosterImage = (url: string) => {
   if (typeof window === 'undefined' || preloadedPosterUrls.has(url)) {
@@ -457,6 +559,7 @@ const ui = {
     searchNoMatches: 'No matches yet.',
     searching: 'Searching...',
     searchAction: 'Search',
+    skipToContent: 'Skip to content',
     clearSearch: 'Clear',
     closeSearch: 'Close search',
     dismissError: 'Dismiss error',
@@ -491,6 +594,19 @@ const ui = {
     bookmarked: 'Bookmarked',
     bookmarkedShort: 'Saved',
     back: 'Back',
+    notFoundTitle: 'Page not found',
+    notFoundBody: 'This address does not match a page in Orbital.',
+    itemUnavailableTitle: 'This item is no longer available',
+    itemUnavailableBody:
+      'It may have been moved, renamed on disk, or removed during a library scan.',
+    downloadUnavailableTitle: 'This download is unavailable',
+    downloadUnavailableBody:
+      'The device copy may have been removed, changed, or not finished downloading.',
+    permissionDeniedTitle: 'Admin access required',
+    permissionDeniedBody: 'This page is available only to an Orbital administrator.',
+    returnBookmarks: 'Return to bookmarks',
+    browseCategory: 'Browse this category',
+    openDownloadsPage: 'Open downloads',
     libraryTitle: 'Shelf browsing',
     libraryBody:
       'Cover-first cards, compact metadata, and search that can span every linked folder or just one category.',
@@ -719,6 +835,7 @@ const ui = {
     searchNoMatches: 'Noch keine Treffer.',
     searching: 'Suche...',
     searchAction: 'Suche',
+    skipToContent: 'Zum Inhalt springen',
     clearSearch: 'Leeren',
     closeSearch: 'Suche schlieÃŸen',
     dismissError: 'Fehler schliessen',
@@ -753,6 +870,19 @@ const ui = {
     bookmarked: 'Gespeichert',
     bookmarkedShort: 'Gespeichert',
     back: 'Zurück',
+    notFoundTitle: 'Seite nicht gefunden',
+    notFoundBody: 'Diese Adresse gehört zu keiner Seite in Orbital.',
+    itemUnavailableTitle: 'Dieses Medium ist nicht mehr verfügbar',
+    itemUnavailableBody:
+      'Es wurde möglicherweise verschoben, auf dem Datenträger umbenannt oder bei einem Scan entfernt.',
+    downloadUnavailableTitle: 'Dieser Download ist nicht verfügbar',
+    downloadUnavailableBody:
+      'Die Gerätekopie wurde möglicherweise entfernt, geändert oder noch nicht vollständig geladen.',
+    permissionDeniedTitle: 'Administratorzugriff erforderlich',
+    permissionDeniedBody: 'Diese Seite ist nur für Orbital-Administratoren verfügbar.',
+    returnBookmarks: 'Zurück zu den Lesezeichen',
+    browseCategory: 'Diese Kategorie durchsuchen',
+    openDownloadsPage: 'Downloads öffnen',
     libraryTitle: 'Regalansicht',
     libraryBody:
       'Cover-zentrierte Karten, kompakte Metadaten und eine Suche, die über alle verknüpften Ordner oder nur eine Kategorie gehen kann.',
@@ -1533,8 +1663,14 @@ const findEntrySelection = (
 }
 
 function App() {
+  const [currentRoute, setCurrentRoute] = useState<AppRoute>(routeForLocation)
+  const currentView: ViewId = routeView(currentRoute)
+  const currentRoutePath = appRoutePath(currentRoute)
+  const initialCategory = categoryForRoute(currentRoute) ?? defaultReaderCategory
   const [language, setLanguage] = useState<Language>('en')
-  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login')
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>(
+    currentRoute.name === 'signup' ? 'signup' : 'login',
+  )
   const [bootstrapState, setBootstrapState] = useState<BootstrapState | null>(null)
   const [appState, setAppState] = useState<AppState | null>(null)
   const [bootLoading, setBootLoading] = useState(true)
@@ -1546,35 +1682,62 @@ function App() {
   const [cacheResetBusy, setCacheResetBusy] = useState(false)
   const [passwordChangeError, setPasswordChangeError] = useState<string | null>(null)
   const [passwordChangeSuccess, setPasswordChangeSuccess] = useState<string | null>(null)
-  const [currentView, setCurrentView] = useState<ViewId>('bookmarks')
-  const [readerReturnView, setReaderReturnView] = useState<ReaderReturnView>('bookmarks')
   const [offlineMode, setOfflineMode] = useState(false)
   const [offlineDownloads, setOfflineDownloads] = useState<OfflineDownloadRecord[]>([])
+  const [offlineDownloadsLoaded, setOfflineDownloadsLoaded] = useState(false)
   const [offlineStorageSummary, setOfflineStorageSummary] =
     useState<OfflineStorageSummary | null>(null)
   const [offlineFilter, setOfflineFilter] = useState<'active' | 'ready' | 'attention' | 'all'>('all')
   const [offlineBusyIds, setOfflineBusyIds] = useState<Record<string, string>>({})
-  const [offlineReaderDownloadId, setOfflineReaderDownloadId] = useState<string | null>(null)
+  const [offlineReaderDownloadId, setOfflineReaderDownloadId] = useState<string | null>(
+    currentRoute.name === 'offlineReader' ? currentRoute.downloadId : null,
+  )
   const [persistentStorageBusy, setPersistentStorageBusy] = useState(false)
-  const [currentCategory, setCurrentCategory] = useState<CategoryId>(defaultReaderCategory)
-  const [bookmarkFilter, setBookmarkFilter] = useState<ScopeId>('all')
+  const [currentCategory, setCurrentCategory] = useState<CategoryId>(initialCategory)
+  const [bookmarkFilter, setBookmarkFilter] = useState<ScopeId>(
+    currentRoute.name === 'bookmarks' ? currentRoute.scope : 'all',
+  )
   const [openBookmarkMenuKey, setOpenBookmarkMenuKey] = useState<string | null>(null)
   const [removingBookmarkSeriesId, setRemovingBookmarkSeriesId] = useState<string | null>(null)
-  const [bookTopicFilters, setBookTopicFilters] = useState<string[]>([])
+  const [bookTopicFilters, setBookTopicFilters] = useState<string[]>(
+    currentRoute.name === 'library' ? currentRoute.topics : [],
+  )
   const [filterSheetOpen, setFilterSheetOpen] = useState(false)
-  const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null)
-  const [selectedCreatorKey, setSelectedCreatorKey] = useState<string | null>(null)
-  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
-  const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null)
-  const [selectedSeasonNumber, setSelectedSeasonNumber] = useState<number | null>(null)
-  const [activeTab, setActiveTab] = useState<SeriesTabId>('entries')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchScope, setSearchScope] = useState<ScopeId>('all')
+  const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(
+    isSeriesRoute(currentRoute) ? currentRoute.seriesId : null,
+  )
+  const [selectedCreatorKey, setSelectedCreatorKey] = useState<string | null>(
+    currentRoute.name === 'creator' ? currentRoute.creatorKey : null,
+  )
+  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(
+    currentRoute.name === 'reader' || currentRoute.name === 'offlineReader'
+      ? currentRoute.entryId
+      : null,
+  )
+  const [selectedVariantId, setSelectedVariantId] = useState<string | null>(
+    currentRoute.name === 'reader' || currentRoute.name === 'offlineReader'
+      ? currentRoute.variantId
+      : null,
+  )
+  const [selectedSeasonNumber, setSelectedSeasonNumber] = useState<number | null>(
+    currentRoute.name === 'series' ? currentRoute.season : null,
+  )
+  const [activeTab, setActiveTab] = useState<SeriesTabId>(
+    currentRoute.name === 'series' ? currentRoute.tab : 'entries',
+  )
+  const [searchQuery, setSearchQuery] = useState(
+    currentRoute.name === 'search' ? currentRoute.query : '',
+  )
+  const [searchScope, setSearchScope] = useState<ScopeId>(
+    currentRoute.name === 'search' ? currentRoute.scope : 'all',
+  )
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchResults, setSearchResults] = useState<SeriesSummary[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
   const [topbarHidden, setTopbarHidden] = useState(false)
-  const [discoverSort, setDiscoverSort] = useState<'title' | 'year'>('title')
+  const [discoverSort, setDiscoverSort] = useState<'title' | 'year'>(
+    currentRoute.name === 'library' ? currentRoute.sort : 'title',
+  )
   const [discoverViewMode, setDiscoverViewMode] = useState<'grid' | 'list'>('grid')
   const [seriesCache, setSeriesCache] = useState<Record<string, SeriesDetail>>({})
   const [seriesLoadingId, setSeriesLoadingId] = useState<string | null>(null)
@@ -1615,6 +1778,15 @@ function App() {
   const searchInputRef = useRef<HTMLInputElement | null>(null)
   const mobileSearchInputRef = useRef<HTMLInputElement | null>(null)
   const lastScrollYRef = useRef(0)
+  const historyIndexRef = useRef(0)
+  const routeScrollPositionsRef = useRef(new Map<number, [number, number]>())
+  const routeTransitionRef = useRef<RouteTransition>({
+    focusMain: true,
+    kind: 'initial',
+    preserveScroll: false,
+    restoreScroll: null,
+  })
+  const mainShellRef = useRef<HTMLElement | null>(null)
   const lastAutoSaveKeyRef = useRef<string | null>(null)
   const readerTouchStartRef = useRef<{ edge: 'left' | 'right' | null; x: number; y: number } | null>(null)
   const lastReaderTouchToggleRef = useRef(0)
@@ -1622,6 +1794,127 @@ function App() {
   const scanStreamWasActiveRef = useRef(false)
   const cacheWriteTimerRef = useRef<number | null>(null)
   const [readerChromeVisible, setReaderChromeVisible] = useState(true)
+
+  const navigateRoute = useCallback(
+    (nextRoute: AppRoute, options: RouteNavigationOptions = {}) => {
+      const nextPath = appRoutePath(nextRoute)
+      const currentPath = `${window.location.pathname}${window.location.search}`
+
+      if (nextPath === currentPath) {
+        return
+      }
+
+      const currentIndex = historyIndexRef.current
+      const currentScroll: [number, number] = [window.scrollX, window.scrollY]
+      routeScrollPositionsRef.current.set(currentIndex, currentScroll)
+      window.history.replaceState(
+        {
+          ...historyState(),
+          orbitalIndex: currentIndex,
+          orbitalScroll: currentScroll,
+        } satisfies OrbitalHistoryState,
+        '',
+        currentPath,
+      )
+
+      const replace = Boolean(options.replace)
+      const nextIndex = replace ? currentIndex : currentIndex + 1
+      const nextScroll: [number, number] = options.preserveScroll ? currentScroll : [0, 0]
+      const nextHistoryState: OrbitalHistoryState = {
+        ...historyState(),
+        orbitalIndex: nextIndex,
+        orbitalScroll: nextScroll,
+      }
+
+      if (replace) {
+        window.history.replaceState(nextHistoryState, '', nextPath)
+      } else {
+        window.history.pushState(nextHistoryState, '', nextPath)
+      }
+
+      historyIndexRef.current = nextIndex
+      routeScrollPositionsRef.current.set(nextIndex, nextScroll)
+      routeTransitionRef.current = {
+        focusMain: options.focusMain ?? !options.preserveScroll,
+        kind: replace ? 'replace' : 'push',
+        preserveScroll: Boolean(options.preserveScroll),
+        restoreScroll: null,
+      }
+      startTransition(() => setCurrentRoute(nextRoute))
+    },
+    [],
+  )
+
+  useLayoutEffect(() => {
+    const initialState = historyState()
+    const initialIndex = initialState.orbitalIndex ?? 0
+    const initialScroll: [number, number] = initialState.orbitalScroll ?? [
+      window.scrollX,
+      window.scrollY,
+    ]
+
+    historyIndexRef.current = initialIndex
+    routeScrollPositionsRef.current.set(initialIndex, initialScroll)
+    window.history.replaceState(
+      {
+        ...initialState,
+        orbitalIndex: initialIndex,
+        orbitalScroll: initialScroll,
+      } satisfies OrbitalHistoryState,
+      '',
+      window.location.href,
+    )
+
+    const previousScrollRestoration = window.history.scrollRestoration
+    window.history.scrollRestoration = 'manual'
+
+    const handlePopState = (event: PopStateEvent) => {
+      routeScrollPositionsRef.current.set(
+        historyIndexRef.current,
+        [window.scrollX, window.scrollY],
+      )
+      const nextState =
+        event.state && typeof event.state === 'object'
+          ? event.state as OrbitalHistoryState
+          : {}
+      const nextIndex = nextState.orbitalIndex ?? 0
+
+      historyIndexRef.current = nextIndex
+      routeTransitionRef.current = {
+        focusMain: true,
+        kind: 'pop',
+        preserveScroll: false,
+        restoreScroll:
+          routeScrollPositionsRef.current.get(nextIndex) ??
+          nextState.orbitalScroll ??
+          [0, 0],
+      }
+      startTransition(() => setCurrentRoute(routeForLocation()))
+    }
+
+    const rememberCurrentScroll = () => {
+      const currentScroll: [number, number] = [window.scrollX, window.scrollY]
+      routeScrollPositionsRef.current.set(historyIndexRef.current, currentScroll)
+      window.history.replaceState(
+        {
+          ...historyState(),
+          orbitalIndex: historyIndexRef.current,
+          orbitalScroll: currentScroll,
+        } satisfies OrbitalHistoryState,
+        '',
+        window.location.href,
+      )
+    }
+
+    window.addEventListener('popstate', handlePopState)
+    window.addEventListener('pagehide', rememberCurrentScroll)
+
+    return () => {
+      window.history.scrollRestoration = previousScrollRestoration
+      window.removeEventListener('popstate', handlePopState)
+      window.removeEventListener('pagehide', rememberCurrentScroll)
+    }
+  }, [])
 
   const text = ui[language]
   const deferredSearch = useDeferredValue(searchQuery.trim())
@@ -1771,6 +2064,216 @@ function App() {
     [activeOfflineDownload?.manifest, activeOfflineDownload?.status, currentVariant],
   )
   const metadataReviewItems = appState?.metadataQueue ?? emptyMetadataReviewItems
+
+  useEffect(() => {
+    setFilterSheetOpen(false)
+    setSearchOpen(false)
+
+    switch (currentRoute.name) {
+      case 'login':
+        setAuthMode('login')
+        return
+      case 'signup':
+        setAuthMode('signup')
+        return
+      case 'bookmarks':
+        setBookmarkFilter(currentRoute.scope)
+        setOfflineReaderDownloadId(null)
+        return
+      case 'downloads':
+        setOfflineReaderDownloadId(null)
+        return
+      case 'search':
+        setSearchQuery(currentRoute.query)
+        setSearchScope(currentRoute.scope)
+        setOfflineReaderDownloadId(null)
+        return
+      case 'library':
+        setCurrentCategory(currentRoute.category)
+        setBookTopicFilters(currentRoute.category === 'books' ? currentRoute.topics : [])
+        setDiscoverSort(currentRoute.sort)
+        setSearchQuery('')
+        setOfflineReaderDownloadId(null)
+        return
+      case 'series':
+        setCurrentCategory(currentRoute.category)
+        setSelectedSeriesId(currentRoute.seriesId)
+        setActiveTab(currentRoute.tab)
+        setSelectedSeasonNumber(currentRoute.season)
+        setOfflineReaderDownloadId(null)
+        return
+      case 'reader':
+        setCurrentCategory(currentRoute.category)
+        setSelectedSeriesId(currentRoute.seriesId)
+        setSelectedEntryId(currentRoute.entryId)
+        setSelectedVariantId(currentRoute.variantId)
+        setOfflineReaderDownloadId(null)
+        return
+      case 'offlineReader':
+        setOfflineReaderDownloadId(currentRoute.downloadId)
+        setSelectedEntryId(currentRoute.entryId)
+        setSelectedVariantId(currentRoute.variantId)
+        return
+      case 'creator':
+        setSelectedCreatorKey(currentRoute.creatorKey)
+        setOfflineReaderDownloadId(null)
+        return
+      case 'root':
+      case 'profile':
+      case 'admin':
+      case 'notFound':
+        setOfflineReaderDownloadId(null)
+    }
+  }, [currentRoute])
+
+  useEffect(() => {
+    if (currentRoute.name === 'notFound') {
+      return
+    }
+
+    const browserPath = `${window.location.pathname}${window.location.search}`
+    if (browserPath !== currentRoutePath) {
+      navigateRoute(currentRoute, {
+        replace: true,
+        preserveScroll: true,
+        focusMain: false,
+      })
+    }
+  }, [currentRoute, currentRoutePath, navigateRoute])
+
+  useEffect(() => {
+    if (!appState || !isSeriesRoute(currentRoute)) {
+      return
+    }
+
+    const summary = library.find((series) => series.id === currentRoute.seriesId)
+    if (
+      !summary ||
+      !isReaderCategory(summary.category) ||
+      summary.category === currentRoute.category
+    ) {
+      return
+    }
+
+    navigateRoute(
+      {
+        ...currentRoute,
+        category: categoryRouteId(summary.category),
+      },
+      { replace: true, preserveScroll: true, focusMain: false },
+    )
+  }, [appState, currentRoute, library, navigateRoute])
+
+  useEffect(() => {
+    if (
+      currentRoute.name !== 'reader' ||
+      !selectedSeries ||
+      selectedSeries.id !== currentRoute.seriesId
+    ) {
+      return
+    }
+
+    const routedEntry = selectedSeries.entries.find(
+      (entry) =>
+        entry.id === currentRoute.entryId ||
+        entry.variants.some((variant) => variant.id === currentRoute.entryId),
+    )
+    if (!routedEntry) {
+      return
+    }
+
+    const requestedVariantId =
+      currentRoute.variantId ??
+      routedEntry.variants.find((variant) => variant.id === currentRoute.entryId)?.id ??
+      null
+    const requestedVariant = requestedVariantId
+      ? routedEntry.variants.find((variant) => variant.id === requestedVariantId) ?? null
+      : null
+    const nextVariant =
+      requestedVariant ??
+      routedEntry.variants.find((variant) => variant.id === routedEntry.preferredVariantId) ??
+      routedEntry.variants[0] ??
+      null
+
+    setSelectedEntryId(routedEntry.id)
+    setSelectedVariantId(nextVariant?.id ?? null)
+
+    const canonicalVariantId =
+      nextVariant && nextVariant.id !== routedEntry.preferredVariantId
+        ? nextVariant.id
+        : null
+    if (
+      canonicalVariantId !== currentRoute.variantId ||
+      routedEntry.id !== currentRoute.entryId
+    ) {
+      navigateRoute(
+        {
+          ...currentRoute,
+          entryId: routedEntry.id,
+          variantId: canonicalVariantId,
+        },
+        { replace: true, preserveScroll: true, focusMain: false },
+      )
+    }
+  }, [currentRoute, navigateRoute, selectedSeries])
+
+  useEffect(() => {
+    if (
+      currentRoute.name !== 'offlineReader' ||
+      !activeOfflineDownload ||
+      activeOfflineDownload.status !== 'ready' ||
+      !activeOfflineSeries
+    ) {
+      return
+    }
+
+    const routedEntry = activeOfflineSeries.entries.find(
+      (entry) => entry.id === currentRoute.entryId,
+    )
+    if (!routedEntry) {
+      return
+    }
+
+    const requestedVariant = currentRoute.variantId
+      ? routedEntry.variants.find((variant) => variant.id === currentRoute.variantId) ?? null
+      : null
+    const nextVariant =
+      requestedVariant ??
+      routedEntry.variants.find((variant) => variant.id === routedEntry.preferredVariantId) ??
+      routedEntry.variants[0] ??
+      null
+
+    startTransition(() => {
+      setSeriesCache((previousCache) => ({
+        ...previousCache,
+        [activeOfflineSeries.id]: activeOfflineSeries,
+      }))
+      setSelectedSeriesId(activeOfflineSeries.id)
+      setCurrentCategory(activeOfflineSeries.category)
+      setSelectedEntryId(routedEntry.id)
+      setSelectedVariantId(nextVariant?.id ?? null)
+    })
+
+    const canonicalVariantId =
+      nextVariant && nextVariant.id !== routedEntry.preferredVariantId
+        ? nextVariant.id
+        : null
+    if (canonicalVariantId !== currentRoute.variantId) {
+      navigateRoute(
+        {
+          ...currentRoute,
+          variantId: canonicalVariantId,
+        },
+        { replace: true, preserveScroll: true, focusMain: false },
+      )
+    }
+  }, [
+    activeOfflineDownload,
+    activeOfflineSeries,
+    currentRoute,
+    navigateRoute,
+  ])
+
   const metadataSearchResults = metadataSearchQuery.trim()
     ? library
         .filter((series) => matchesSeriesMetadataQuery(series, metadataSearchQuery))
@@ -1913,7 +2416,10 @@ function App() {
           setBootstrapState(offlineBootstrap)
           setAppState(offlineState)
           setOfflineMode(true)
-          setCurrentView('downloads')
+          const failedRoute = routeForLocation()
+          if (failedRoute.name !== 'downloads' && failedRoute.name !== 'offlineReader') {
+            navigateRoute({ name: 'downloads' }, { replace: true })
+          }
           setCachedStateNeedsRefresh(false)
           setStateError(text.offlineModeHelp)
           return
@@ -1932,7 +2438,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [text.authErrorFallback, text.offlineModeHelp])
+  }, [navigateRoute, text.authErrorFallback, text.offlineModeHelp])
 
   useEffect(() => {
     if (offlineMode) {
@@ -1982,12 +2488,74 @@ function App() {
     }
   }, [appState, bootstrapState, cachedStateNeedsRefresh, offlineMode, text.authErrorFallback])
 
+  useEffect(() => {
+    if (bootLoading || !bootstrapState) {
+      return
+    }
+
+    if (!authenticated) {
+      if (currentRoute.name === 'root') {
+        navigateRoute({ name: 'login', next: null }, { replace: true })
+        return
+      }
+
+      if (currentRoute.name === 'signup') {
+        if (!bootstrapState.openSignup) {
+          navigateRoute({ name: 'login', next: null }, { replace: true })
+        }
+        return
+      }
+
+      if (currentRoute.name === 'login') {
+        return
+      }
+
+      if (isProtectedRoute(currentRoute)) {
+        navigateRoute(
+          {
+            name: 'login',
+            next: `${window.location.pathname}${window.location.search}`,
+          },
+          { replace: true },
+        )
+      }
+      return
+    }
+
+    if (currentRoute.name === 'root' || currentRoute.name === 'signup') {
+      navigateRoute({ name: 'bookmarks', scope: 'all' }, { replace: true })
+      return
+    }
+
+    if (currentRoute.name === 'login') {
+      const destination = currentRoute.next
+        ? parseAppRoute(new URL(currentRoute.next, window.location.origin))
+        : null
+
+      navigateRoute(
+        destination && isProtectedRoute(destination)
+          ? destination
+          : { name: 'bookmarks', scope: 'all' },
+        { replace: true },
+      )
+    }
+  }, [
+    authenticated,
+    bootLoading,
+    bootstrapState,
+    currentRoute,
+    navigateRoute,
+  ])
+
   const refreshOfflineDownloads = useCallback(async () => {
     if (!sessionUser) {
       setOfflineDownloads([])
       setOfflineStorageSummary(null)
+      setOfflineDownloadsLoaded(true)
       return
     }
+
+    setOfflineDownloadsLoaded(false)
 
     try {
       const [downloads, summary] = await Promise.all([
@@ -2001,6 +2569,8 @@ function App() {
       if (!offlineMode) {
         setStateError(error instanceof Error ? error.message : text.authErrorFallback)
       }
+    } finally {
+      setOfflineDownloadsLoaded(true)
     }
   }, [offlineMode, sessionUser, text.authErrorFallback])
 
@@ -2397,6 +2967,21 @@ function App() {
       return
     }
 
+    const routedEntryId =
+      currentRoute.name === 'reader' || currentRoute.name === 'offlineReader'
+        ? currentRoute.entryId
+        : null
+    if (
+      routedEntryId &&
+      !selectedSeries.entries.some(
+        (entry) =>
+          entry.id === routedEntryId ||
+          entry.variants.some((variant) => variant.id === routedEntryId),
+      )
+    ) {
+      return
+    }
+
     const resolvedSelection = findEntrySelection(selectedSeries, selectedEntryId)
 
     if (!resolvedSelection) {
@@ -2419,7 +3004,7 @@ function App() {
 
       return resolvedSelection.variant.id
     })
-  }, [selectedEntryId, selectedSeries])
+  }, [currentRoute, selectedEntryId, selectedSeries])
 
   useEffect(() => {
     if (!currentEntry) {
@@ -2437,6 +3022,13 @@ function App() {
       return
     }
 
+    if (
+      isSeriesRoute(currentRoute) &&
+      currentRoute.seriesId === selectedSeriesId
+    ) {
+      return
+    }
+
     if (!library.length) {
       return
     }
@@ -2450,20 +3042,7 @@ function App() {
     if (!selectedSeriesId || !selectedSeriesStillExists || !selectedSeriesStillVisible) {
       setSelectedSeriesId(firstVisibleSeries?.id || library[0].id)
     }
-  }, [activeOfflineSeries?.id, library, selectedSeriesId])
-
-  useEffect(() => {
-    if (!selectedCreatorKey) {
-      return
-    }
-
-    if (!creatorProfiles.some((profile) => profile.key === selectedCreatorKey)) {
-      setSelectedCreatorKey(null)
-      if (currentView === 'creator') {
-        setCurrentView('library')
-      }
-    }
-  }, [creatorProfiles, currentView, selectedCreatorKey])
+  }, [activeOfflineSeries?.id, currentRoute, library, selectedSeriesId])
 
   useEffect(() => {
     if (selectedMetadataSeriesId && library.some((series) => series.id === selectedMetadataSeriesId)) {
@@ -2535,18 +3114,24 @@ function App() {
   useEffect(() => {
     const currentVariantId = currentVariant?.id ?? null
 
-    if (currentView !== 'reader' || !currentVariantId || readerResumeVariantId === currentVariantId) {
+    if (currentView !== 'reader' || !currentVariantId) {
       return
     }
 
-    const resumePosition = appState?.readingPositions?.[currentVariantId] ?? null
+    const savedPosition = appState?.readingPositions?.[currentVariantId] ?? null
+    const resumePosition = routeReadingPosition(currentRoute, savedPosition)
 
     setReaderResumeVariantId(currentVariantId)
     setReaderResumePosition(resumePosition)
     setReaderProgress(savedPositionToReaderProgress(resumePosition))
     setBookmarkJustSet(false)
     lastAutoSaveKeyRef.current = null
-  }, [appState?.readingPositions, currentVariant?.id, currentView, readerResumeVariantId])
+  }, [
+    appState?.readingPositions,
+    currentRoute,
+    currentVariant?.id,
+    currentView,
+  ])
 
   useEffect(() => {
     setBookmarkJustSet(false)
@@ -2557,19 +3142,32 @@ function App() {
       return
     }
 
+    const transition = routeTransitionRef.current
+    if (transition.preserveScroll) {
+      return
+    }
+
     let frame = 0
     let correctionFrame = 0
     let timeout = 0
+    const targetScroll = transition.restoreScroll ?? [0, 0]
 
-    const resetScroll = () => {
-      window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+    const applyRoutePosition = () => {
+      window.scrollTo({
+        top: targetScroll[1],
+        left: targetScroll[0],
+        behavior: 'auto',
+      })
     }
 
-    resetScroll()
+    applyRoutePosition()
     frame = window.requestAnimationFrame(() => {
-      resetScroll()
-      correctionFrame = window.requestAnimationFrame(resetScroll)
-      timeout = window.setTimeout(resetScroll, 120)
+      applyRoutePosition()
+      if (transition.focusMain) {
+        mainShellRef.current?.focus({ preventScroll: true })
+      }
+      correctionFrame = window.requestAnimationFrame(applyRoutePosition)
+      timeout = window.setTimeout(applyRoutePosition, 120)
     })
 
     return () => {
@@ -2577,7 +3175,7 @@ function App() {
       window.cancelAnimationFrame(correctionFrame)
       window.clearTimeout(timeout)
     }
-  }, [authenticated, currentCategory, currentView, selectedSeriesId])
+  }, [authenticated, currentRoutePath])
 
   const categoryLabel = (category: CategoryId) => text.scopes[category]
 
@@ -2623,13 +3221,22 @@ function App() {
         authMode === 'signup' ? await api.signup(payload) : await api.login(payload)
 
       applyState(nextState)
+      const requestedDestination =
+        currentRoute.name === 'login' && currentRoute.next
+          ? parseAppRoute(new URL(currentRoute.next, window.location.origin))
+          : null
       startTransition(() => {
-        setCurrentView('bookmarks')
         setSelectedSeriesId(
           nextState.bookmarks.find((bookmark) => isReaderCategory(bookmark.category))?.seriesId ||
             firstSeriesId(nextState),
         )
       })
+      navigateRoute(
+        requestedDestination && isProtectedRoute(requestedDestination)
+          ? requestedDestination
+          : { name: 'bookmarks', scope: 'all' },
+        { replace: true },
+      )
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : text.authErrorFallback)
     } finally {
@@ -2653,7 +3260,7 @@ function App() {
     setReaderResumeVariantId(null)
     setReaderResumePosition(null)
     setReaderProgress(null)
-    setCurrentView('bookmarks')
+    navigateRoute({ name: 'login', next: null }, { replace: true })
   }
 
   const handleResetLocalCache = async () => {
@@ -2796,7 +3403,7 @@ function App() {
       await deleteOfflineDownload(downloadId)
       if (offlineReaderDownloadId === downloadId) {
         setOfflineReaderDownloadId(null)
-        setCurrentView('downloads')
+        navigateRoute({ name: 'downloads' }, { replace: true })
       }
       await refreshOfflineDownloads()
     } catch (error) {
@@ -2860,57 +3467,27 @@ function App() {
       setCurrentCategory(offlineSeries.category)
       setSelectedEntryId(entryToOpen?.id ?? null)
       setSelectedVariantId(entryToOpen?.preferredVariantId ?? null)
-      setReaderReturnView('downloads')
       setReaderProgress(null)
       setReaderResumePosition(null)
       setReaderResumeVariantId(entryToOpen?.preferredVariantId ?? null)
       setSearchOpen(false)
-      setCurrentView('reader')
     })
-  }
 
-  const goToLibrary = (category: CategoryId) => {
-    const nextCategory = resolveReaderCategory(category)
-
-    startTransition(() => {
-      setCurrentCategory(nextCategory)
-      setCurrentView('library')
-      setOfflineReaderDownloadId(null)
-      setFilterSheetOpen(false)
-      setSearchOpen(false)
-      setSearchQuery('')
-    })
-  }
-
-  const openCreatorProfile = (sourceName: string | null) => {
-    if (!sourceName) {
-      return
+    if (entryToOpen) {
+      navigateRoute({
+        name: 'offlineReader',
+        downloadId: record.id,
+        entryId: entryToOpen.id,
+        page: null,
+        percent: null,
+        variantId: null,
+      })
     }
-
-    const creatorKey = normalizeBrowseToken(sourceName)
-    if (!creatorKey) {
-      return
-    }
-
-    startTransition(() => {
-      setSelectedCreatorKey(creatorKey)
-      setCurrentView('creator')
-    })
   }
 
-  const openBooksTopic = (topic: string) => {
-    startTransition(() => {
-      setCurrentCategory('books')
-      setBookTopicFilters([topic])
-      setCurrentView('library')
-      setFilterSheetOpen(false)
-      setSearchOpen(false)
-      setSearchQuery('')
-    })
-  }
-
-  function primeReaderResume(variantId: string | null) {
-    const resumePosition = variantId ? appState?.readingPositions?.[variantId] ?? null : null
+  function primeReaderResume(variantId: string | null, route: AppRoute = currentRoute) {
+    const savedPosition = variantId ? appState?.readingPositions?.[variantId] ?? null : null
+    const resumePosition = routeReadingPosition(route, savedPosition)
 
     setReaderResumeVariantId(variantId)
     setReaderResumePosition(resumePosition)
@@ -2919,64 +3496,7 @@ function App() {
     lastAutoSaveKeyRef.current = null
   }
 
-  const openSeries = async (seriesId: string, tab: SeriesTabId = 'entries') => {
-    const nextSummary = library.find((series) => series.id === seriesId)
-
-    if (!nextSummary || !isReaderCategory(nextSummary.category)) {
-      return
-    }
-
-    await ensureSeriesLoaded(seriesId)
-
-    startTransition(() => {
-      setSelectedSeriesId(seriesId)
-      setCurrentCategory(nextSummary.category)
-      setActiveTab(tab)
-      setOfflineReaderDownloadId(null)
-      setFilterSheetOpen(false)
-      setSearchOpen(false)
-      if (selectedSeriesId !== seriesId) {
-        setSelectedEntryId(null)
-        setSelectedVariantId(null)
-      }
-      setCurrentView('series')
-    })
-  }
-
-  const resolveReaderReturnView = (view: ViewId): ReaderReturnView =>
-    view === 'reader' ? readerReturnView : view
-
-  const openReader = async (seriesId: string, entryId?: string) => {
-    const nextSummary = library.find((series) => series.id === seriesId)
-
-    if (!nextSummary || !isReaderCategory(nextSummary.category)) {
-      return
-    }
-
-    const detail = await ensureSeriesLoaded(seriesId)
-    const resolvedSelection = findEntrySelection(detail, entryId)
-    const nextEntry = resolvedSelection?.entry ?? detail.entries[0] ?? null
-    const nextVariant =
-      resolvedSelection?.variant ??
-      nextEntry?.variants.find((variant) => variant.id === nextEntry.preferredVariantId) ??
-      nextEntry?.variants[0] ??
-      null
-
-    startTransition(() => {
-      setSelectedSeriesId(seriesId)
-      setCurrentCategory(nextSummary.category)
-      setFilterSheetOpen(false)
-      setSearchOpen(false)
-      setOfflineReaderDownloadId(null)
-      setSelectedEntryId(nextEntry?.id ?? null)
-      setSelectedVariantId(nextVariant?.id ?? null)
-      primeReaderResume(nextVariant?.id ?? null)
-      setReaderReturnView(resolveReaderReturnView(currentView))
-      setCurrentView('reader')
-    })
-  }
-
-  const moveEntry = (direction: -1 | 1) => {
+  const moveEntry = async (direction: -1 | 1) => {
     if (!selectedSeries || !currentEntry) {
       return
     }
@@ -2993,9 +3513,36 @@ function App() {
       nextEntry?.variants[0] ??
       null
 
+    if (!nextEntry) {
+      return
+    }
+
+    await persistCurrentReaderPosition(false)
+
+    const nextRoute: AppRoute =
+      currentRoute.name === 'offlineReader'
+        ? {
+            name: 'offlineReader',
+            downloadId: currentRoute.downloadId,
+            entryId: nextEntry.id,
+            page: null,
+            percent: null,
+            variantId: null,
+          }
+        : {
+            name: 'reader',
+            category: categoryRouteId(selectedSeries.category),
+            seriesId: selectedSeries.id,
+            entryId: nextEntry.id,
+            page: null,
+            percent: null,
+            variantId: null,
+          }
+
     setSelectedEntryId(nextEntry?.id || null)
     setSelectedVariantId(nextVariant?.id ?? null)
-    primeReaderResume(nextVariant?.id ?? null)
+    primeReaderResume(nextVariant?.id ?? null, nextRoute)
+    navigateRoute(nextRoute)
   }
 
   const handleReaderProgressChange = (progress: ReaderProgress) => {
@@ -3016,7 +3563,7 @@ function App() {
     })
   }
 
-  const persistCurrentReaderPosition = useCallback(async (manual = false) => {
+  const persistCurrentReaderPosition = useCallback(async (manual = false, keepalive = false) => {
     if (offlineReaderDownloadId) {
       return
     }
@@ -3072,7 +3619,7 @@ function App() {
 
     lastAutoSaveKeyRef.current = saveKey
 
-    const response = await api.setBookmark(payload)
+    const response = await api.setBookmark(payload, { keepalive })
 
     setAppState((previousState) =>
       previousState
@@ -3154,12 +3701,90 @@ function App() {
     selectedSeriesSummary,
   ])
 
+  useEffect(() => {
+    if (currentView !== 'reader') {
+      return
+    }
+
+    const persistBeforeLeaving = () => {
+      void persistCurrentReaderPosition(false, true).catch(() => undefined)
+    }
+    const persistWhenHidden = () => {
+      if (document.visibilityState === 'hidden') {
+        persistBeforeLeaving()
+      }
+    }
+
+    window.addEventListener('pagehide', persistBeforeLeaving)
+    document.addEventListener('visibilitychange', persistWhenHidden)
+
+    return () => {
+      window.removeEventListener('pagehide', persistBeforeLeaving)
+      document.removeEventListener('visibilitychange', persistWhenHidden)
+    }
+  }, [currentView, persistCurrentReaderPosition])
+
+  useEffect(() => {
+    if (
+      (currentRoute.name !== 'reader' && currentRoute.name !== 'offlineReader') ||
+      !readerProgress ||
+      !currentEntry ||
+      !currentVariant
+    ) {
+      return
+    }
+
+    const isPercentPosition =
+      readerProgress.locationType === 'percent' ||
+      ['epub', 'html', 'md', 'txt'].includes(currentVariant.format)
+    const position = Math.max(0, Math.round(readerProgress.page))
+    const variantId =
+      currentVariant.id !== currentEntry.preferredVariantId
+        ? currentVariant.id
+        : null
+    const nextRoute: AppRoute = {
+      ...currentRoute,
+      entryId: currentEntry.id,
+      page: isPercentPosition ? null : Math.max(1, position),
+      percent: isPercentPosition ? Math.min(100, position) : null,
+      variantId,
+    }
+
+    navigateRoute(nextRoute, {
+      replace: true,
+      preserveScroll: true,
+      focusMain: false,
+    })
+  }, [
+    currentEntry,
+    currentRoute,
+    currentVariant,
+    navigateRoute,
+    readerProgress,
+  ])
+
   const handleReaderBack = async () => {
     await persistCurrentReaderPosition(false)
-    setCurrentView(readerReturnView)
-    if (offlineReaderDownloadId) {
-      setOfflineReaderDownloadId(null)
+
+    if (historyIndexRef.current > 0) {
+      window.history.back()
+      return
     }
+
+    const fallbackRoute: AppRoute =
+      currentRoute.name === 'offlineReader'
+        ? { name: 'downloads' }
+        : selectedSeriesSummary && isReaderCategory(selectedSeriesSummary.category)
+          ? {
+              name: 'series',
+              category: categoryRouteId(selectedSeriesSummary.category),
+              seriesId: selectedSeriesSummary.id,
+              tab: 'entries',
+              season: null,
+            }
+          : { name: 'bookmarks', scope: 'all' }
+
+    navigateRoute(fallbackRoute, { replace: true })
   }
 
   const handleReaderTouchStart = (event: TouchEvent<HTMLDivElement>) => {
@@ -3199,8 +3824,7 @@ function App() {
     }
 
     if (isEdgeSwipe && start.edge === 'right' && deltaX < 0) {
-      void persistCurrentReaderPosition(false)
-      moveEntry(1)
+      void moveEntry(1)
       return
     }
 
@@ -3495,20 +4119,107 @@ function App() {
     }
   }
 
+  const updateSearchQuery = (query: string) => {
+    setSearchQuery(query)
+    if (currentRoute.name === 'search') {
+      navigateRoute(
+        { ...currentRoute, query },
+        { replace: true, preserveScroll: true, focusMain: false },
+      )
+    }
+  }
+
+  const updateSearchScope = (scope: ScopeId) => {
+    setSearchScope(scope)
+    if (currentRoute.name === 'search') {
+      navigateRoute(
+        { ...currentRoute, scope },
+        { replace: true, preserveScroll: true, focusMain: false },
+      )
+    }
+  }
+
+  const updateBookmarkScope = (scope: ScopeId) => {
+    setBookmarkFilter(scope)
+    navigateRoute(
+      { name: 'bookmarks', scope },
+      { replace: true, preserveScroll: true, focusMain: false },
+    )
+  }
+
+  const updateLibraryRoute = (
+    next: Partial<Pick<Extract<AppRoute, { name: 'library' }>, 'topics' | 'sort'>>,
+  ) => {
+    const route: Extract<AppRoute, { name: 'library' }> =
+      currentRoute.name === 'library'
+        ? currentRoute
+        : {
+            name: 'library',
+            category: categoryRouteId(currentCategory),
+            topics: bookTopicFilters,
+            sort: discoverSort,
+          }
+
+    if (next.topics) {
+      setBookTopicFilters(next.topics)
+    }
+    if (next.sort) {
+      setDiscoverSort(next.sort)
+    }
+
+    navigateRoute(
+      { ...route, ...next },
+      { replace: true, preserveScroll: true, focusMain: false },
+    )
+  }
+
+  const updateSeriesSeason = (season: number) => {
+    setSelectedSeasonNumber(season)
+    if (currentRoute.name === 'series') {
+      navigateRoute(
+        { ...currentRoute, season },
+        { replace: true, preserveScroll: true, focusMain: false },
+      )
+    }
+  }
+
+  const updateReaderVariant = (variantId: string) => {
+    setSelectedVariantId(variantId)
+    primeReaderResume(variantId)
+
+    if (
+      (currentRoute.name === 'reader' || currentRoute.name === 'offlineReader') &&
+      currentEntry
+    ) {
+      navigateRoute(
+        {
+          ...currentRoute,
+          variantId: variantId === currentEntry.preferredVariantId ? null : variantId,
+          page: null,
+          percent: null,
+        },
+        { replace: true, preserveScroll: true, focusMain: false },
+      )
+    }
+  }
+
   const openSearch = () => {
     const mobileSearch = window.matchMedia('(max-width: 900px)').matches
 
     if (mobileSearch) {
-      setCurrentView('search')
+      navigateRoute({
+        name: 'search',
+        query: searchQuery,
+        scope: searchScope,
+      })
       setSearchOpen(false)
-      return
     } else {
       setSearchOpen(true)
     }
 
     window.requestAnimationFrame(() => {
       if (mobileSearch) {
-        mobileSearchInputRef.current?.focus()
+        window.requestAnimationFrame(() => mobileSearchInputRef.current?.focus())
       } else {
         searchInputRef.current?.focus()
       }
@@ -3545,11 +4256,41 @@ function App() {
     )
   }
 
+  const seriesRoute = (
+    series: SeriesSummary,
+    tab: SeriesTabId = 'entries',
+  ): AppRoute => ({
+    name: 'series',
+    category: categoryRouteId(series.category),
+    seriesId: series.id,
+    tab,
+    season: null,
+  })
+
+  const readerRoute = (
+    series: SeriesSummary,
+    entryId: string,
+  ): AppRoute => ({
+    name: 'reader',
+    category: categoryRouteId(series.category),
+    seriesId: series.id,
+    entryId,
+    page: null,
+    percent: null,
+    variantId: null,
+  })
+
   const renderSeriesCard = (series: SeriesSummary) => {
     const displayTitle = getSeriesDisplayTitle(series)
 
     return (
-      <button className="series-card" key={series.id} onClick={() => void openSeries(series.id)}>
+      <RouteLink
+        className="series-card"
+        key={series.id}
+        navigate={navigateRoute}
+        onNavigate={() => void ensureSeriesLoaded(series.id).catch(() => undefined)}
+        route={seriesRoute(series)}
+      >
         {renderPoster(series)}
         <div className="series-card__body">
           <div className="series-card__topline">
@@ -3564,7 +4305,7 @@ function App() {
             <span>{getSeriesSourceText(series)}</span>
           </div>
         </div>
-      </button>
+      </RouteLink>
     )
   }
 
@@ -3585,10 +4326,7 @@ function App() {
       <>
         {currentEntry && currentEntry.variants.length > 1 && (
           <ReaderVariantMenu
-            onSelect={(variantId) => {
-              setSelectedVariantId(variantId)
-              primeReaderResume(variantId)
-            }}
+            onSelect={updateReaderVariant}
             selectedVariantId={currentVariant.id}
             variants={currentEntry.variants}
           />
@@ -3650,6 +4388,64 @@ function App() {
 
   const searchPreview = visibleSearchResults.slice(0, currentView === 'search' ? 50 : 10)
   const searchPageBrowseResults = deferredSearch === '' ? scopedSearchLibrary : []
+  const routedSeriesMissing =
+    Boolean(appState) &&
+    !cachedStateNeedsRefresh &&
+    isSeriesRoute(currentRoute) &&
+    !library.some(
+      (series) =>
+        series.id === currentRoute.seriesId &&
+        isReaderCategory(series.category),
+    )
+  const routedEntryMissing =
+    currentRoute.name === 'reader' &&
+    selectedSeries?.id === currentRoute.seriesId &&
+    !selectedSeries.entries.some(
+      (entry) =>
+        entry.id === currentRoute.entryId ||
+        entry.variants.some((variant) => variant.id === currentRoute.entryId),
+    )
+  const routedOfflineDownloadUnavailable =
+    currentRoute.name === 'offlineReader' &&
+    offlineDownloadsLoaded &&
+    (!activeOfflineDownload || activeOfflineDownload.status !== 'ready')
+  const routedOfflineEntryMissing =
+    currentRoute.name === 'offlineReader' &&
+    activeOfflineSeries != null &&
+    !activeOfflineSeries.entries.some((entry) => entry.id === currentRoute.entryId)
+  const routedCreatorMissing =
+    currentRoute.name === 'creator' &&
+    Boolean(appState) &&
+    !cachedStateNeedsRefresh &&
+    !creatorProfiles.some((profile) => profile.key === currentRoute.creatorKey)
+  const routePermissionDenied =
+    currentRoute.name === 'admin' && appState?.user?.role !== 'admin'
+  const routeProblem =
+    currentRoute.name === 'notFound'
+      ? {
+          body: text.notFoundBody,
+          title: text.notFoundTitle,
+          type: 'notFound' as const,
+        }
+      : routePermissionDenied
+        ? {
+            body: text.permissionDeniedBody,
+            title: text.permissionDeniedTitle,
+            type: 'permission' as const,
+          }
+        : routedOfflineDownloadUnavailable || routedOfflineEntryMissing
+          ? {
+              body: text.downloadUnavailableBody,
+              title: text.downloadUnavailableTitle,
+              type: 'download' as const,
+            }
+          : routedSeriesMissing || routedEntryMissing || routedCreatorMissing
+            ? {
+                body: text.itemUnavailableBody,
+                title: text.itemUnavailableTitle,
+                type: 'item' as const,
+              }
+            : null
   const bookmarks = appState?.bookmarks ?? []
   const readerBookmarks = bookmarks.filter((bookmark) => isReaderCategory(bookmark.category))
   const filteredBookmarks =
@@ -3739,7 +4535,9 @@ function App() {
     return text.downloadBook
   }
   const pageTitle =
-    currentView === 'bookmarks'
+    currentView === 'notFound'
+      ? text.notFoundTitle
+      : currentView === 'bookmarks'
       ? text.nav.bookmarks
       : currentView === 'downloads'
         ? text.downloadsTitle
@@ -3777,7 +4575,89 @@ function App() {
                   : text.creatorProfile
                 : currentView === 'profile'
                   ? text.passwordChangeHelp
-                  : 'Mounted roots, linked folders, user resets, and metadata review stay in the admin area.'
+                  : currentView === 'notFound'
+                    ? text.notFoundBody
+                    : 'Mounted roots, linked folders, user resets, and metadata review stay in the admin area.'
+
+  useEffect(() => {
+    const title = !authenticated
+      ? authMode === 'signup'
+        ? text.createAccount
+        : text.signIn
+      : routeProblem?.title ?? pageTitle
+
+    document.title = `${title} — ${text.brandName}`
+  }, [
+    authMode,
+    authenticated,
+    pageTitle,
+    routeProblem?.title,
+    text.brandName,
+    text.createAccount,
+    text.signIn,
+  ])
+
+  const renderRouteProblem = () => {
+    if (!routeProblem) {
+      return null
+    }
+
+    const category =
+      isSeriesRoute(currentRoute)
+        ? currentRoute.category
+        : currentCategory
+
+    return (
+      <div className="page page--route-state">
+        <article className="panel panel--padded route-state" role="status">
+          <p className="section-kicker">{text.brandName}</p>
+          <h1>{routeProblem.title}</h1>
+          <p>{routeProblem.body}</p>
+          <div className="route-state__actions">
+            {routeProblem.type === 'download' && (
+              <RouteLink
+                className="primary-button"
+                navigate={navigateRoute}
+                route={{ name: 'downloads' }}
+              >
+                {text.openDownloadsPage}
+              </RouteLink>
+            )}
+            {routeProblem.type === 'permission' && (
+              <RouteLink
+                className="primary-button"
+                navigate={navigateRoute}
+                route={{ name: 'profile' }}
+              >
+                {text.profile}
+              </RouteLink>
+            )}
+            {routeProblem.type === 'item' && isReaderCategory(category) && (
+              <RouteLink
+                className="primary-button"
+                navigate={navigateRoute}
+                route={{
+                  name: 'library',
+                  category: categoryRouteId(category),
+                  topics: [],
+                  sort: discoverSort,
+                }}
+              >
+                {text.browseCategory}
+              </RouteLink>
+            )}
+            <RouteLink
+              className="ghost-button"
+              navigate={navigateRoute}
+              route={{ name: 'bookmarks', scope: 'all' }}
+            >
+              {text.returnBookmarks}
+            </RouteLink>
+          </div>
+        </article>
+      </div>
+    )
+  }
 
   const renderBookmarks = () => (
     <div className="page page--bookmarks">
@@ -3792,12 +4672,13 @@ function App() {
         <button className="sort-pill" type="button">
           {text.librarySort}
         </button>
-        <div className="bookmark-filter-bar" role="tablist" aria-label="Bookmark categories">
+        <div className="bookmark-filter-bar" aria-label="Bookmark categories">
           {readerScopeOrder.map((scope) => (
             <button
+              aria-pressed={bookmarkFilter === scope}
               className={`tab-button ${bookmarkFilter === scope ? 'is-active' : ''}`}
               key={scope}
-              onClick={() => setBookmarkFilter(scope)}
+              onClick={() => updateBookmarkScope(scope)}
               type="button"
             >
               {text.scopes[scope]}
@@ -3833,11 +4714,11 @@ function App() {
                   className={`bookmark-card bookmark-card--list ${bookmarkMenuOpen ? 'is-menu-open' : ''}`}
                   key={`${bookmark.seriesId}-${bookmark.entryId}`}
                 >
-                  <button
-                    aria-label={`${text.resume}: ${displayTitle}`}
+                  <RouteLink
+                    ariaLabel={`${text.resume}: ${displayTitle}`}
                     className="bookmark-card__primary"
-                    onClick={() => openReader(series.id, bookmark.entryId)}
-                    type="button"
+                    navigate={navigateRoute}
+                    route={readerRoute(series, bookmark.entryId)}
                   >
                     {renderPoster(series, true)}
                     <span className="bookmark-card__progress-track" aria-hidden="true">
@@ -3847,7 +4728,7 @@ function App() {
                       <strong>{bookmarkStats.mobileCurrent}</strong>
                       {bookmarkStats.mobileSuffix && <span>{bookmarkStats.mobileSuffix}</span>}
                     </span>
-                  </button>
+                  </RouteLink>
                   <div className="bookmark-card__content">
                     <div className="bookmark-card__topline">
                       <span className="section-kicker">{categoryLabel(series.category)}</span>
@@ -3861,20 +4742,23 @@ function App() {
                     </div>
                     <p className="bookmark-card__cue">{bookmarkStats.cue}</p>
                     <div className="bookmark-card__actions">
-                      <button
+                      <RouteLink
                         className="primary-button"
-                        onClick={() => openReader(series.id, bookmark.entryId)}
+                        navigate={navigateRoute}
+                        route={readerRoute(series, bookmark.entryId)}
                       >
                         <AppIcon name="read" />
                         {text.resume}
-                      </button>
-                      <button
+                      </RouteLink>
+                      <RouteLink
                         className="ghost-button"
-                        onClick={() => openSeries(series.id, 'entries')}
+                        navigate={navigateRoute}
+                        onNavigate={() => void ensureSeriesLoaded(series.id).catch(() => undefined)}
+                        route={seriesRoute(series)}
                       >
                         <AppIcon name="chevronRight" />
                         {text.openSeries}
-                      </button>
+                      </RouteLink>
                     </div>
                   </div>
                   <button
@@ -3890,16 +4774,17 @@ function App() {
                   </button>
                   {bookmarkMenuOpen && (
                     <div className="bookmark-card__menu-panel">
-                      <button
-                        onClick={() => {
+                      <RouteLink
+                        navigate={navigateRoute}
+                        onNavigate={() => {
                           setOpenBookmarkMenuKey(null)
-                          void openSeries(series.id, 'entries')
+                          void ensureSeriesLoaded(series.id).catch(() => undefined)
                         }}
-                        type="button"
+                        route={seriesRoute(series)}
                       >
                         <AppIcon name="chevronRight" />
                         {text.openSeries}
-                      </button>
+                      </RouteLink>
                       <button
                         disabled={removingBookmarkSeriesId === series.id}
                         onClick={() => void handleRemoveBookmark(series.id)}
@@ -4166,7 +5051,11 @@ function App() {
           </div>
 
           {appState?.user?.role === 'admin' && (
-            <button className="settings-row settings-row--button" onClick={() => setCurrentView('admin')} type="button">
+            <RouteLink
+              className="settings-row settings-row--button"
+              navigate={navigateRoute}
+              route={{ name: 'admin' }}
+            >
               <span className="settings-row__icon">
                 <AppIcon name="admin" />
               </span>
@@ -4177,10 +5066,14 @@ function App() {
               <span className="settings-row__chevron">
                 <AppIcon name="chevronRight" />
               </span>
-            </button>
+            </RouteLink>
           )}
 
-          <button className="settings-row settings-row--button" onClick={() => setCurrentView('downloads')} type="button">
+          <RouteLink
+            className="settings-row settings-row--button"
+            navigate={navigateRoute}
+            route={{ name: 'downloads' }}
+          >
             <span className="settings-row__icon">
               <AppIcon name="download" />
             </span>
@@ -4191,7 +5084,7 @@ function App() {
             <span className="settings-row__chevron">
               <AppIcon name="chevronRight" />
             </span>
-          </button>
+          </RouteLink>
 
           <button
             className="settings-row settings-row--button"
@@ -4291,7 +5184,7 @@ function App() {
           <AppIcon name="search" />
           <input
             ref={mobileSearchInputRef}
-            onChange={(event) => setSearchQuery(event.target.value)}
+            onChange={(event) => updateSearchQuery(event.target.value)}
             placeholder={text.searchPlaceholder}
             value={searchQuery}
             autoCapitalize="none"
@@ -4299,7 +5192,7 @@ function App() {
             spellCheck={false}
           />
           {searchQuery && (
-            <button className="ghost-button ghost-button--small" onClick={() => setSearchQuery('')} type="button">
+            <button className="ghost-button ghost-button--small" onClick={() => updateSearchQuery('')} type="button">
               <AppIcon name="close" />
               {text.clearSearch}
             </button>
@@ -4315,7 +5208,7 @@ function App() {
             <button
               className={`scope-button ${searchScope === scope ? 'is-active' : ''}`}
               key={scope}
-              onClick={() => setSearchScope(scope)}
+              onClick={() => updateSearchScope(scope)}
               type="button"
             >
               {text.scopes[scope]}
@@ -4336,21 +5229,22 @@ function App() {
             <article className="panel panel--padded search-state">{text.searchNoMatches}</article>
           ) : (
             searchPreview.map((series) => (
-              <button
+              <RouteLink
                 className="search-result"
                 key={series.id}
-                onClick={() => {
-                  void openSeries(series.id)
+                navigate={navigateRoute}
+                onNavigate={() => {
                   setSearchOpen(false)
+                  void ensureSeriesLoaded(series.id).catch(() => undefined)
                 }}
-                type="button"
+                route={seriesRoute(series)}
               >
                 {renderPoster(series, true)}
                 <div>
                   <strong>{getSeriesDisplayTitle(series)}</strong>
                   <p>{categoryLabel(series.category)} • {series.progressLabel}</p>
                 </div>
-              </button>
+              </RouteLink>
             ))
           )}
         </div>
@@ -4381,14 +5275,14 @@ function App() {
           <div className="segmented-control" aria-label={text.sortBy}>
             <button
               className={discoverSort === 'title' ? 'is-active' : ''}
-              onClick={() => setDiscoverSort('title')}
+              onClick={() => updateLibraryRoute({ sort: 'title' })}
               type="button"
             >
               {text.sortTitle}
             </button>
             <button
               className={discoverSort === 'year' ? 'is-active' : ''}
-              onClick={() => setDiscoverSort('year')}
+              onClick={() => updateLibraryRoute({ sort: 'year' })}
               type="button"
             >
               {text.sortYear}
@@ -4426,19 +5320,24 @@ function App() {
         )}
       </section>
 
-      <section className="discover-tabs" role="tablist" aria-label={text.mobileNav.discover}>
+      <nav className="discover-tabs" aria-label={text.mobileNav.discover}>
         {readerCategoryOrder.map((category) => (
-          <button
+          <RouteLink
+            ariaCurrent={currentCategory === category ? 'page' : undefined}
             className={`discover-tab ${currentCategory === category ? 'is-active' : ''}`}
             key={category}
-            onClick={() => goToLibrary(category)}
-            role="tab"
-            type="button"
+            navigate={navigateRoute}
+            route={{
+              name: 'library',
+              category: categoryRouteId(category),
+              topics: [],
+              sort: discoverSort,
+            }}
           >
             {text.nav[category]}
-          </button>
+          </RouteLink>
         ))}
-      </section>
+      </nav>
 
       {currentCategory === 'books' && filterSheetOpen && (
         <div className="sheet-backdrop" role="presentation" onMouseDown={() => setFilterSheetOpen(false)}>
@@ -4463,7 +5362,7 @@ function App() {
               <button
                 className={`tab-button ${bookTopicFilters.length === 0 ? 'is-active' : ''}`}
                 onClick={() => {
-                  setBookTopicFilters([])
+                  updateLibraryRoute({ topics: [] })
                 }}
                 type="button"
               >
@@ -4473,7 +5372,7 @@ function App() {
               {bookTopicFilters.length > 0 && (
                 <button
                   className="ghost-button ghost-button--small"
-                  onClick={() => setBookTopicFilters([])}
+                  onClick={() => updateLibraryRoute({ topics: [] })}
                   type="button"
                 >
                   <AppIcon name="close" />
@@ -4488,11 +5387,11 @@ function App() {
                   className={`filter-sheet__option ${bookTopicFilters.includes(topic) ? 'is-active' : ''}`}
                   key={topic}
                   onClick={() => {
-                    setBookTopicFilters((previousFilters) =>
-                      previousFilters.includes(topic)
-                        ? previousFilters.filter((filter) => filter !== topic)
-                        : [...previousFilters, topic],
-                    )
+                    updateLibraryRoute({
+                      topics: bookTopicFilters.includes(topic)
+                        ? bookTopicFilters.filter((filter) => filter !== topic)
+                        : [...bookTopicFilters, topic],
+                    })
                   }}
                   role="option"
                   type="button"
@@ -4548,14 +5447,19 @@ function App() {
             <div className="chip-row">
               {visibleTags.map((tag) => (
                 selectedSeriesSummary.category === 'books' ? (
-                  <button
+                  <RouteLink
                     className="chip-button chip"
                     key={tag}
-                    onClick={() => openBooksTopic(tag)}
-                    type="button"
+                    navigate={navigateRoute}
+                    route={{
+                      name: 'library',
+                      category: 'books',
+                      topics: [tag],
+                      sort: discoverSort,
+                    }}
                   >
                     {tag}
-                  </button>
+                  </RouteLink>
                 ) : (
                   <span className="chip" key={tag}>
                     {tag}
@@ -4569,17 +5473,20 @@ function App() {
         <article className="panel panel--padded">
           <h3>{text.sourceDetails}</h3>
           <dl className="detail-list">
-            {selectedSeriesSummary.sourceName && (
+            {selectedSeriesSummary.sourceName && selectedSeriesCreatorProfile && (
               <div>
                 <dt>{text.sourceLabel}</dt>
                 <dd>
-                  <button
+                  <RouteLink
                     className="link-button"
-                    onClick={() => openCreatorProfile(selectedSeriesSummary.sourceName)}
-                    type="button"
+                    navigate={navigateRoute}
+                    route={{
+                      name: 'creator',
+                      creatorKey: selectedSeriesCreatorProfile.key,
+                    }}
                   >
                     {selectedSeriesSummary.sourceName}
-                  </button>
+                  </RouteLink>
                 </dd>
               </div>
             )}
@@ -4618,24 +5525,28 @@ function App() {
           <h3>{text.moreFromCreator}</h3>
           {selectedSeriesCreatorProfile ? (
             <div className="action-stack">
-              <button
+              <RouteLink
                 className="ghost-button"
-                onClick={() => openCreatorProfile(selectedSeriesCreatorProfile.name)}
-                type="button"
+                navigate={navigateRoute}
+                route={{
+                  name: 'creator',
+                  creatorKey: selectedSeriesCreatorProfile.key,
+                }}
               >
                 {text.openCreatorPage}
-              </button>
+              </RouteLink>
               {relatedCreatorSeries.length > 0 ? (
                 relatedCreatorSeries.map((series) => (
-                  <button
+                  <RouteLink
                     className="list-link-button"
                     key={series.id}
-                    onClick={() => void openSeries(series.id)}
-                    type="button"
+                    navigate={navigateRoute}
+                    onNavigate={() => void ensureSeriesLoaded(series.id).catch(() => undefined)}
+                    route={seriesRoute(series)}
                   >
                     <span>{getSeriesDisplayTitle(series)}</span>
                     <span>{formatCountLabel(series.category, series.stats.fileCount, language)}</span>
-                  </button>
+                  </RouteLink>
                 ))
               ) : (
                 <p className="helper-text">{text.noRelatedCreatorTitles}</p>
@@ -4649,9 +5560,19 @@ function App() {
         <article className="panel panel--padded">
           <h3>{text.seriesActions}</h3>
           <div className="action-stack">
-            <button className="primary-button" onClick={() => void openReader(selectedSeriesSummary.id)}>
-              {text.openReader}
-            </button>
+            {selectedSeries?.entries[0] ? (
+              <RouteLink
+                className="primary-button"
+                navigate={navigateRoute}
+                route={readerRoute(selectedSeriesSummary, selectedSeries.entries[0].id)}
+              >
+                {text.openReader}
+              </RouteLink>
+            ) : (
+              <button className="primary-button" disabled type="button">
+                {text.loadingSeries}
+              </button>
+            )}
             <button
               className="ghost-button"
               disabled={Boolean(seriesOfflineBusy)}
@@ -4665,12 +5586,20 @@ function App() {
               <AppIcon name={seriesOfflineDownload ? 'offline' : 'download'} />
               {seriesOfflineBusy || (seriesOfflineDownload ? text.openOffline : text.downloadSeries)}
             </button>
-            <button className="ghost-button" onClick={() => setActiveTab('comments')}>
+            <RouteLink
+              className="ghost-button"
+              navigate={navigateRoute}
+              route={seriesRoute(selectedSeriesSummary, 'comments')}
+            >
               {text.comments}
-            </button>
-            <button className="ghost-button" onClick={() => setCurrentView('bookmarks')}>
+            </RouteLink>
+            <RouteLink
+              className="ghost-button"
+              navigate={navigateRoute}
+              route={{ name: 'bookmarks', scope: 'all' }}
+            >
               {text.welcome}
-            </button>
+            </RouteLink>
           </div>
         </article>
 
@@ -4716,7 +5645,7 @@ function App() {
               <button
                 className={`tab-button ${selectedSeasonNumber === seasonNumber ? 'is-active' : ''}`}
                 key={seasonNumber}
-                onClick={() => setSelectedSeasonNumber(seasonNumber)}
+                onClick={() => updateSeriesSeason(seasonNumber)}
                 type="button"
               >
                 {formatSeasonLabel(seasonNumber, language)}
@@ -4753,9 +5682,13 @@ function App() {
                   <td data-label={text.entryDetails}>{entry.details}</td>
                   <td data-label={text.entryAction}>
                     <div className="entry-table__actions">
-                      <button className="ghost-button" onClick={() => void openReader(selectedSeries.id, entry.id)}>
+                      <RouteLink
+                        className="ghost-button"
+                        navigate={navigateRoute}
+                        route={readerRoute(selectedSeries, entry.id)}
+                      >
                         {text.openReader}
-                      </button>
+                      </RouteLink>
                       <button
                         className="ghost-button"
                         disabled={Boolean(entryOfflineBusy)}
@@ -4871,14 +5804,17 @@ function App() {
 
             <div className="chip-row">
               <span className="chip chip--accent">{selectedSeriesSummary.progressLabel}</span>
-              {selectedSeriesSummary.sourceName && (
-                <button
+              {selectedSeriesSummary.sourceName && selectedSeriesCreatorProfile && (
+                <RouteLink
                   className="chip-button chip"
-                  onClick={() => openCreatorProfile(selectedSeriesSummary.sourceName)}
-                  type="button"
+                  navigate={navigateRoute}
+                  route={{
+                    name: 'creator',
+                    creatorKey: selectedSeriesCreatorProfile.key,
+                  }}
                 >
                   {getSeriesSourceText(selectedSeriesSummary)}
-                </button>
+                </RouteLink>
               )}
               {seriesCountLabel !== selectedSeriesSummary.progressLabel && (
                 <span className="chip">{seriesCountLabel}</span>
@@ -4894,26 +5830,32 @@ function App() {
               ))}
             </div>
 
-            <div className="tab-row">
-              <button
+            <nav className="tab-row" aria-label={selectedSeriesDisplayTitle || text.entries}>
+              <RouteLink
+                ariaCurrent={activeTab === 'overview' ? 'page' : undefined}
                 className={`tab-button ${activeTab === 'overview' ? 'is-active' : ''}`}
-                onClick={() => setActiveTab('overview')}
+                navigate={navigateRoute}
+                route={seriesRoute(selectedSeriesSummary, 'overview')}
               >
                 {text.overview}
-              </button>
-              <button
+              </RouteLink>
+              <RouteLink
+                ariaCurrent={activeTab === 'entries' ? 'page' : undefined}
                 className={`tab-button ${activeTab === 'entries' ? 'is-active' : ''}`}
-                onClick={() => setActiveTab('entries')}
+                navigate={navigateRoute}
+                route={seriesRoute(selectedSeriesSummary, 'entries')}
               >
                 {text.entries}
-              </button>
-              <button
+              </RouteLink>
+              <RouteLink
+                ariaCurrent={activeTab === 'comments' ? 'page' : undefined}
                 className={`tab-button ${activeTab === 'comments' ? 'is-active' : ''}`}
-                onClick={() => setActiveTab('comments')}
+                navigate={navigateRoute}
+                route={seriesRoute(selectedSeriesSummary, 'comments')}
               >
                 {text.comments}
-              </button>
-            </div>
+              </RouteLink>
+            </nav>
           </div>
         </section>
 
@@ -4944,14 +5886,19 @@ function App() {
           <div className="chip-row">
             {selectedCreatorProfile.role && <span className="chip chip--accent">{selectedCreatorProfile.role}</span>}
             {selectedCreatorProfile.categories.map((category) => (
-              <button
+              <RouteLink
                 className="chip-button chip"
                 key={category}
-                onClick={() => goToLibrary(category)}
-                type="button"
+                navigate={navigateRoute}
+                route={{
+                  name: 'library',
+                  category: categoryRouteId(category),
+                  topics: [],
+                  sort: discoverSort,
+                }}
               >
                 {text.scopes[category]}
-              </button>
+              </RouteLink>
             ))}
             <span className="chip">
               {selectedCreatorProfile.series.length} {text.creatorWorks}
@@ -5483,13 +6430,14 @@ function App() {
               >
                 {text.metadataClear}
               </button>
-              <button
+              <RouteLink
                 className="ghost-button"
-                onClick={() => void openSeries(selectedMetadataSeries.id, 'overview')}
-                type="button"
+                navigate={navigateRoute}
+                onNavigate={() => void ensureSeriesLoaded(selectedMetadataSeries.id).catch(() => undefined)}
+                route={seriesRoute(selectedMetadataSeries, 'overview')}
               >
                 {text.metadataOpenSeries}
-              </button>
+              </RouteLink>
             </div>
           </form>
         </>
@@ -5940,20 +6888,23 @@ function App() {
               className="segmented-control auth-panel__mode"
               role="group"
             >
-              <button
+              <RouteLink
                 className={authMode === 'login' ? 'is-active' : ''}
-                onClick={() => setAuthMode('login')}
-                type="button"
+                navigate={navigateRoute}
+                route={{
+                  name: 'login',
+                  next: currentRoute.name === 'login' ? currentRoute.next : null,
+                }}
               >
                 {text.signIn}
-              </button>
-              <button
+              </RouteLink>
+              <RouteLink
                 className={authMode === 'signup' ? 'is-active' : ''}
-                onClick={() => setAuthMode('signup')}
-                type="button"
+                navigate={navigateRoute}
+                route={{ name: 'signup' }}
               >
                 {text.createAccount}
-              </button>
+              </RouteLink>
             </div>
           )}
 
@@ -6013,12 +6964,17 @@ function App() {
 
   return (
     <div className={`app-shell ${currentView === 'reader' ? 'app-shell--reader' : ''}`}>
+      <a className="skip-link" href="#main-content">{text.skipToContent}</a>
       {currentView !== 'reader' && (
       <header className={`topbar ${topbarHidden ? 'topbar--hidden' : ''}`}>
-        <button className="brand-lockup" onClick={() => setCurrentView('bookmarks')}>
+        <RouteLink
+          className="brand-lockup"
+          navigate={navigateRoute}
+          route={{ name: 'bookmarks', scope: 'all' }}
+        >
           <span className="brand-lockup__mark">O</span>
           <span className="brand-lockup__text">{text.brandName}</span>
-        </button>
+        </RouteLink>
 
         <div className="topbar__left">
           <div
@@ -6040,7 +6996,7 @@ function App() {
               </button>
               <input
                 ref={searchInputRef}
-                onChange={(event) => setSearchQuery(event.target.value)}
+                onChange={(event) => updateSearchQuery(event.target.value)}
                 onFocus={() => setSearchOpen(true)}
                 placeholder={text.searchPlaceholder}
                 value={searchQuery}
@@ -6059,7 +7015,7 @@ function App() {
                       <button
                         className="ghost-button ghost-button--small"
                         onClick={() => {
-                          setSearchQuery('')
+                          updateSearchQuery('')
                           searchInputRef.current?.focus()
                         }}
                         type="button"
@@ -6080,7 +7036,7 @@ function App() {
                     <button
                       className={`scope-button ${searchScope === scope ? 'is-active' : ''}`}
                       key={scope}
-                      onClick={() => setSearchScope(scope)}
+                      onClick={() => updateSearchScope(scope)}
                       type="button"
                     >
                       {text.scopes[scope]}
@@ -6097,21 +7053,22 @@ function App() {
                     <div className="search-state">No matches yet.</div>
                   ) : (
                       searchPreview.map((series) => (
-                        <button
+                        <RouteLink
                           className="search-result"
                           key={series.id}
-                          onClick={() => {
-                            void openSeries(series.id)
+                          navigate={navigateRoute}
+                          onNavigate={() => {
                             setSearchOpen(false)
+                            void ensureSeriesLoaded(series.id).catch(() => undefined)
                           }}
-                          type="button"
+                          route={seriesRoute(series)}
                         >
                           {renderPoster(series, true)}
                           <div>
                             <strong>{getSeriesDisplayTitle(series)}</strong>
                             <p>{categoryLabel(series.category)} • {series.progressLabel}</p>
                           </div>
-                        </button>
+                        </RouteLink>
                       ))
                   )}
                 </div>
@@ -6127,7 +7084,16 @@ function App() {
               id: category,
               label: text.nav[category],
             }))].map((item) => (
-              <button
+              <RouteLink
+                ariaCurrent={
+                  item.id === 'bookmarks'
+                    ? currentView === 'bookmarks' ? 'page' : undefined
+                    : item.id === 'downloads'
+                      ? currentView === 'downloads' ? 'page' : undefined
+                      : ['library', 'series'].includes(currentView) && currentCategory === item.id
+                        ? 'page'
+                        : undefined
+                }
                 className={`window-tab ${
                   item.id === 'bookmarks'
                     ? currentView === 'bookmarks'
@@ -6137,27 +7103,27 @@ function App() {
                       ? currentView === 'downloads'
                         ? 'is-active'
                         : ''
-                    : currentView === 'library' && currentCategory === item.id
+                    : ['library', 'series'].includes(currentView) && currentCategory === item.id
                       ? 'is-active'
                       : ''
                 }`}
                 key={item.id}
-                onClick={() => {
-                  if (item.id === 'bookmarks') {
-                    setCurrentView('bookmarks')
-                    return
-                  }
-
-                  if (item.id === 'downloads') {
-                    setCurrentView('downloads')
-                    return
-                  }
-
-                  goToLibrary(item.id)
-                }}
+                navigate={navigateRoute}
+                route={
+                  item.id === 'bookmarks'
+                    ? { name: 'bookmarks', scope: 'all' }
+                    : item.id === 'downloads'
+                      ? { name: 'downloads' }
+                      : {
+                          name: 'library',
+                          category: categoryRouteId(item.id),
+                          topics: [],
+                          sort: discoverSort,
+                        }
+                }
               >
                 {item.label}
-              </button>
+              </RouteLink>
             ))}
           </nav>
         </div>
@@ -6180,7 +7146,12 @@ function App() {
             </button>
           </div>
 
-          <button className="profile-pill" onClick={() => setCurrentView('profile')}>
+          <RouteLink
+            ariaCurrent={currentView === 'profile' ? 'page' : undefined}
+            className="profile-pill"
+            navigate={navigateRoute}
+            route={{ name: 'profile' }}
+          >
             <span className="profile-pill__avatar">
               {appState?.user?.username.slice(0, 1).toUpperCase()}
             </span>
@@ -6188,13 +7159,18 @@ function App() {
               {appState?.user?.username}
               <small>{text.profile}</small>
             </span>
-          </button>
+          </RouteLink>
 
           {appState?.user?.role === 'admin' && (
-            <button className="ghost-button" onClick={() => setCurrentView('admin')}>
+            <RouteLink
+              ariaCurrent={currentView === 'admin' ? 'page' : undefined}
+              className="ghost-button"
+              navigate={navigateRoute}
+              route={{ name: 'admin' }}
+            >
               <AppIcon name="admin" />
               {text.admin}
-            </button>
+            </RouteLink>
           )}
           <button className="ghost-button" onClick={() => void handleLogout()}>
             <AppIcon name="logout" />
@@ -6207,8 +7183,8 @@ function App() {
       </header>
       )}
 
-      <main className="main-shell">
-        {currentView === 'admin' && (
+      <main className="main-shell" id="main-content" ref={mainShellRef} tabIndex={-1}>
+        {!routeProblem && currentView === 'admin' && (
           <section className="page-heading">
             <div>
               <p className="section-kicker">{text.demoTag}</p>
@@ -6241,74 +7217,80 @@ function App() {
           </article>
         )}
 
-        {currentView === 'bookmarks' && renderBookmarks()}
-        {currentView === 'downloads' && renderDownloads()}
-        {currentView === 'library' && renderLibrary()}
-        {currentView === 'search' && renderSearchPage()}
-        {currentView === 'series' && renderSeries()}
-        {currentView === 'reader' && renderReader()}
-        {currentView === 'creator' && renderCreator()}
-        {currentView === 'profile' && renderProfile()}
-        {currentView === 'admin' && renderAdmin()}
+        {routeProblem
+          ? renderRouteProblem()
+          : (
+            <>
+              {currentView === 'bookmarks' && renderBookmarks()}
+              {currentView === 'downloads' && renderDownloads()}
+              {currentView === 'library' && renderLibrary()}
+              {currentView === 'search' && renderSearchPage()}
+              {currentView === 'series' && renderSeries()}
+              {currentView === 'reader' && renderReader()}
+              {currentView === 'creator' && renderCreator()}
+              {currentView === 'profile' && renderProfile()}
+              {currentView === 'admin' && renderAdmin()}
+            </>
+          )}
       </main>
 
       {currentView !== 'reader' && (
         <nav className="bottom-nav" aria-label="Primary">
-          <button
+          <RouteLink
+            ariaCurrent={currentView === 'bookmarks' ? 'page' : undefined}
             className={currentView === 'bookmarks' ? 'is-active' : ''}
-            onClick={() => {
-              setCurrentView('bookmarks')
-              setSearchOpen(false)
-            }}
-            type="button"
+            navigate={navigateRoute}
+            onNavigate={() => setSearchOpen(false)}
+            route={{ name: 'bookmarks', scope: 'all' }}
           >
             <AppIcon name="library" />
             <span>{text.mobileNav.library}</span>
-          </button>
-          <button
+          </RouteLink>
+          <RouteLink
+            ariaCurrent={['library', 'series', 'creator'].includes(currentView) ? 'page' : undefined}
             className={['library', 'series', 'creator'].includes(currentView) ? 'is-active' : ''}
-            onClick={() => {
-              goToLibrary(currentCategory)
-              setSearchOpen(false)
+            navigate={navigateRoute}
+            onNavigate={() => setSearchOpen(false)}
+            route={{
+              name: 'library',
+              category: categoryRouteId(currentCategory),
+              topics: [],
+              sort: discoverSort,
             }}
-            type="button"
           >
             <AppIcon name="discover" />
             <span>{text.mobileNav.discover}</span>
-          </button>
-          <button
+          </RouteLink>
+          <RouteLink
+            ariaCurrent={currentView === 'search' ? 'page' : undefined}
             className={currentView === 'search' ? 'is-active' : ''}
-            onClick={() => {
-              setCurrentView('search')
-              setSearchOpen(false)
-            }}
-            type="button"
+            navigate={navigateRoute}
+            onNavigate={() => setSearchOpen(false)}
+            route={{ name: 'search', query: searchQuery, scope: searchScope }}
           >
             <AppIcon name="search" />
             <span>{text.mobileNav.search}</span>
-          </button>
-          <button
+          </RouteLink>
+          <RouteLink
+            ariaCurrent={currentView === 'downloads' ? 'page' : undefined}
             className={currentView === 'downloads' ? 'is-active' : ''}
-            onClick={() => {
-              setCurrentView('downloads')
-              setSearchOpen(false)
-            }}
-            type="button"
+            navigate={navigateRoute}
+            onNavigate={() => setSearchOpen(false)}
+            route={{ name: 'downloads' }}
           >
             <AppIcon name="download" />
             <span>{text.mobileNav.downloads}</span>
-          </button>
-          <button
+          </RouteLink>
+          <RouteLink
+            ariaCurrent={currentView === 'profile' || currentView === 'admin' ? 'page' : undefined}
             className={currentView === 'profile' || currentView === 'admin' ? 'is-active' : ''}
-            onClick={() => {
-              setCurrentView('profile')
-              setSearchOpen(false)
-            }}
-            type="button"
+            navigate={navigateRoute}
+            onNavigate={() => setSearchOpen(false)}
+            route={{ name: 'profile' }}
           >
             <AppIcon name="profile" />
             <span>{text.mobileNav.profile}</span>
-          </button>
+          </RouteLink>
         </nav>
       )}
     </div>

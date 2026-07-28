@@ -1518,6 +1518,15 @@ ensureConfiguredSourceRoot(db, config)
 await bootstrapAdminUser(db, config)
 await maybeSeedDemoContent(db, config)
 
-app.listen(port, () => {
+const httpServer = app.listen(port, () => {
   console.log(`Orbital Library server listening on http://127.0.0.1:${port}`)
 })
+
+const stopServer = () => {
+  httpServer.close(() => {
+    db.close()
+  })
+}
+
+process.once('SIGINT', stopServer)
+process.once('SIGTERM', stopServer)

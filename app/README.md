@@ -46,6 +46,27 @@ npm run start
 
 The app serves the built frontend from the same Node server in production mode.
 
+## Stable URLs
+
+Orbital uses refresh-safe, shareable paths for every primary screen:
+
+- `/login`, `/signup`, `/bookmarks`, `/downloads`, `/search`, `/profile`, and `/admin`
+- `/manga`, `/novels`, `/books`, and `/magazines`
+- `/:category/:seriesId` for a series
+- `/:category/:seriesId/read/:entryId` for a reader
+- `/creators/:creatorKey` for a creator
+- `/login?next=...` to return to a protected page after signing in
+
+Search scope, shelf filters and sort order live in the query string. Reader URLs
+also keep the selected edition and exact page or percentage so a refresh returns
+to the same place. Links are ordinary browser links, so copy link, open in a new
+tab, Back, and Forward work normally.
+
+The bundled Express production server already returns the app shell for
+non-API routes. If another reverse proxy serves the frontend directly, configure
+that proxy to fall back to `index.html` for unknown document requests while
+leaving `/api/*`, `/assets/*`, `/sw.js`, and media responses untouched.
+
 ## Docker
 
 Copy the example environment file and set a real admin password before starting the container:
