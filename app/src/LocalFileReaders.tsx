@@ -24,6 +24,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -192,6 +193,125 @@ const clampPage = (page: number, totalPages: number) =>
 const clampPercent = (value: number) => Math.min(Math.max(Math.round(value), 0), 100)
 const clampZoom = (value: number) =>
   Math.min(Math.max(Math.round(value), minCbzZoom), maxCbzZoom)
+
+type ViewportCenter = {
+  x: number
+  y: number
+}
+
+const centeredViewport: ViewportCenter = { x: 0.5, y: 0.5 }
+
+const readViewportCenter = (viewport: HTMLDivElement): ViewportCenter => ({
+  x:
+    viewport.scrollWidth > 0
+      ? (viewport.scrollLeft + viewport.clientWidth / 2) / viewport.scrollWidth
+      : centeredViewport.x,
+  y:
+    viewport.scrollHeight > 0
+      ? (viewport.scrollTop + viewport.clientHeight / 2) / viewport.scrollHeight
+      : centeredViewport.y,
+})
+
+const writeViewportCenter = (viewport: HTMLDivElement, center: ViewportCenter) => {
+  const maximumLeft = Math.max(viewport.scrollWidth - viewport.clientWidth, 0)
+  const maximumTop = Math.max(viewport.scrollHeight - viewport.clientHeight, 0)
+
+  viewport.scrollLeft = Math.min(
+    Math.max(center.x * viewport.scrollWidth - viewport.clientWidth / 2, 0),
+    maximumLeft,
+  )
+  viewport.scrollTop = Math.min(
+    Math.max(center.y * viewport.scrollHeight - viewport.clientHeight / 2, 0),
+    maximumTop,
+  )
+}
+
+type CenteredPagedViewportOptions = {
+  fitMode: ReaderSettings['fitMode']
+  pageKey: string
+  recenterKey?: string
+  viewportRef: { current: HTMLDivElement | null }
+  zoom: number
+}
+
+const useCenteredPagedViewport = ({
+  fitMode,
+  pageKey,
+  recenterKey = '',
+  viewportRef,
+  zoom,
+}: CenteredPagedViewportOptions) => {
+  const pendingCenterRef = useRef<ViewportCenter | null>(null)
+  const previousPageKeyRef = useRef(pageKey)
+  const previousRecenterKeyRef = useRef(recenterKey)
+
+  const captureViewportCenter = useCallback(() => {
+    const viewport = viewportRef.current
+    pendingCenterRef.current = viewport ? readViewportCenter(viewport) : centeredViewport
+  }, [viewportRef])
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) {
+      return
+    }
+
+    const pageChanged = previousPageKeyRef.current !== pageKey
+    const viewportChanged = previousRecenterKeyRef.current !== recenterKey
+    previousPageKeyRef.current = pageKey
+    previousRecenterKeyRef.current = recenterKey
+
+    if (fitMode !== 'manual') {
+      pendingCenterRef.current = null
+      viewport.scrollLeft = 0
+      viewport.scrollTop = 0
+      return
+    }
+
+    const nextCenter =
+      pageChanged || viewportChanged
+        ? centeredViewport
+        : pendingCenterRef.current ?? centeredViewport
+    pendingCenterRef.current = null
+
+    const applyCenter = () => writeViewportCenter(viewport, nextCenter)
+    applyCenter()
+    const frame = requestAnimationFrame(applyCenter)
+
+    return () => cancelAnimationFrame(frame)
+  }, [fitMode, pageKey, recenterKey, viewportRef, zoom])
+
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport || fitMode !== 'manual' || typeof ResizeObserver === 'undefined') {
+      return
+    }
+
+    let previousWidth = viewport.clientWidth
+    let previousHeight = viewport.clientHeight
+    let frame = 0
+    const observer = new ResizeObserver(() => {
+      const nextWidth = viewport.clientWidth
+      const nextHeight = viewport.clientHeight
+      if (nextWidth === previousWidth && nextHeight === previousHeight) {
+        return
+      }
+
+      previousWidth = nextWidth
+      previousHeight = nextHeight
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => writeViewportCenter(viewport, centeredViewport))
+    })
+
+    observer.observe(viewport)
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [fitMode, pageKey, viewportRef])
+
+  return captureViewportCenter
+}
 
 type ReaderSettingsControlProps = {
   fileUrl: string
@@ -1085,6 +1205,8 @@ const orderCbzPages = (pages: CbzPage[], pageOrderMode: CbzPageOrderMode) => {
 type PdfPageCanvasProps = {
   browserPixelRatio: number
   estimatedHeight: number
+  fitHeight?: number
+  fitMode?: ReaderSettings['fitMode']
   pdfDocument: PDFDocumentProxy
   pageNumber: number
   targetWidth: number
@@ -1092,11 +1214,14 @@ type PdfPageCanvasProps = {
   onError: (message: string) => void
   onRendered?: () => void
   pixelRatioLimit: number
+  zoom?: number
 }
 
 function PdfPageCanvas({
   browserPixelRatio,
   estimatedHeight,
+  fitHeight,
+  fitMode,
   pdfDocument,
   pageNumber,
   targetWidth,
@@ -1104,6 +1229,7 @@ function PdfPageCanvas({
   onError,
   onRendered,
   pixelRatioLimit,
+  zoom = 100,
 }: PdfPageCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [displaySize, setDisplaySize] = useState(() => ({
@@ -1131,7 +1257,18 @@ function PdfPageCanvas({
         }
 
         const baseViewport = pdfPage.getViewport({ scale: 1 })
-        const scale = targetWidth / baseViewport.width
+        const pageAspectRatio = baseViewport.height / baseViewport.width
+        const wholePageWidth =
+          fitHeight == null
+            ? targetWidth
+            : Math.min(targetWidth, fitHeight / pageAspectRatio)
+        const resolvedTargetWidth =
+          fitMode === 'fit-page'
+            ? wholePageWidth
+            : fitMode === 'manual'
+              ? Math.min((wholePageWidth * zoom) / 100, maxPdfCanvasWidth * 1.5)
+              : targetWidth
+        const scale = resolvedTargetWidth / baseViewport.width
         const viewport = pdfPage.getViewport({ scale })
         const canvas = canvasRef.current
         const canvasContext =
@@ -1191,7 +1328,19 @@ function PdfPageCanvas({
       renderTask?.cancel()
       pdfPage?.cleanup()
     }
-  }, [browserPixelRatio, estimatedHeight, onError, onRendered, pageNumber, pdfDocument, pixelRatioLimit, targetWidth])
+  }, [
+    browserPixelRatio,
+    estimatedHeight,
+    fitHeight,
+    fitMode,
+    onError,
+    onRendered,
+    pageNumber,
+    pdfDocument,
+    pixelRatioLimit,
+    targetWidth,
+    zoom,
+  ])
 
   return (
     <canvas
@@ -1387,61 +1536,69 @@ export function PdfEmbed({
     0,
   )
   const activePdfGroup = pdfGroups[activePdfGroupIndex] ?? null
+  const pdfPageKey = [
+    activePdfGroup?.id ?? 'loading',
+    effectiveViewMode,
+    settings.direction,
+    settings.spreadAlignment,
+  ].join(':')
+  const capturePdfViewportCenter = useCenteredPagedViewport({
+    fitMode: settings.layout === 'paged' ? settings.fitMode : 'fit-width',
+    pageKey: pdfPageKey,
+    recenterKey: `${viewportWidth}x${viewportHeight}`,
+    viewportRef,
+    zoom: settings.zoom,
+  })
+  const handlePdfSettingsChange = useCallback(
+    (nextSettings: ReaderSettings) => {
+      if (nextSettings.layout === 'paged' && nextSettings.fitMode === 'manual') {
+        capturePdfViewportCenter()
+      }
+      onSettingsChange(nextSettings)
+    },
+    [capturePdfViewportCenter, onSettingsChange],
+  )
 
   useEffect(() => {
     didInitialScrollRef.current = false
   }, [effectiveViewMode, settings.layout])
 
-  const targetWidth = useMemo(() => {
-      const measuredViewportWidth =
-        viewportWidth ||
-        (typeof window === 'undefined'
-          ? minReaderWidth + 48
-          : Math.min(window.innerWidth, maxPdfCanvasWidth + 48))
-      const measuredViewportHeight =
-        viewportHeight ||
-        (typeof window === 'undefined'
-          ? 900
-          : window.visualViewport?.height || window.innerHeight)
-      const pageColumns =
-        settings.layout === 'paged' && effectiveViewMode === 'spread' ? 2 : 1
-      const availableWidth = Math.max(measuredViewportWidth - 48, minReaderWidth)
-      const availablePageWidth = Math.max(availableWidth / pageColumns, minReaderWidth / pageColumns)
-      const availableHeight = Math.max(measuredViewportHeight - 36, 240)
-      const fitPageWidth = Math.min(availablePageWidth, availableHeight / pageAspectRatio)
-
-      if (settings.layout === 'paged') {
-        if (settings.fitMode === 'fit-width') {
-          return Math.min(availablePageWidth, maxPdfCanvasWidth)
-        }
-
-        if (settings.fitMode === 'manual') {
-          return Math.min(
-            (fitPageWidth * settings.zoom) / 100,
-            maxPdfCanvasWidth * 1.5,
-          )
-        }
-
-        return Math.min(fitPageWidth, maxPdfCanvasWidth)
-      }
-
-      const continuousWidth = Math.max(
-        minReaderWidth,
-        Math.min(Math.max(measuredViewportWidth - 48, minReaderWidth), maxPdfCanvasWidth),
-      )
-
-      return settings.fitMode === 'manual'
+  const measuredViewportWidth =
+    viewportWidth ||
+    (typeof window === 'undefined'
+      ? minReaderWidth + 48
+      : Math.min(window.innerWidth, maxPdfCanvasWidth + 48))
+  const measuredViewportHeight =
+    viewportHeight ||
+    (typeof window === 'undefined'
+      ? 900
+      : window.visualViewport?.height || window.innerHeight)
+  const pageColumns =
+    settings.layout === 'paged' && effectiveViewMode === 'spread' ? 2 : 1
+  const pagedInlinePadding =
+    measuredViewportWidth <= 720
+      ? 12
+      : Math.min(Math.max(measuredViewportWidth * 0.06, 24), 72)
+  const pagedBlockPadding = measuredViewportWidth <= 720 ? 8 : 14
+  const availableWidth = Math.max(
+    measuredViewportWidth - pagedInlinePadding * 2,
+    1,
+  )
+  const availablePageWidth = Math.max(availableWidth / pageColumns, 1)
+  const availablePageHeight = Math.max(
+    measuredViewportHeight - pagedBlockPadding * 2,
+    1,
+  )
+  const continuousWidth = Math.max(
+    minReaderWidth,
+    Math.min(Math.max(measuredViewportWidth - 48, minReaderWidth), maxPdfCanvasWidth),
+  )
+  const targetWidth =
+    settings.layout === 'paged'
+      ? Math.min(availablePageWidth, maxPdfCanvasWidth)
+      : settings.fitMode === 'manual'
         ? Math.min((continuousWidth * settings.zoom) / 100, maxPdfCanvasWidth * 1.5)
         : continuousWidth
-    }, [
-      effectiveViewMode,
-      pageAspectRatio,
-      settings.fitMode,
-      settings.layout,
-      settings.zoom,
-      viewportHeight,
-      viewportWidth,
-    ])
 
   const estimatedHeight = useMemo(
     () => Math.max(360, Math.round(targetWidth * pageAspectRatio)),
@@ -1650,7 +1807,7 @@ export function PdfEmbed({
           <ReaderSettingsControl
             fileUrl={fileUrl}
             format="pdf"
-            onSettingsChange={onSettingsChange}
+            onSettingsChange={handlePdfSettingsChange}
             settings={settings}
           />
           {toolbarAccessory}
@@ -1708,6 +1865,8 @@ export function PdfEmbed({
                         <PdfPageCanvas
                           browserPixelRatio={browserPixelRatio}
                           estimatedHeight={estimatedHeight}
+                          fitHeight={availablePageHeight}
+                          fitMode={settings.fitMode}
                           onError={setError}
                           onRendered={
                             group === activePdfGroup ? handlePageRendered : undefined
@@ -1717,6 +1876,7 @@ export function PdfEmbed({
                           pdfDocument={documentProxy}
                           targetWidth={targetWidth}
                           title={title}
+                          zoom={settings.zoom}
                         />
                       </div>
                     ))}
@@ -2271,6 +2431,27 @@ export function CbzReader({
     effectiveViewMode === 'spread' && activeGroup && activeGroup.endPage > activeGroup.startPage
       ? `Pages ${activeGroup.startPage}-${activeGroup.endPage} of ${orderedPages.length}`
       : `Page ${visiblePage} of ${orderedPages.length}`
+  const cbzPageKey = [
+    activeGroup?.id ?? 'loading',
+    effectiveViewMode,
+    settings.direction,
+    settings.spreadAlignment,
+  ].join(':')
+  const captureCbzViewportCenter = useCenteredPagedViewport({
+    fitMode: settings.layout === 'paged' ? settings.fitMode : 'fit-width',
+    pageKey: cbzPageKey,
+    viewportRef,
+    zoom: settings.zoom,
+  })
+  const handleCbzSettingsChange = useCallback(
+    (nextSettings: ReaderSettings) => {
+      if (nextSettings.layout === 'paged' && nextSettings.fitMode === 'manual') {
+        captureCbzViewportCenter()
+      }
+      onSettingsChange(nextSettings)
+    },
+    [captureCbzViewportCenter, onSettingsChange],
+  )
   const getSheetWidth = (baseWidth: number) => {
     if (settings.fitMode === 'fit-page') {
       return '100%'
@@ -2406,7 +2587,7 @@ export function CbzReader({
             <ReaderSettingsControl
               fileUrl={fileUrl}
               format="cbz"
-              onSettingsChange={onSettingsChange}
+              onSettingsChange={handleCbzSettingsChange}
               settings={settings}
             />
             {toolbarAccessory}
