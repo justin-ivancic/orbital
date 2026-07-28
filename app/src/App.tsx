@@ -368,13 +368,8 @@ const ui = {
   en: {
     brandName: 'Orbital Library',
     demoTag: 'Full stack preview',
-    authEyebrow: 'Self-hosted manga, novel, and book reader',
-    authTitle: 'The approved demo UI, now backed by real users, scans, and local media.',
-    authBody:
-      'Sign in or create an account to browse your NAS reading library, keep manual bookmarks, leave series-level comments, and let the admin mount folders for manga, novels, and books.',
-    featureBookmarks: 'Bookmarks remain separated by category',
-    featurePlayer: 'Series page first, then immersive reader',
-    featureAdmin: 'Mounted roots, linked folders, incremental rescans',
+    privateLibrary: 'Private library',
+    authPrompt: 'Sign in to continue.',
     signIn: 'Sign in',
     createAccount: 'Create account',
     username: 'Username',
@@ -420,8 +415,6 @@ const ui = {
     downloadStale: 'Server copy changed',
     repairDownload: 'Repair',
     downloadsDeviceOnly: 'Server files, bookmarks, and accounts stay unchanged.',
-    authAction: 'Open library',
-    adminBootstrap: 'Reserved bootstrap admin',
     searchPlaceholder: 'Search every shelf, series, and file',
     scopes: {
       all: 'All media',
@@ -637,13 +630,8 @@ const ui = {
   de: {
     brandName: 'Orbital Library',
     demoTag: 'Full-Stack-Vorschau',
-    authEyebrow: 'Selbst gehosteter Manga-, Novel- und Buch-Reader',
-    authTitle: 'Die bestätigte Demo-Oberfläche, jetzt mit echten Nutzern, Scans und lokalen Medien.',
-    authBody:
-      'Melde dich an oder erstelle einen Account, um deine NAS-Lesebibliothek zu durchsuchen, manuelle Lesezeichen zu setzen, Kommentare zu hinterlassen und als Admin Ordner für Manga, Novels und Bücher zu verknüpfen.',
-    featureBookmarks: 'Lesezeichen bleiben nach Kategorien getrennt',
-    featurePlayer: 'Serienseite zuerst, dann immersiver Reader',
-    featureAdmin: 'Eingehängte Wurzeln, verknüpfte Ordner, inkrementelle Rescans',
+    privateLibrary: 'Private Bibliothek',
+    authPrompt: 'Melde dich an, um fortzufahren.',
     signIn: 'Anmelden',
     createAccount: 'Account erstellen',
     username: 'Benutzername',
@@ -689,8 +677,6 @@ const ui = {
     downloadStale: 'Server-Kopie geaendert',
     repairDownload: 'Reparieren',
     downloadsDeviceOnly: 'Server-Dateien, Lesezeichen und Accounts bleiben unveraendert.',
-    authAction: 'Bibliothek öffnen',
-    adminBootstrap: 'Reservierter Bootstrap-Admin',
     searchPlaceholder: 'Alle Regale, Serien und Dateien durchsuchen',
     scopes: {
       all: 'Alle Medien',
@@ -1552,7 +1538,6 @@ function App() {
   const [bootstrapState, setBootstrapState] = useState<BootstrapState | null>(null)
   const [appState, setAppState] = useState<AppState | null>(null)
   const [bootLoading, setBootLoading] = useState(true)
-  const [stateLoading, setStateLoading] = useState(true)
   const [stateError, setStateError] = useState<string | null>(null)
   const [cachedStateNeedsRefresh, setCachedStateNeedsRefresh] = useState(false)
   const [authBusy, setAuthBusy] = useState(false)
@@ -1951,13 +1936,11 @@ function App() {
 
   useEffect(() => {
     if (offlineMode) {
-      setStateLoading(false)
       setCachedStateNeedsRefresh(false)
       return
     }
 
     if (!bootstrapState?.user) {
-      setStateLoading(false)
       setCachedStateNeedsRefresh(false)
       return
     }
@@ -1970,7 +1953,6 @@ function App() {
 
     const loadState = async () => {
       try {
-        setStateLoading(true)
         const nextState = await api.getState()
 
         if (!active) {
@@ -1990,10 +1972,6 @@ function App() {
         }
 
         setStateError(error instanceof Error ? error.message : text.authErrorFallback)
-      } finally {
-        if (active) {
-          setStateLoading(false)
-        }
       }
     }
 
@@ -2644,7 +2622,6 @@ function App() {
       const nextState =
         authMode === 'signup' ? await api.signup(payload) : await api.login(payload)
 
-      setStateLoading(false)
       applyState(nextState)
       startTransition(() => {
         setCurrentView('bookmarks')
@@ -2676,7 +2653,6 @@ function App() {
     setReaderResumeVariantId(null)
     setReaderResumePosition(null)
     setReaderProgress(null)
-    setStateLoading(false)
     setCurrentView('bookmarks')
   }
 
@@ -5927,60 +5903,43 @@ function App() {
   }
 
   if ((bootLoading || (authenticated && !appState)) && !appState) {
-    const loadingCopy =
-      authenticated && stateLoading
-        ? 'Restoring your session and loading your library.'
-        : stateError || 'Preparing the real backend-backed workspace.'
-
     return (
-      <div className="auth-shell">
-        <section className="auth-showcase">
-          <div className="section-kicker">{text.demoTag}</div>
-          <h1>{text.loading}</h1>
-          <p>{loadingCopy}</p>
-        </section>
+      <div className="auth-shell auth-shell--loading">
+        <main aria-live="polite" className="auth-panel auth-panel--loading">
+          <div className="auth-panel__brand">
+            <span aria-hidden="true" className="auth-panel__mark">O</span>
+            <div>
+              <p className="section-kicker">{text.privateLibrary}</p>
+              <h1>{text.brandName}</h1>
+            </div>
+          </div>
+          <p>{stateError || text.loading}</p>
+        </main>
       </div>
     )
   }
 
   if (!authenticated) {
-    const authSeriesPreview = visibleLibrary.slice(0, 4)
-
     return (
       <div className="auth-shell">
-        <section className="auth-showcase">
-          <div className="section-kicker">{text.authEyebrow}</div>
-          <h1>{text.authTitle}</h1>
-          <p>{text.authBody}</p>
+        <main aria-labelledby="auth-title" className="auth-panel">
+          <header className="auth-panel__header">
+            <div className="auth-panel__brand">
+              <span aria-hidden="true" className="auth-panel__mark">O</span>
+              <div>
+                <p className="section-kicker">{text.privateLibrary}</p>
+                <h1 id="auth-title">{text.brandName}</h1>
+              </div>
+            </div>
+            <p className="auth-panel__intro">{text.authPrompt}</p>
+          </header>
 
-          <div className="auth-feature-grid">
-            <article className="auth-feature">
-              <strong>{text.featureBookmarks}</strong>
-              <span>
-                {text.nav.bookmarks}, {text.nav.manga}, {text.nav.novels}, {text.nav.books}, {text.nav.magazines}
-              </span>
-            </article>
-            <article className="auth-feature">
-              <strong>{text.featurePlayer}</strong>
-              <span>Series overview, entries, comments, then immersive reader</span>
-            </article>
-            <article className="auth-feature">
-              <strong>{text.featureAdmin}</strong>
-              <span>Mounted roots, folder browsing, incremental scanning, metadata queue</span>
-            </article>
-          </div>
-
-          <div className="auth-poster-row">
-            {authSeriesPreview.map((series) => (
-              <div key={series.id}>{renderPoster(series, true, false)}</div>
-            ))}
-          </div>
-        </section>
-
-        <section className="auth-panel">
-          <div className="auth-panel__top">
-            <span className="section-kicker">{text.demoTag}</span>
-            <div className="segmented-control">
+          {bootstrapState?.openSignup && (
+            <div
+              aria-label={text.accountSettings}
+              className="segmented-control auth-panel__mode"
+              role="group"
+            >
               <button
                 className={authMode === 'login' ? 'is-active' : ''}
                 onClick={() => setAuthMode('login')}
@@ -5996,7 +5955,7 @@ function App() {
                 {text.createAccount}
               </button>
             </div>
-          </div>
+          )}
 
           <form className="auth-form" onSubmit={handleAuth}>
             <label>
@@ -6025,15 +5984,12 @@ function App() {
             {stateError && <p className="auth-error">{stateError}</p>}
 
             <button className="primary-button primary-button--wide" disabled={authBusy} type="submit">
-              {text.authAction}
+              {authMode === 'signup' ? text.createAccount : text.signIn}
             </button>
           </form>
 
           <div className="auth-panel__footer">
-            <span className="chip chip--accent">
-              {text.adminBootstrap}: {bootstrapState?.bootstrapAdmin || 'admin'}
-            </span>
-            <div className="language-toggle">
+            <div aria-label={text.language} className="language-toggle" role="group">
               <button
                 className={language === 'en' ? 'is-active' : ''}
                 onClick={() => setLanguage('en')}
@@ -6050,7 +6006,7 @@ function App() {
               </button>
             </div>
           </div>
-        </section>
+        </main>
       </div>
     )
   }
