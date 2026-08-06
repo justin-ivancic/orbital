@@ -98,12 +98,15 @@ import {
   appRoutePath,
   categoryForRoute,
   isProtectedRoute,
+  isReaderRoute,
   isSeriesRoute,
   parseAppRoute,
   readerBeginningLocation,
   readerContentSessionKey,
   routeForLocation,
   routeView,
+  safeInternalDestination,
+  shouldReplaceReaderNavigation,
   type AppRoute,
   type LibraryRouteCategory,
 } from './routing'
@@ -170,6 +173,8 @@ type RouteNavigationOptions = {
 
 type OrbitalHistoryState = {
   orbitalIndex?: number
+  orbitalReaderReturnIndex?: number
+  orbitalReaderReturnPath?: string
   orbitalScroll?: [number, number]
 }
 
@@ -1825,12 +1830,14 @@ function App() {
         return
       }
 
+      const currentRouteAtNavigation = routeForLocation()
+      const currentHistoryState = historyState()
       const currentIndex = historyIndexRef.current
       const currentScroll: [number, number] = [window.scrollX, window.scrollY]
       routeScrollPositionsRef.current.set(currentIndex, currentScroll)
       window.history.replaceState(
         {
-          ...historyState(),
+          ...currentHistoryState,
           orbitalIndex: currentIndex,
           orbitalScroll: currentScroll,
         } satisfies OrbitalHistoryState,
@@ -1838,13 +1845,24 @@ function App() {
         currentPath,
       )
 
-      const replace = Boolean(options.replace)
+      const replace = Boolean(options.replace) ||
+        shouldReplaceReaderNavigation(currentRouteAtNavigation, nextRoute)
       const nextIndex = replace ? currentIndex : currentIndex + 1
       const nextScroll: [number, number] = options.preserveScroll ? currentScroll : [0, 0]
       const nextHistoryState: OrbitalHistoryState = {
-        ...historyState(),
+        ...currentHistoryState,
         orbitalIndex: nextIndex,
         orbitalScroll: nextScroll,
+      }
+
+      if (isReaderRoute(nextRoute)) {
+        if (!isReaderRoute(currentRouteAtNavigation)) {
+          nextHistoryState.orbitalReaderReturnIndex = currentIndex
+          nextHistoryState.orbitalReaderReturnPath = currentPath
+        }
+      } else {
+        delete nextHistoryState.orbitalReaderReturnIndex
+        delete nextHistoryState.orbitalReaderReturnPath
       }
 
       if (replace) {
@@ -3979,9 +3997,29 @@ function App() {
   const handleReaderBack = async () => {
     await persistCurrentReaderPosition(false)
 
-    if (historyIndexRef.current > 0) {
-      window.history.back()
-      return
+    const currentHistoryState = historyState()
+    const returnPath = safeInternalDestination(currentHistoryState.orbitalReaderReturnPath)
+
+    if (returnPath) {
+      const returnUrl = new URL(returnPath, window.location.origin)
+      const returnRoute = parseAppRoute(returnUrl)
+
+      if (!isReaderRoute(returnRoute)) {
+        const returnIndex = currentHistoryState.orbitalReaderReturnIndex
+
+        if (
+          Number.isSafeInteger(returnIndex) &&
+          returnIndex != null &&
+          returnIndex >= 0 &&
+          returnIndex < historyIndexRef.current
+        ) {
+          window.history.go(returnIndex - historyIndexRef.current)
+          return
+        }
+
+        navigateRoute(returnRoute, { replace: true })
+        return
+      }
     }
 
     const fallbackRoute: AppRoute =

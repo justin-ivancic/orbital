@@ -6,6 +6,7 @@ import {
   readerBeginningLocation,
   readerContentSessionKey,
   safeInternalDestination,
+  shouldReplaceReaderNavigation,
   type AppRoute,
 } from '../src/routing'
 
@@ -113,6 +114,32 @@ test('starts adjacent reflowable chapters at the beginning without reusing saved
   assert.deepEqual(readerBeginningLocation('html'), { page: null, percent: 0 })
   assert.deepEqual(readerBeginningLocation('epub'), { page: null, percent: 0 })
   assert.deepEqual(readerBeginningLocation('pdf'), { page: 1, percent: null })
+})
+
+test('keeps adjacent chapters inside one browser history entry', () => {
+  const firstChapter: AppRoute = {
+    name: 'reader',
+    category: 'novels',
+    seriesId: 'novel-a82f38cc',
+    entryId: 'chapter-1',
+    page: null,
+    percent: 0,
+    variantId: null,
+  }
+  const secondChapter: AppRoute = {
+    ...firstChapter,
+    entryId: 'chapter-2',
+  }
+
+  assert.equal(shouldReplaceReaderNavigation(firstChapter, secondChapter), true)
+  assert.equal(
+    shouldReplaceReaderNavigation(firstChapter, { name: 'bookmarks', scope: 'all' }),
+    false,
+  )
+  assert.equal(
+    shouldReplaceReaderNavigation({ name: 'bookmarks', scope: 'all' }, firstChapter),
+    false,
+  )
 })
 
 test('bounds malformed reader and filter state to safe defaults', () => {

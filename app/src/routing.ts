@@ -374,6 +374,15 @@ export const routeView = (route: AppRoute): ViewId => {
 export const isProtectedRoute = (route: AppRoute) =>
   !['root', 'login', 'signup'].includes(route.name)
 
+export const isReaderRoute = (
+  route: AppRoute,
+): route is Extract<AppRoute, { name: 'reader' | 'offlineReader' }> =>
+  route.name === 'reader' || route.name === 'offlineReader'
+
+export const shouldReplaceReaderNavigation = (currentRoute: AppRoute, nextRoute: AppRoute) =>
+  // Chapters and reader-position updates belong to one session, so Back exits the reader.
+  isReaderRoute(currentRoute) && isReaderRoute(nextRoute)
+
 export const isSeriesRoute = (
   route: AppRoute,
 ): route is Extract<AppRoute, { name: 'series' | 'reader' }> =>
