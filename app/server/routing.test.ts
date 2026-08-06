@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   appRoutePath,
   parseAppRoute,
+  readerBeginningLocation,
   readerContentSessionKey,
   safeInternalDestination,
   type AppRoute,
@@ -106,6 +107,12 @@ test('keeps reader content mounted when only the URL position changes', () => {
     readerContentSessionKey(readerRoute, 'alternate-variant'),
   )
   assert.equal(readerContentSessionKey({ name: 'bookmarks', scope: 'all' }, 'pdf-variant'), null)
+})
+
+test('starts adjacent reflowable chapters at the beginning without reusing saved progress', () => {
+  assert.deepEqual(readerBeginningLocation('html'), { page: null, percent: 0 })
+  assert.deepEqual(readerBeginningLocation('epub'), { page: null, percent: 0 })
+  assert.deepEqual(readerBeginningLocation('pdf'), { page: 1, percent: null })
 })
 
 test('bounds malformed reader and filter state to safe defaults', () => {

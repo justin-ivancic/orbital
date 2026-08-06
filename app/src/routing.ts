@@ -1,4 +1,4 @@
-import type { CategoryId, ScopeId, SeriesTabId, ViewId } from './appTypes'
+import type { CategoryId, EntryFormat, ScopeId, SeriesTabId, ViewId } from './appTypes'
 
 export const libraryRouteCategories = ['manga', 'novels', 'books', 'magazines'] as const
 
@@ -55,6 +55,14 @@ export type LocationLike = {
 const categorySet = new Set<string>(libraryRouteCategories)
 const scopeSet = new Set<string>(['all', ...libraryRouteCategories])
 const tabSet = new Set<string>(['overview', 'entries', 'comments'])
+const percentReaderFormats = new Set<EntryFormat>(['epub', 'html', 'md', 'txt'])
+
+export const readerBeginningLocation = (
+  format: EntryFormat | null | undefined,
+): Pick<ReaderLocation, 'page' | 'percent'> =>
+  format && percentReaderFormats.has(format)
+    ? { page: null, percent: 0 }
+    : { page: 1, percent: null }
 
 const decodeSegment = (segment: string) => {
   try {

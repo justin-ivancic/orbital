@@ -2876,12 +2876,34 @@ export function HtmlChapterReader({
       <div className="html-reader__toolbar">
         <div>
           <strong>Responsive HTML reader</strong>
-          <p>Scroll the chapter directly here and bookmark your reading position for a clean mobile resume.</p>
+          <p>
+            {settings.layout === 'paged'
+              ? 'Turn pages with the edge controls, arrow keys, or a swipe.'
+              : 'Scroll the chapter directly or switch to Pages for a book-like layout.'}
+          </p>
         </div>
         <div className="html-reader__toolbar-actions">
           {!loading && !error && (
             <span className="html-reader__progress-label">{textProgressLabel}</span>
           )}
+          <div aria-label="Chapter layout" className="html-reader__layout-toggle" role="group">
+            <button
+              aria-pressed={settings.layout === 'paged'}
+              className={settings.layout === 'paged' ? 'is-active' : ''}
+              onClick={() => onSettingsChange({ ...settings, layout: 'paged' })}
+              type="button"
+            >
+              Pages
+            </button>
+            <button
+              aria-pressed={settings.layout === 'continuous'}
+              className={settings.layout === 'continuous' ? 'is-active' : ''}
+              onClick={() => onSettingsChange({ ...settings, layout: 'continuous' })}
+              type="button"
+            >
+              Scroll
+            </button>
+          </div>
           <ReaderSettingsControl
             fileUrl={fileUrl}
             format="html"

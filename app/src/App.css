@@ -7237,6 +7237,34 @@ button[aria-label] {
   --reader-font-scale: 1;
 }
 
+.html-reader__layout-toggle {
+  flex: 0 0 auto;
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+  background: var(--paper);
+}
+
+.html-reader__layout-toggle button {
+  min-width: 64px;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--ink);
+  background: transparent;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.html-reader__layout-toggle button.is-active {
+  color: var(--paper);
+  background: var(--ink);
+}
+
 .html-reader__content p,
 .html-reader__content li,
 .html-reader__content span,
@@ -7251,7 +7279,8 @@ button[aria-label] {
   scrollbar-width: none;
 }
 
-.html-reader__content--paged {
+.html-reader__content--paged,
+.app-shell--reader .html-reader__content--paged {
   --reader-page-inline: clamp(24px, 7vw, 86px);
   width: 100%;
   max-width: none;
@@ -7346,8 +7375,15 @@ button[aria-label] {
       calc(8px + env(safe-area-inset-bottom));
   }
 
-  .html-reader__content--paged {
+  .html-reader__content--paged,
+  .app-shell--reader .html-reader__content--paged {
     --reader-page-inline: clamp(18px, 7vw, 32px);
+  }
+
+  .html-reader__layout-toggle button {
+    min-width: 58px;
+    min-height: 38px;
+    padding-inline: 8px;
   }
 }
 

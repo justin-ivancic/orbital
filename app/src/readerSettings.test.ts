@@ -14,6 +14,8 @@ test('uses medium-aware defaults without tying behavior to a file extension alon
   assert.equal(defaultReaderSettings('books', 'pdf').style, 'book')
   assert.equal(defaultReaderSettings('novels', 'epub').style, 'text')
   assert.equal(defaultReaderSettings('books', 'epub').layout, 'paged')
+  assert.equal(defaultReaderSettings('novels', 'html').layout, 'paged')
+  assert.equal(defaultReaderSettings('novels', 'txt').layout, 'continuous')
 })
 
 test('exposes only reading styles that the renderer can honor', () => {
@@ -47,7 +49,8 @@ test('forces webtoons and reflowable text into compatible rendering settings', (
 
   assert.equal(webtoon.layout, 'continuous')
   assert.equal(webtoon.viewMode, 'single')
-  assert.equal(text.style, 'text')
+  assert.equal(text.style, 'book')
+  assert.equal(text.layout, 'paged')
   assert.equal(text.viewMode, 'single')
 })
 

@@ -107,6 +107,10 @@ export const defaultReaderSettings = (
   category: CategoryId,
   format: EntryFormat,
 ): ReaderSettings => {
+  if (category === 'novels' && format === 'html') {
+    return readerSettingsForStyle('book')
+  }
+
   if (textFormats.has(format)) {
     return readerSettingsForStyle(category === 'books' || category === 'magazines' ? 'book' : 'text')
   }

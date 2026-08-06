@@ -100,6 +100,7 @@ import {
   isProtectedRoute,
   isSeriesRoute,
   parseAppRoute,
+  readerBeginningLocation,
   readerContentSessionKey,
   routeForLocation,
   routeView,
@@ -177,6 +178,11 @@ type RouteTransition = {
   kind: 'initial' | 'push' | 'replace' | 'pop'
   preserveScroll: boolean
   restoreScroll: [number, number] | null
+}
+
+type ReaderProgressState = {
+  progress: ReaderProgress
+  variantId: string
 }
 
 type RouteLinkProps = {
@@ -1750,7 +1756,8 @@ function App() {
   const [discoverViewMode, setDiscoverViewMode] = useState<'grid' | 'list'>('grid')
   const [seriesCache, setSeriesCache] = useState<Record<string, SeriesDetail>>({})
   const [seriesError, setSeriesError] = useState<string | null>(null)
-  const [readerProgress, setReaderProgress] = useState<ReaderProgress | null>(null)
+  const [readerProgressState, setReaderProgressState] =
+    useState<ReaderProgressState | null>(null)
   const [readerPreferences, setReaderPreferences] =
     useState<Record<string, ReaderSettings>>({})
   const [readerResumePosition, setReaderResumePosition] =
@@ -2054,6 +2061,10 @@ function App() {
     currentEntry?.variants.find((variant) => variant.id === currentEntry.preferredVariantId) ??
     currentEntry?.variants[0] ??
     null
+  const readerProgress =
+    currentVariant && readerProgressState?.variantId === currentVariant.id
+      ? readerProgressState.progress
+      : null
   const availableAnimeSeasons = getAvailableAnimeSeasons(selectedSeries)
   const visibleSeriesEntries =
     selectedSeries?.category === 'anime' && availableAnimeSeasons.length > 1 && selectedSeasonNumber != null
@@ -3251,8 +3262,13 @@ function App() {
       return
     }
 
-    setReaderProgress(savedPositionToReaderProgress(currentSavedPosition))
-  }, [currentSavedPosition, currentView])
+    const progress = savedPositionToReaderProgress(currentSavedPosition)
+    setReaderProgressState(
+      currentVariant && progress
+        ? { progress, variantId: currentVariant.id }
+        : null,
+    )
+  }, [currentSavedPosition, currentVariant, currentView])
 
   const clearReaderChromeTimer = useCallback(() => {
     if (readerChromeTimerRef.current == null) {
@@ -3293,8 +3309,12 @@ function App() {
 
   useEffect(() => {
     const currentVariantId = currentVariant?.id ?? null
+    const routedEntryId =
+      currentRoute.name === 'reader' || currentRoute.name === 'offlineReader'
+        ? currentRoute.entryId
+        : null
     const resumeKey =
-      currentView === 'reader'
+      currentView === 'reader' && routedEntryId === currentEntry?.id
         ? readerContentSessionKey(currentRoute, currentVariantId)
         : null
 
@@ -3313,12 +3333,14 @@ function App() {
 
     setReaderResumeVariantId(currentVariantId)
     setReaderResumePosition(resumePosition)
-    setReaderProgress(savedPositionToReaderProgress(resumePosition))
+    const progress = savedPositionToReaderProgress(resumePosition)
+    setReaderProgressState(progress ? { progress, variantId: currentVariantId } : null)
     setBookmarkJustSet(false)
     lastAutoSaveKeyRef.current = null
   }, [
     appState?.readingPositions,
     currentRoute,
+    currentEntry?.id,
     currentVariant?.id,
     currentView,
   ])
@@ -3436,7 +3458,7 @@ function App() {
     setSelectedVariantId(null)
     setReaderResumeVariantId(null)
     setReaderResumePosition(null)
-    setReaderProgress(null)
+    setReaderProgressState(null)
     navigateRoute({ name: 'login', next: null }, { replace: true })
   }
 
@@ -3449,7 +3471,7 @@ function App() {
     }
 
     setSeriesCache({})
-    setReaderProgress(null)
+    setReaderProgressState(null)
     setReaderResumeVariantId(null)
     setReaderResumePosition(null)
 
@@ -3644,7 +3666,7 @@ function App() {
       setCurrentCategory(offlineSeries.category)
       setSelectedEntryId(entryToOpen?.id ?? null)
       setSelectedVariantId(entryToOpen?.preferredVariantId ?? null)
-      setReaderProgress(null)
+      setReaderProgressState(null)
       setReaderResumePosition(null)
       setReaderResumeVariantId(entryToOpen?.preferredVariantId ?? null)
       setSearchOpen(false)
@@ -3668,7 +3690,10 @@ function App() {
 
     setReaderResumeVariantId(variantId)
     setReaderResumePosition(resumePosition)
-    setReaderProgress(savedPositionToReaderProgress(resumePosition))
+    const progress = savedPositionToReaderProgress(resumePosition)
+    setReaderProgressState(
+      variantId && progress ? { progress, variantId } : null,
+    )
     setBookmarkJustSet(false)
     lastAutoSaveKeyRef.current = null
   }
@@ -3684,6 +3709,10 @@ function App() {
       selectedSeries.entries.length - 1,
     )
 
+    if (nextIndex === currentIndex) {
+      return
+    }
+
     const nextEntry = selectedSeries.entries[nextIndex]
     const nextVariant =
       nextEntry?.variants.find((variant) => variant.id === nextEntry.preferredVariantId) ??
@@ -3696,14 +3725,15 @@ function App() {
 
     await persistCurrentReaderPosition(false)
 
+    const beginningLocation = readerBeginningLocation(nextVariant?.format)
+
     const nextRoute: AppRoute =
       currentRoute.name === 'offlineReader'
         ? {
             name: 'offlineReader',
             downloadId: currentRoute.downloadId,
             entryId: nextEntry.id,
-            page: null,
-            percent: null,
+            ...beginningLocation,
             variantId: null,
           }
         : {
@@ -3711,8 +3741,7 @@ function App() {
             category: categoryRouteId(selectedSeries.category),
             seriesId: selectedSeries.id,
             entryId: nextEntry.id,
-            page: null,
-            percent: null,
+            ...beginningLocation,
             variantId: null,
           }
 
@@ -3723,7 +3752,14 @@ function App() {
   }
 
   const handleReaderProgressChange = (progress: ReaderProgress) => {
-    setReaderProgress((previousProgress) => {
+    const variantId = currentVariant?.id
+    if (!variantId) {
+      return
+    }
+
+    setReaderProgressState((previousState) => {
+      const previousProgress =
+        previousState?.variantId === variantId ? previousState.progress : null
       if (
         previousProgress?.page === progress.page &&
         previousProgress?.endPage === progress.endPage &&
@@ -3733,10 +3769,10 @@ function App() {
         previousProgress?.progressLabel === progress.progressLabel &&
         previousProgress?.cueLabel === progress.cueLabel
       ) {
-        return previousProgress
+        return previousState
       }
 
-      return progress
+      return { progress, variantId }
     })
   }
 
@@ -6257,7 +6293,11 @@ function App() {
         </section>
 
         <div className="reader-stage">
-          <ReaderErrorBoundary fallback={renderReaderCrashFallback} resetKey={readerResetKey}>
+          <ReaderErrorBoundary
+            fallback={renderReaderCrashFallback}
+            key={readerResetKey}
+            resetKey={readerResetKey}
+          >
             <Suspense fallback={<article className="panel panel--padded">{text.loadingSeries}</article>}>
               {renderReaderPreview()}
             </Suspense>
