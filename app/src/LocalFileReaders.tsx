@@ -45,6 +45,7 @@ import {
   readerSettingsForStyle,
   readingStyleLabels,
 } from './readerSettings'
+import { resolvePagedSwipeAction } from './readerGestures'
 
 const imagePattern = /\.(avif|gif|jpe?g|png|webp)$/i
 const minReaderWidth = 280
@@ -102,6 +103,7 @@ type PdfEmbedProps = {
   fileUrl: string
   title: string
   initialPage?: number
+  onNextEntry?: () => void
   onProgressChange?: (progress: ReaderProgress) => void
   onSettingsChange: (settings: ReaderSettings) => void
   settings: ReaderSettings
@@ -114,6 +116,7 @@ type CbzReaderProps = {
   title: string
   offlinePages?: CbzPage[]
   initialPage?: number
+  onNextEntry?: () => void
   onProgressChange?: (progress: ReaderProgress) => void
   onSettingsChange: (settings: ReaderSettings) => void
   settings: ReaderSettings
@@ -124,6 +127,7 @@ type HtmlChapterReaderProps = {
   fileUrl: string
   title: string
   initialProgress?: number
+  onNextEntry?: () => void
   onProgressChange?: (progress: ReaderProgress) => void
   onSettingsChange: (settings: ReaderSettings) => void
   settings: ReaderSettings
@@ -135,6 +139,7 @@ type TextFileReaderProps = {
   title: string
   format: 'md' | 'txt'
   initialProgress?: number
+  onNextEntry?: () => void
   onProgressChange?: (progress: ReaderProgress) => void
   onSettingsChange: (settings: ReaderSettings) => void
   settings: ReaderSettings
@@ -145,6 +150,7 @@ type EpubReaderProps = {
   fileUrl: string
   title: string
   initialProgress?: number
+  onNextEntry?: () => void
   onProgressChange?: (progress: ReaderProgress) => void
   onSettingsChange: (settings: ReaderSettings) => void
   settings: ReaderSettings
@@ -650,6 +656,7 @@ type PagedReaderSurfaceProps = {
   children: ReactNode
   direction: ReaderDirection
   onNext: () => void
+  onNextEntry?: () => void
   onPrevious: () => void
   swipeEnabled?: boolean
 }
@@ -660,14 +667,17 @@ function PagedReaderSurface({
   children,
   direction,
   onNext,
+  onNextEntry,
   onPrevious,
   swipeEnabled = true,
 }: PagedReaderSurfaceProps) {
   const touchStartRef = useRef<{ x: number; y: number } | null>(null)
-  const leftAction = direction === 'rtl' ? onNext : onPrevious
-  const rightAction = direction === 'rtl' ? onPrevious : onNext
-  const canGoLeft = direction === 'rtl' ? canNext : canPrevious
-  const canGoRight = direction === 'rtl' ? canPrevious : canNext
+  const nextAction = canNext ? onNext : onNextEntry
+  const canAdvance = canNext || Boolean(onNextEntry)
+  const leftAction = direction === 'rtl' ? nextAction : onPrevious
+  const rightAction = direction === 'rtl' ? onPrevious : nextAction
+  const canGoLeft = direction === 'rtl' ? canAdvance : canPrevious
+  const canGoRight = direction === 'rtl' ? canPrevious : canAdvance
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -681,13 +691,13 @@ function PagedReaderSurface({
 
       if (event.key === 'ArrowLeft' && canGoLeft) {
         event.preventDefault()
-        leftAction()
+        leftAction?.()
       } else if ((event.key === 'ArrowRight' || event.key === 'PageDown') && canGoRight) {
         event.preventDefault()
-        rightAction()
+        rightAction?.()
       } else if (event.key === 'PageUp' && canGoLeft) {
         event.preventDefault()
-        leftAction()
+        leftAction?.()
       }
     }
 
@@ -727,16 +737,16 @@ function PagedReaderSurface({
       return
     }
 
-    const deltaX = touch.clientX - start.x
-    const deltaY = touch.clientY - start.y
-    if (Math.abs(deltaX) < 56 || Math.abs(deltaX) <= Math.abs(deltaY) * 1.25) {
-      return
-    }
+    const swipeAction = resolvePagedSwipeAction(
+      touch.clientX - start.x,
+      touch.clientY - start.y,
+      direction,
+    )
 
-    if (deltaX > 0 && canGoLeft) {
-      leftAction()
-    } else if (deltaX < 0 && canGoRight) {
-      rightAction()
+    if (swipeAction === 'next') {
+      nextAction?.()
+    } else if (swipeAction === 'previous' && canPrevious) {
+      onPrevious()
     }
   }
 
@@ -1372,6 +1382,7 @@ export function PdfEmbed({
   fileUrl,
   title,
   initialPage = 1,
+  onNextEntry,
   onProgressChange,
   onSettingsChange,
   settings,
@@ -1853,6 +1864,7 @@ export function PdfEmbed({
             canPrevious={activePdfGroupIndex > 0}
             direction={settings.direction}
             onNext={() => movePdfGroup(1)}
+            onNextEntry={onNextEntry}
             onPrevious={() => movePdfGroup(-1)}
             swipeEnabled={settings.fitMode !== 'manual'}
           >
@@ -1953,6 +1965,7 @@ export function EpubReader({
   fileUrl,
   title,
   initialProgress = 0,
+  onNextEntry,
   onProgressChange,
   onSettingsChange,
   settings,
@@ -2177,6 +2190,7 @@ export function EpubReader({
               onNext={() => {
                 void renditionRef.current?.next()
               }}
+              onNextEntry={onNextEntry}
               onPrevious={() => {
                 void renditionRef.current?.prev()
               }}
@@ -2198,6 +2212,7 @@ export function CbzReader({
   title,
   offlinePages,
   initialPage = 1,
+  onNextEntry,
   onProgressChange,
   onSettingsChange,
   settings,
@@ -2624,6 +2639,7 @@ export function CbzReader({
             canPrevious={activeGroupIndex > 0}
             direction={settings.direction}
             onNext={() => moveGroup(1)}
+            onNextEntry={onNextEntry}
             onPrevious={() => moveGroup(-1)}
             swipeEnabled={settings.fitMode !== 'manual'}
           >
@@ -2649,6 +2665,7 @@ export function HtmlChapterReader({
   fileUrl,
   title,
   initialProgress = 0,
+  onNextEntry,
   onProgressChange,
   onSettingsChange,
   settings,
@@ -2923,11 +2940,16 @@ export function HtmlChapterReader({
           canPrevious={visibleTextPage > 1}
           direction="ltr"
           onNext={() => moveTextPage(1)}
+          onNextEntry={onNextEntry}
           onPrevious={() => moveTextPage(-1)}
         >
           <div className="html-reader__viewport html-reader__viewport--paged" ref={viewportRef}>
             <article
-              className="html-reader__content html-reader__content--paged"
+              className={`html-reader__content html-reader__content--paged${
+                textPageCount > 1 && visibleTextPage === textPageCount
+                  ? ' html-reader__content--last-page'
+                  : ''
+              }`}
               style={{ '--reader-font-scale': settings.fontSize / 100 } as CSSProperties}
             >
               <div dangerouslySetInnerHTML={{ __html: chapterHtml }} />
@@ -2955,6 +2977,7 @@ export function TextFileReader({
   title,
   format,
   initialProgress = 0,
+  onNextEntry,
   onProgressChange,
   onSettingsChange,
   settings,
@@ -3198,11 +3221,16 @@ export function TextFileReader({
           canPrevious={visibleTextPage > 1}
           direction="ltr"
           onNext={() => moveTextPage(1)}
+          onNextEntry={onNextEntry}
           onPrevious={() => moveTextPage(-1)}
         >
           <div className="html-reader__viewport html-reader__viewport--paged" ref={viewportRef}>
             <article
-              className="html-reader__content html-reader__content--paged"
+              className={`html-reader__content html-reader__content--paged${
+                textPageCount > 1 && visibleTextPage === textPageCount
+                  ? ' html-reader__content--last-page'
+                  : ''
+              }`}
               style={{ '--reader-font-scale': settings.fontSize / 100 } as CSSProperties}
             >
               <div dangerouslySetInnerHTML={{ __html: documentHtml }} />

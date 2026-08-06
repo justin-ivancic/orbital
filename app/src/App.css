@@ -6998,6 +6998,15 @@ button[aria-label] {
   opacity: 1;
 }
 
+.reader-page-turn:focus-visible {
+  outline: 0;
+}
+
+.reader-page-turn:focus-visible svg {
+  outline: 3px solid var(--ink);
+  outline-offset: 3px;
+}
+
 .reader-page-turn:disabled {
   opacity: 0;
   pointer-events: none;
@@ -7298,6 +7307,10 @@ button[aria-label] {
 .html-reader__content--paged > div {
   width: min(100%, 76ch);
   margin: 0 auto;
+}
+
+.html-reader__content--last-page > div {
+  transform: translateX(calc(var(--reader-page-inline) * -1));
 }
 
 @media (max-width: 720px) {

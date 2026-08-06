@@ -6120,6 +6120,11 @@ function App() {
       return <article className="panel panel--padded">{text.loadingSeries}</article>
     }
 
+    const onNextEntry =
+      selectedSeries && selectedEntryIndex < selectedSeries.entries.length - 1
+        ? () => void moveEntry(1)
+        : undefined
+
     if (selectedSeriesSummary.category === 'anime') {
       return (
         <div className="reader-layout">
@@ -6136,6 +6141,7 @@ function App() {
             fileUrl={currentVariant.fileUrl}
             offlinePages={currentOfflinePages ?? undefined}
             initialPage={currentReaderStartPosition?.page ?? 1}
+            onNextEntry={onNextEntry}
             onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
             settings={currentReaderSettings}
@@ -6153,6 +6159,7 @@ function App() {
             fileUrl={currentVariant.fileUrl}
             format={currentVariant.format}
             initialProgress={currentReaderStartPosition?.page ?? 0}
+            onNextEntry={onNextEntry}
             onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
             settings={currentReaderSettings}
@@ -6169,6 +6176,7 @@ function App() {
           <PdfEmbed
             fileUrl={currentVariant.fileUrl}
             initialPage={currentReaderStartPosition?.page ?? 1}
+            onNextEntry={onNextEntry}
             onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
             settings={currentReaderSettings}
@@ -6185,6 +6193,7 @@ function App() {
           <HtmlChapterReader
             fileUrl={currentVariant.fileUrl}
             initialProgress={currentReaderStartPosition?.page ?? 0}
+            onNextEntry={onNextEntry}
             onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
             settings={currentReaderSettings}
@@ -6201,6 +6210,7 @@ function App() {
           <EpubReader
             fileUrl={currentVariant.fileUrl}
             initialProgress={currentReaderStartPosition?.page ?? 0}
+            onNextEntry={onNextEntry}
             onSettingsChange={handleReaderSettingsChange}
             onProgressChange={handleReaderProgressChange}
             settings={currentReaderSettings}
