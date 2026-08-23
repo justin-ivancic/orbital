@@ -701,41 +701,156 @@ const readOfflineResourceForDownload = async (
   const db = await openOfflineDb()
 
   try {
-    const records = await readAllFromIndex<OfflineResourceRecord>(
-      db,
-      resourcesStoreName,
-      'downloadId',
-      downloadId,
+    const transaction = db.transaction(resourcesStoreName, 'readonly')
+    const done = transactionDone(transaction)
+    const record = await toPromise<OfflineResourceRecord | undefined>(
+      transaction.objectStore(resourcesStoreName).get(
+        getOfflineResourceStorageKey(downloadId, resourceKey),
+      ),
     )
-    return records.find((record) => record.key === resourceKey) ?? null
+    await done
+    return record ?? null
   } finally {
     db.close()
   }
 }
 
-export const copyOfflineResource = async (
+const isReusableOfflineResource = (
+  source: OfflineResourceRecord | null,
+  ownerUserId: string,
+  resource: OfflineDownloadResource,
+) => Boolean(
+  source &&
+  source.blob instanceof Blob &&
+  source.ownerUserId === ownerUserId &&
+  source.resource.kind === resource.kind &&
+  source.resource.version === resource.version &&
+  source.size === source.blob.size &&
+  (resource.size <= 0 || source.size === resource.size),
+)
+
+export const copyOfflineResources = async (
   sourceDownloadId: string,
   targetDownloadId: string,
   ownerUserId: string,
-  resource: OfflineDownloadResource,
-) => {
+  resources: OfflineDownloadResource[],
+): Promise<OfflineStoredResource[]> => {
   if (sourceDownloadId === targetDownloadId) {
-    return resource
+    return resources.map((resource) => ({ resource, size: resource.size }))
   }
 
-  const source = await readOfflineResourceForDownload(sourceDownloadId, resource.key)
-
-  if (
-    !source ||
-    source.ownerUserId !== ownerUserId ||
-    source.resource.kind !== resource.kind ||
-    source.resource.version !== resource.version ||
-    (resource.size > 0 && source.size !== resource.size)
-  ) {
-    throw new Error(`Offline resource ${resource.key} is not reusable.`)
+  if (!resources.length) {
+    return []
   }
 
-  return putOfflineResource(targetDownloadId, ownerUserId, resource, source.blob)
+  if (nativeStorageEnabled) {
+    const copiedResources: OfflineStoredResource[] = []
+
+    for (const resource of resources) {
+      const source = await readOfflineResourceForDownload(sourceDownloadId, resource.key)
+
+      if (!source || !isReusableOfflineResource(source, ownerUserId, resource)) {
+        continue
+      }
+
+      const localResource = await putOfflineResource(
+        targetDownloadId,
+        ownerUserId,
+        resource,
+        source.blob,
+      )
+      copiedResources.push({
+        resource: localResource,
+        size: source.size,
+      })
+    }
+
+    return copiedResources
+  }
+
+  const db = await openOfflineDb()
+
+  try {
+    const transaction = db.transaction(resourcesStoreName, 'readwrite')
+    const done = transactionDone(transaction)
+    const store = transaction.objectStore(resourcesStoreName)
+    const copiedResources: OfflineStoredResource[] = []
+    let remainingReads = resources.length
+    let copyError: unknown = null
+
+    const readsComplete = new Promise<void>((resolve, reject) => {
+      const fail = (error: unknown) => {
+        if (copyError) {
+          return
+        }
+
+        copyError = error
+        reject(error)
+      }
+
+      resources.forEach((resource) => {
+        const request = store.get(
+          getOfflineResourceStorageKey(sourceDownloadId, resource.key),
+        )
+
+        request.onsuccess = () => {
+          if (copyError) {
+            return
+          }
+
+          const source = (request.result as OfflineResourceRecord | undefined) ?? null
+
+          if (source && isReusableOfflineResource(source, ownerUserId, resource)) {
+            try {
+              store.put({
+                ...source,
+                storageKey: getOfflineResourceStorageKey(targetDownloadId, resource.key),
+                key: resource.key,
+                downloadId: targetDownloadId,
+                ownerUserId,
+                resource,
+                storedAt: new Date().toISOString(),
+              } satisfies OfflineResourceRecord)
+              copiedResources.push({
+                resource,
+                size: source.size,
+              })
+            } catch (error) {
+              fail(error)
+              return
+            }
+          }
+
+          remainingReads -= 1
+
+          if (remainingReads === 0) {
+            resolve()
+          }
+        }
+
+        request.onerror = () => {
+          fail(request.error || new Error('Could not read offline resource.'))
+        }
+      })
+    })
+
+    try {
+      await readsComplete
+      await done
+    } catch (error) {
+      try {
+        transaction.abort()
+      } catch {
+        // The transaction may already have aborted after a failed request.
+      }
+      await done.catch(() => undefined)
+      throw error
+    }
+
+    return copiedResources
+  } finally {
+    db.close()
+  }
 }
 
 export const getOfflineResource = async (resourceKey: string) => {

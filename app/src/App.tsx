@@ -85,7 +85,7 @@ import {
 } from './readerSettings'
 import {
   createOfflineDownloadRecord,
-  copyOfflineResource,
+  copyOfflineResources,
   deleteAllOfflineDownloadsForUser,
   deleteOfflineDownload,
   getOfflineDownload,
@@ -590,6 +590,8 @@ const ui = {
     downloadsPaused: 'Paused',
     downloadsAll: 'All downloads',
     downloadForOffline: 'Download',
+    preparingOfflineDownload: 'Preparing update...',
+    preparingOfflineUpdate: (current: number, total: number) => `Preparing update ${current} / ${total}`,
     downloadSeries: 'Download series',
     downloadProgress: (current: number, total: number) => `Downloading ${current} / ${total}`,
     downloadEntry: 'Download chapter',
@@ -873,6 +875,8 @@ const ui = {
     downloadsPaused: 'Pausiert',
     downloadsAll: 'Alle Downloads',
     downloadForOffline: 'Herunterladen',
+    preparingOfflineDownload: 'Update wird vorbereitet...',
+    preparingOfflineUpdate: (current: number, total: number) => `Update wird vorbereitet ${current} / ${total}`,
     downloadSeries: 'Serie herunterladen',
     downloadProgress: (current: number, total: number) => `Wird geladen ${current} / ${total}`,
     downloadEntry: 'Kapitel herunterladen',
@@ -3788,7 +3792,10 @@ function App() {
         (download) => download.id !== manifest.manifestId,
       )
 
-      let storedResources = await getOfflineResourceInventory(manifest.manifestId)
+      if (replacementRecords.length) {
+        setOfflineBusy(busyKey, text.preparingOfflineDownload)
+      }
+      const storedResources = await getOfflineResourceInventory(manifest.manifestId)
       const previousPackages = await Promise.all(
         replacementRecords.map(async (download) => ({
           downloadId: download.id,
@@ -3801,27 +3808,50 @@ function App() {
         storedResources,
       )
 
+      const reusableBySource = new Map<string, typeof reusableResources>()
+
       for (const reusable of reusableResources) {
+        const sourceTransfers = reusableBySource.get(reusable.sourceDownloadId) ?? []
+        sourceTransfers.push(reusable)
+        reusableBySource.set(reusable.sourceDownloadId, sourceTransfers)
+      }
+
+      let copiedResourceCount = 0
+
+      for (const [sourceDownloadId, sourceTransfers] of reusableBySource) {
         if (controller.signal.aborted) {
           throw new OfflineDownloadCancelledError()
         }
 
+        let copiedResources: typeof storedResources = []
+
         try {
-          const localResource = await copyOfflineResource(
-            reusable.sourceDownloadId,
+          copiedResources = await copyOfflineResources(
+            sourceDownloadId,
             manifest.manifestId,
             sessionUser.id,
-            reusable.resource,
+            sourceTransfers.map((transfer) => transfer.resource),
           )
-          storedResources = [
-            ...storedResources,
-            {
-              resource: localResource,
-              size: reusable.stored.size,
-            },
-          ]
         } catch {
-          // If a previous local resource cannot be copied, the normal download path repairs it.
+          // If local reuse fails, the normal download path repairs the resources.
+        }
+        const copiedByKey = new Map(
+          copiedResources.map((copied) => [copied.resource.key, copied]),
+        )
+
+        for (const reusable of sourceTransfers) {
+          const copied = copiedByKey.get(reusable.resource.key)
+
+          if (!copied) {
+            continue
+          }
+
+          storedResources.push(copied)
+          copiedResourceCount += 1
+          setOfflineBusy(
+            busyKey,
+            text.preparingOfflineUpdate(copiedResourceCount, reusableResources.length),
+          )
         }
       }
 

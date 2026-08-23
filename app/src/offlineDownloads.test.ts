@@ -215,6 +215,34 @@ test('incremental series updates do not copy resources already present in the re
   assert.deepEqual(transfers, [])
 })
 
+test('incremental series updates select each reusable resource only once across packages', () => {
+  const first = makeResource('entry-1', 'v1', 100)
+  const second = makeResource('entry-2', 'v1', 200)
+  const manifest = makeManifest([first, second])
+
+  const transfers = planReusableOfflineResources(manifest, [
+    {
+      downloadId: 'pkg_newer_previous',
+      resources: [{ resource: { ...first, url: 'file:///first.pdf' }, size: 100 }],
+    },
+    {
+      downloadId: 'pkg_older_previous',
+      resources: [
+        { resource: { ...first, url: 'file:///duplicate.pdf' }, size: 100 },
+        { resource: { ...second, url: 'file:///second.pdf' }, size: 200 },
+      ],
+    },
+  ])
+
+  assert.deepEqual(
+    transfers.map((transfer) => [transfer.sourceDownloadId, transfer.resource.key]),
+    [
+      ['pkg_newer_previous', first.key],
+      ['pkg_older_previous', second.key],
+    ],
+  )
+})
+
 test('offline retry classification distinguishes network failures from authorization failures', () => {
   assert.equal(isRetryableOfflineDownloadError(new TypeError('Failed to fetch')), true)
   assert.equal(isRetryableOfflineDownloadError({ status: 503 }), true)
