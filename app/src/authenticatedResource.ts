@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api'
+import { loadCachedImage } from './imageCache'
 import { isNativeApp, resolveApiUrl } from './platform'
 
 type AuthenticatedResourceState = {
@@ -27,6 +28,11 @@ const fetchLocalResource = (url: string) =>
     credentials: 'same-origin',
   })
 
+export type AuthenticatedResourceOptions = {
+  cacheMode?: 'image'
+  ownerUserId?: string | null
+}
+
 export const fetchAuthenticatedResource = async (input: string) => {
   const resolvedUrl = resolveApiUrl(input)
 
@@ -37,10 +43,18 @@ export const fetchAuthenticatedResource = async (input: string) => {
   return api.fetchResource(input)
 }
 
-export const useAuthenticatedResourceUrl = (input: string | null) => {
+export const useAuthenticatedResourceUrl = (
+  input: string | null,
+  options: AuthenticatedResourceOptions = {},
+) => {
   const resolvedInput = input ? resolveApiUrl(input) : null
   const needsAuthentication = Boolean(
     resolvedInput && isNativeApp && !isLocalWebViewResource(resolvedInput),
+  )
+  const shouldCacheImage = Boolean(
+    needsAuthentication &&
+      options.cacheMode === 'image' &&
+      options.ownerUserId,
   )
   const [state, setState] = useState<AuthenticatedResourceState>(() => ({
     url: needsAuthentication ? null : resolvedInput,
@@ -64,14 +78,21 @@ export const useAuthenticatedResourceUrl = (input: string | null) => {
 
     setState({ url: null, loading: true, error: null })
 
-    void fetchAuthenticatedResource(resolvedInput)
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`Failed to load resource (${response.status})`)
-        }
+    const loadBlob = shouldCacheImage
+      ? loadCachedImage(
+          options.ownerUserId || '',
+          resolvedInput,
+          () => fetchAuthenticatedResource(resolvedInput),
+        )
+      : fetchAuthenticatedResource(resolvedInput).then(async (response) => {
+          if (!response.ok) {
+            throw new Error(`Failed to load resource (${response.status})`)
+          }
 
-        return response.blob()
-      })
+          return response.blob()
+        })
+
+    void loadBlob
       .then((blob) => {
         if (disposed) {
           return
@@ -98,7 +119,7 @@ export const useAuthenticatedResourceUrl = (input: string | null) => {
         URL.revokeObjectURL(objectUrl)
       }
     }
-  }, [resolvedInput])
+  }, [options.cacheMode, options.ownerUserId, resolvedInput, shouldCacheImage])
 
   return state
 }

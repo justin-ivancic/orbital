@@ -99,6 +99,7 @@ import {
 } from './offlineStorage'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
 import { useAuthenticatedResourceUrl } from './authenticatedResource'
+import { clearImageCache } from './imageCache'
 import {
   appRoutePath,
   categoryForRoute,
@@ -334,7 +335,7 @@ const emptyScanStatus: ScanStatus = {
 
 const getAppStateCacheKey = (userId: string) => `${appStateCachePrefix}:${userId}`
 
-const getReaderCacheStorage = () => window.sessionStorage
+const getReaderCacheStorage = () => window.localStorage
 
 const clearStorageKeysByPrefix = (storage: Storage, prefixes: string[]) => {
   Object.keys(storage)
@@ -350,9 +351,28 @@ const pruneLegacyPersistentReaderCaches = () => {
   legacyAppStateCachePruned = true
 
   try {
-    clearStorageKeysByPrefix(window.localStorage, [legacyAppStateCachePrefix, 'video-progress:'])
+    clearStorageKeysByPrefix(window.localStorage, ['video-progress:'])
+    Object.keys(window.localStorage)
+      .filter(
+        (key) =>
+          key.startsWith(legacyAppStateCachePrefix) &&
+          !key.startsWith(appStateCachePrefix),
+      )
+      .forEach((key) => window.localStorage.removeItem(key))
   } catch {
     // Storage may be unavailable; cache cleanup is best-effort.
+  }
+}
+
+const clearCachedReaderState = (userId?: string | null) => {
+  if (typeof window === 'undefined' || !userId) {
+    return
+  }
+
+  try {
+    window.localStorage.removeItem(getAppStateCacheKey(userId))
+  } catch {
+    // Storage may be unavailable; the server remains authoritative.
   }
 }
 
@@ -1450,9 +1470,6 @@ const savedPositionToReaderProgress = (
   }
 }
 
-const firstSeriesId = (state: AppState | null) =>
-  state?.library.find((series) => isReaderCategory(series.category))?.id || state?.library[0]?.id || null
-
 class ReaderErrorBoundary extends Component<
   { children: ReactNode; fallback: (message: string | null) => ReactNode; resetKey: string },
   { message: string | null }
@@ -1803,6 +1820,7 @@ function App() {
   const [discoverViewMode, setDiscoverViewMode] = useState<'grid' | 'list'>('grid')
   const [seriesCache, setSeriesCache] = useState<Record<string, SeriesDetail>>({})
   const [seriesError, setSeriesError] = useState<string | null>(null)
+  const [seriesErrorStatus, setSeriesErrorStatus] = useState<number | null>(null)
   const [readerProgressState, setReaderProgressState] =
     useState<ReaderProgressState | null>(null)
   const [readerPreferences, setReaderPreferences] =
@@ -2075,14 +2093,17 @@ function App() {
 
   const visibleLibrary = library.filter((series) => isReaderCategory(series.category))
 
+  const selectedSeriesDetail = selectedSeriesId ? seriesCache[selectedSeriesId] ?? null : null
   const selectedSeriesSummary =
     library.find((series) => series.id === selectedSeriesId) ??
+    selectedSeriesDetail ??
     (activeOfflineSeries?.id === selectedSeriesId ? activeOfflineSeries : null)
   const selectedSeriesDisplayTitle = selectedSeriesSummary
     ? getSeriesDisplayTitle(selectedSeriesSummary)
     : null
   const { url: selectedSeriesBannerUrl } = useAuthenticatedResourceUrl(
     selectedSeriesSummary?.bannerUrl ?? null,
+    { cacheMode: 'image', ownerUserId: sessionUser?.id },
   )
   const scanStatus = appState?.scanStatus ?? null
   const scanIsActive = Boolean(scanStatus?.active)
@@ -2638,9 +2659,6 @@ function App() {
           setAppState(cachedReaderState.appState)
           setSeriesCache(cachedReaderState.seriesCache)
           setCachedStateNeedsRefresh(true)
-          setSelectedSeriesId((previousSeriesId) =>
-            previousSeriesId || firstSeriesId(cachedReaderState.appState),
-          )
         } else {
           setCachedStateNeedsRefresh(true)
         }
@@ -2692,9 +2710,6 @@ function App() {
           setAppState(cachedReaderState.appState)
           setSeriesCache(cachedReaderState.seriesCache)
           setCachedStateNeedsRefresh(true)
-          setSelectedSeriesId((previousSeriesId) =>
-            previousSeriesId || firstSeriesId(cachedReaderState.appState),
-          )
         }
 
         setStateError(null)
@@ -2791,7 +2806,6 @@ function App() {
         setAppState(syncedState)
         setCachedStateNeedsRefresh(false)
         setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, syncedState.library))
-        setSelectedSeriesId((previousSeriesId) => previousSeriesId || firstSeriesId(syncedState))
         setStateError(null)
       } catch (error) {
         if (!active) {
@@ -2947,11 +2961,6 @@ function App() {
           setBootstrapState(toBootstrapState(nextState))
           setAppState(nextState)
           setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, nextState.library))
-          setSelectedSeriesId((previousSeriesId) =>
-            previousSeriesId && nextState.library.some((series) => series.id === previousSeriesId)
-              ? previousSeriesId
-              : firstSeriesId(nextState),
-          )
           setScanClientNotice(null)
         }
 
@@ -3017,11 +3026,6 @@ function App() {
         })
         setAppState(nextState)
         setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, nextState.library))
-        setSelectedSeriesId((previousSeriesId) =>
-          previousSeriesId && nextState.library.some((series) => series.id === previousSeriesId)
-            ? previousSeriesId
-            : firstSeriesId(nextState),
-        )
       } catch {
         setScanPollUntil(Date.now() + 30000)
       }
@@ -3238,6 +3242,7 @@ function App() {
 
     let active = true
     setSeriesError(null)
+    setSeriesErrorStatus(null)
 
     void api
       .getSeries(selectedSeriesId)
@@ -3250,6 +3255,7 @@ function App() {
           ...previousCache,
           [response.series.id]: response.series,
         }))
+        setSeriesErrorStatus(null)
         setSelectedEntryId((previousEntryId) => previousEntryId || response.series.entries[0]?.id || null)
         setSelectedVariantId((previousVariantId) => {
           if (
@@ -3267,6 +3273,7 @@ function App() {
       .catch((error) => {
         if (active) {
           setSeriesError(error instanceof Error ? error.message : text.loadingSeries)
+          setSeriesErrorStatus(error instanceof ApiError ? error.status : null)
         }
       })
     return () => {
@@ -3336,27 +3343,17 @@ function App() {
       return
     }
 
-    if (
-      isSeriesRoute(currentRoute) &&
-      currentRoute.seriesId === selectedSeriesId
-    ) {
+    if (isSeriesRoute(currentRoute)) {
+      if (selectedSeriesId !== currentRoute.seriesId) {
+        setSelectedSeriesId(currentRoute.seriesId)
+      }
       return
     }
 
-    if (!library.length) {
-      return
+    if (selectedSeriesId !== null) {
+      setSelectedSeriesId(null)
     }
-
-    const selectedSeriesStillExists = library.some((series) => series.id === selectedSeriesId)
-    const firstVisibleSeries = library.find((series) => isReaderCategory(series.category))
-    const selectedSeriesStillVisible =
-      !firstVisibleSeries ||
-      library.some((series) => series.id === selectedSeriesId && isReaderCategory(series.category))
-
-    if (!selectedSeriesId || !selectedSeriesStillExists || !selectedSeriesStillVisible) {
-      setSelectedSeriesId(firstVisibleSeries?.id || library[0].id)
-    }
-  }, [activeOfflineSeries?.id, currentRoute, library, selectedSeriesId])
+  }, [activeOfflineSeries?.id, currentRoute, selectedSeriesId])
 
   useEffect(() => {
     if (selectedMetadataSeriesId && library.some((series) => series.id === selectedMetadataSeriesId)) {
@@ -3520,11 +3517,8 @@ function App() {
     setAppState(nextState)
     setCachedStateNeedsRefresh(false)
     setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, nextState.library))
-    if (
-      !selectedSeriesId ||
-      !nextState.library.some((series) => series.id === selectedSeriesId && isReaderCategory(series.category))
-    ) {
-      setSelectedSeriesId(firstSeriesId(nextState))
+    if (isSeriesRoute(currentRoute)) {
+      setSelectedSeriesId(currentRoute.seriesId)
     }
   }
 
@@ -3547,12 +3541,6 @@ function App() {
         currentRoute.name === 'login' && currentRoute.next
           ? parseAppRoute(new URL(currentRoute.next, window.location.origin))
           : null
-      startTransition(() => {
-        setSelectedSeriesId(
-          nextState.bookmarks.find((bookmark) => isReaderCategory(bookmark.category))?.seriesId ||
-            firstSeriesId(nextState),
-        )
-      })
       navigateRoute(
         requestedDestination && isProtectedRoute(requestedDestination)
           ? requestedDestination
@@ -3568,6 +3556,8 @@ function App() {
 
   const handleLogout = async () => {
     await api.logout()
+    await clearImageCache(sessionUser?.id)
+    clearCachedReaderState(sessionUser?.id)
     clearReaderSessionCaches()
     const nextBootstrap = await api.getBootstrap()
     api.setCsrfToken(nextBootstrap.csrfToken)
@@ -4662,6 +4652,7 @@ function App() {
             onError={(event) => {
               event.currentTarget.style.display = 'none'
             }}
+            ownerUserId={sessionUser?.id}
             sourceUrl={series.coverUrl || ''}
           />
         )}
@@ -4806,6 +4797,12 @@ function App() {
 
   const searchPreview = visibleSearchResults.slice(0, currentView === 'search' ? 50 : 10)
   const searchPageBrowseResults = deferredSearch === '' ? scopedSearchLibrary : []
+  const seriesDetailLoading = Boolean(
+    selectedSeriesId &&
+      authenticated &&
+      !seriesCache[selectedSeriesId] &&
+      activeOfflineSeries?.id !== selectedSeriesId,
+  )
   const routedSeriesMissing =
     Boolean(appState) &&
     !cachedStateNeedsRefresh &&
@@ -4814,9 +4811,14 @@ function App() {
       (series) =>
         series.id === currentRoute.seriesId &&
         isReaderCategory(series.category),
-    )
+    ) &&
+    !(selectedSeriesDetail?.id === currentRoute.seriesId && isReaderCategory(selectedSeriesDetail.category)) &&
+    selectedSeriesId === currentRoute.seriesId &&
+    !seriesDetailLoading &&
+    seriesErrorStatus === 404
   const routedEntryMissing =
     currentRoute.name === 'reader' &&
+    !cachedStateNeedsRefresh &&
     selectedSeries?.id === currentRoute.seriesId &&
     !selectedSeries.entries.some(
       (entry) =>
@@ -6186,7 +6188,7 @@ function App() {
 
   const renderSeries = () => {
     if (!selectedSeriesSummary) {
-      return <article className="panel panel--padded">{text.noLibrary}</article>
+      return <article className="panel panel--padded">{seriesError || text.loadingSeries}</article>
     }
 
     const seriesCountLabel = formatCountLabel(
@@ -6727,6 +6729,7 @@ function App() {
                 <AuthenticatedResourceImage
                   alt=""
                   className="metadata-review__cover"
+                  ownerUserId={sessionUser?.id}
                   sourceUrl={item.coverUrl}
                 />
               ) : (
@@ -6797,6 +6800,7 @@ function App() {
               <AuthenticatedResourceImage
                 alt=""
                 className="metadata-editor__cover"
+                ownerUserId={sessionUser?.id}
                 sourceUrl={selectedMetadataSeries.coverUrl}
               />
             ) : (
