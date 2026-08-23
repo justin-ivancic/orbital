@@ -47,6 +47,19 @@ installing, sign in while online and download the books or series you want from
 readable without Wi-Fi. Offline startup uses the local profile and does not
 require another login.
 
+> **Future APK release note:** The Capacitor Filesystem plugin requires JDK 21;
+> JDK 17 is not sufficient. The Android build also needs Android SDK platform
+> 36 and build-tools 36.0.0. If the build machine has no Java or Android SDK,
+> install those tools in a temporary or developer-local location first, then
+> run the commands below from this directory. The pinned Gradle wrapper is
+> downloaded automatically when needed.
+
+Before each release, increment both `versionCode` in
+`android/app/build.gradle` and `androidAppVersionCode` in `src/platform.ts`.
+Keeping the version code higher than the installed APK lets Android update the
+app in place without requiring an uninstall, which preserves downloaded books
+and series.
+
 Build the debug APK from this directory:
 
 ```bash
@@ -67,10 +80,8 @@ npm run mobile:publish
 This rebuilds the Android app and copies the result to
 `mobile-distribution/orbital-android.apk`. The production server serves that
 file at `/api/mobile/app.apk`; keep the route reachable for the browser and
-native client. For later APK releases, increment the Android `versionCode` in
-`android/app/build.gradle` and the matching `androidAppVersionCode` in
-`src/platform.ts` so Android accepts the update and the download URL bypasses
-old edge-cache entries.
+native client. Push the updated APK in the same deployment as the server so the
+authenticated Profile page offers the new build directly to the e-reader.
 
 The server accepts the native bearer-token client from the origins in
 `APP_MOBILE_ORIGINS` (default: `https://localhost,capacitor://localhost`). If a
