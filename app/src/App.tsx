@@ -574,6 +574,7 @@ const ui = {
     downloadsAll: 'All downloads',
     downloadForOffline: 'Download',
     downloadSeries: 'Download series',
+    downloadProgress: (current: number, total: number) => `Downloading ${current} / ${total}`,
     downloadEntry: 'Download chapter',
     downloadBook: 'Download book',
     downloadAgain: 'Download again',
@@ -852,6 +853,7 @@ const ui = {
     downloadsAll: 'Alle Downloads',
     downloadForOffline: 'Herunterladen',
     downloadSeries: 'Serie herunterladen',
+    downloadProgress: (current: number, total: number) => `Wird geladen ${current} / ${total}`,
     downloadEntry: 'Kapitel herunterladen',
     downloadBook: 'Buch herunterladen',
     downloadAgain: 'Erneut herunterladen',
@@ -3652,6 +3654,12 @@ function App() {
       record.status = 'downloading'
       record.updatedAt = new Date().toISOString()
       await updateOfflineRecord(record)
+      setOfflineBusy(
+        busyKey,
+        manifest.target.type === 'series'
+          ? text.downloadProgress(record.downloadedResourceCount, record.resourceCount)
+          : text.downloadForOffline,
+      )
 
       for (const resource of manifest.resources) {
         const response = await api.fetchResource(resource.url)
@@ -3682,6 +3690,12 @@ function App() {
           downloadedResourceCount: record.downloadedResourceCount + 1,
           updatedAt: new Date().toISOString(),
         }
+        setOfflineBusy(
+          busyKey,
+          manifest.target.type === 'series'
+            ? text.downloadProgress(record.downloadedResourceCount, record.resourceCount)
+            : text.downloadForOffline,
+        )
         await updateOfflineRecord(record)
       }
 
@@ -6071,8 +6085,36 @@ function App() {
       return <article className="panel panel--padded">{seriesError || text.loadingSeries}</article>
     }
 
+    const seriesOfflineTarget = {
+      type: 'series',
+      seriesId: selectedSeries.id,
+    } satisfies OfflineDownloadTarget
+    const seriesOfflineBusy = offlineBusyIds[getOfflineTargetKey(seriesOfflineTarget)]
+    const seriesOfflineDownload = getReadyOfflineDownloadForSeries(selectedSeries, selectedSeries)
+
     return (
       <div className="panel panel--padded">
+        <div className="entry-table__toolbar">
+          <div>
+            <p className="section-kicker">{text.entries}</p>
+            <p className="helper-text">
+              {formatCountLabel(selectedSeries.category, selectedSeries.entries.length, language)}
+            </p>
+          </div>
+          <button
+            className="ghost-button"
+            disabled={Boolean(seriesOfflineBusy)}
+            onClick={() => (
+              seriesOfflineDownload
+                ? openOfflineDownload(seriesOfflineDownload)
+                : void startOfflineDownload(seriesOfflineTarget)
+            )}
+            type="button"
+          >
+            <AppIcon name={seriesOfflineDownload ? 'offline' : 'download'} />
+            {seriesOfflineBusy || (seriesOfflineDownload ? text.openOffline : text.downloadSeries)}
+          </button>
+        </div>
         {selectedSeries.category === 'anime' && availableAnimeSeasons.length > 1 && (
           <div className="season-filter-bar" role="tablist" aria-label="Anime seasons">
             {availableAnimeSeasons.map((seasonNumber) => (
