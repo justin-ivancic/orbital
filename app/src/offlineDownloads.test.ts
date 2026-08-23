@@ -152,6 +152,29 @@ test('resumed record counts only verified resources and keeps its original creat
   assert.equal(resumed.retryAt, null)
 })
 
+test('changed content creates a replacement package instead of reusing the old package id', () => {
+  const resource = makeResource('entry-1', 'v1', 100)
+  const manifest = makeManifest([resource])
+  const existing = makeRecord(manifest)
+  const changedManifest = {
+    ...manifest,
+    manifestId: 'pkg_changed',
+    contentKey: 'content-2',
+    resources: [{ ...resource, version: 'v2', url: '/api/changed' }],
+  }
+  const replacement = mergeOfflineDownloadRecord(
+    changedManifest,
+    existing,
+    [],
+    changedManifest,
+    makeRecord,
+  )
+
+  assert.equal(replacement.id, 'pkg_changed')
+  assert.notEqual(replacement.id, existing.id)
+  assert.equal(replacement.manifest.contentKey, 'content-2')
+})
+
 test('offline retry classification distinguishes network failures from authorization failures', () => {
   assert.equal(isRetryableOfflineDownloadError(new TypeError('Failed to fetch')), true)
   assert.equal(isRetryableOfflineDownloadError({ status: 503 }), true)

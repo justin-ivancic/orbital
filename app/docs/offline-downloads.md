@@ -45,4 +45,6 @@ Orbital offline downloads are explicit device-local packages. Normal browsing ca
 
 Each resource is accepted only after its complete response has been received and its expected size has been verified. Native writes use a temporary `.part` file and a recoverable replacement step, so a half-written chapter or page is never treated as complete and an already-complete resource is not needlessly downloaded again. Transient failures retry automatically, and returning to the app triggers recovery for unfinished records.
 
+If the server copy changes, Orbital downloads the new package beside the old one and removes the old package only after the replacement is ready.
+
 Use the Downloads tab to cancel, retry or repair, download again, delete one package, clear all packages for the active user, or request persistent browser storage.

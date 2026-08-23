@@ -1797,6 +1797,8 @@ function App() {
   const offlineRunningTargetsRef = useRef(new Set<string>())
   const offlineAbortControllersRef = useRef(new Map<string, AbortController>())
   const offlineRunCompletionRef = useRef(new Map<string, Promise<void>>())
+  const offlineDeleteAllInProgressRef = useRef(false)
+  const offlineRefreshRequestRef = useRef(0)
   const offlineRetryTimersRef = useRef(new Map<string, number>())
   const offlineAutoResumeGuardRef = useRef(new Set<string>())
   const deletedOfflineDownloadIdsRef = useRef(new Set<string>())
@@ -2943,7 +2945,12 @@ function App() {
   ])
 
   const refreshOfflineDownloads = useCallback(async () => {
+    const refreshRequest = ++offlineRefreshRequestRef.current
+
     if (!sessionUser) {
+      if (refreshRequest !== offlineRefreshRequestRef.current) {
+        return
+      }
       setOfflineDownloads([])
       setOfflineStorageSummary(null)
       setOfflineDownloadsLoaded(true)
@@ -2958,14 +2965,20 @@ function App() {
         getOfflineStorageSummary(sessionUser.id),
       ])
 
+      if (refreshRequest !== offlineRefreshRequestRef.current) {
+        return
+      }
+
       setOfflineDownloads(downloads)
       setOfflineStorageSummary(summary)
     } catch (error) {
-      if (!offlineMode) {
+      if (refreshRequest === offlineRefreshRequestRef.current && !offlineMode) {
         setStateError(error instanceof Error ? error.message : text.authErrorFallback)
       }
     } finally {
-      setOfflineDownloadsLoaded(true)
+      if (refreshRequest === offlineRefreshRequestRef.current) {
+        setOfflineDownloadsLoaded(true)
+      }
     }
   }, [offlineMode, sessionUser, text.authErrorFallback])
 
@@ -3715,6 +3728,10 @@ function App() {
       return
     }
 
+    if (offlineDeleteAllInProgressRef.current) {
+      return
+    }
+
     const busyKey = getOfflineTargetKey(target)
 
     if (offlineRunningTargetsRef.current.has(busyKey)) {
@@ -3739,6 +3756,7 @@ function App() {
     let record = offlineDownloads.find(
       (download) => getOfflineTargetKey(download.manifest.target) === busyKey,
     ) ?? null
+    let replacementRecord: OfflineDownloadRecord | null = null
     let downloadStateStarted = record?.status !== 'ready'
     setOfflineBusy(busyKey, text.downloadForOffline)
 
@@ -3755,6 +3773,9 @@ function App() {
         : record?.ownerUserId === sessionUser.id
           ? record
           : null
+      replacementRecord = existingRecord && existingRecord.manifest.contentKey !== manifest.contentKey
+        ? existingRecord
+        : null
 
       record = mergeOfflineDownloadRecord(
         manifest,
@@ -3853,6 +3874,9 @@ function App() {
         updatedAt: new Date().toISOString(),
       }
       await updateOfflineRecord(record)
+      if (replacementRecord && replacementRecord.id !== record.id) {
+        await deleteOfflineDownload(replacementRecord.id).catch(() => undefined)
+      }
       offlineAutoResumeGuardRef.current.delete(busyKey)
     } catch (error) {
       const cancelled = error instanceof OfflineDownloadCancelledError || controller.signal.aborted
@@ -3970,6 +3994,10 @@ function App() {
   }, [])
 
   const handleCancelDownload = async (record: OfflineDownloadRecord) => {
+    if (offlineDeleteAllInProgressRef.current) {
+      return
+    }
+
     const busyKey = getOfflineTargetKey(record.manifest.target)
     offlineAutoResumeGuardRef.current.add(busyKey)
     clearOfflineRetryTimer(busyKey)
@@ -3989,6 +4017,10 @@ function App() {
   }
 
   const handleDeleteDownload = async (downloadId: string) => {
+    if (offlineDeleteAllInProgressRef.current) {
+      return
+    }
+
     const download = offlineDownloads.find((record) => record.id === downloadId)
     let runCompletion: Promise<void> | undefined
 
@@ -4019,16 +4051,20 @@ function App() {
   }
 
   const handleDeleteAllDownloads = async () => {
-    if (!sessionUser) {
+    if (!sessionUser || offlineDeleteAllInProgressRef.current) {
       return
     }
 
+    offlineDeleteAllInProgressRef.current = true
     const runCompletions: Promise<void>[] = []
+    const activeBusyKeys = new Set([
+      ...offlineRunningTargetsRef.current,
+      ...offlineAbortControllersRef.current.keys(),
+      ...offlineRunCompletionRef.current.keys(),
+    ])
 
-    offlineDownloads.forEach((record) => {
-      const busyKey = getOfflineTargetKey(record.manifest.target)
+    activeBusyKeys.forEach((busyKey) => {
       offlineAutoResumeGuardRef.current.add(busyKey)
-      deletedOfflineDownloadIdsRef.current.add(record.id)
       clearOfflineRetryTimer(busyKey)
       offlineAbortControllersRef.current.get(busyKey)?.abort()
       const runCompletion = offlineRunCompletionRef.current.get(busyKey)
@@ -4036,6 +4072,14 @@ function App() {
       if (runCompletion) {
         runCompletions.push(runCompletion)
       }
+    })
+
+    offlineDownloads.forEach((record) => {
+      const busyKey = getOfflineTargetKey(record.manifest.target)
+      offlineAutoResumeGuardRef.current.add(busyKey)
+      deletedOfflineDownloadIdsRef.current.add(record.id)
+      clearOfflineRetryTimer(busyKey)
+      offlineAbortControllersRef.current.get(busyKey)?.abort()
     })
 
     setOfflineBusy('all-downloads', text.deleteAllDownloads)
@@ -4048,6 +4092,7 @@ function App() {
     } catch (error) {
       setStateError(error instanceof Error ? error.message : text.authErrorFallback)
     } finally {
+      offlineDeleteAllInProgressRef.current = false
       setOfflineBusy('all-downloads', null)
     }
   }
@@ -5588,6 +5633,7 @@ function App() {
       offlineStorageSummary?.browserQuotaBytes && offlineStorageSummary.browserQuotaBytes > 0
         ? Math.min(1, (offlineStorageSummary.browserUsageBytes || 0) / offlineStorageSummary.browserQuotaBytes)
         : 0
+    const allDownloadsBusy = Boolean(offlineBusyIds['all-downloads'])
 
     return (
       <div className="page page--downloads">
@@ -5732,7 +5778,7 @@ function App() {
                   <div className="download-card__actions">
                     <button
                       className="primary-button"
-                      disabled={record.status !== 'ready'}
+                      disabled={record.status !== 'ready' || allDownloadsBusy}
                       onClick={() => openOfflineDownload(record)}
                       type="button"
                     >
@@ -5741,7 +5787,7 @@ function App() {
                     </button>
                     <button
                       className="ghost-button"
-                      disabled={Boolean(rowBusy)}
+                      disabled={allDownloadsBusy || Boolean(rowBusy)}
                       onClick={() => void startOfflineDownload(record.manifest.target)}
                       type="button"
                     >
@@ -5751,7 +5797,7 @@ function App() {
                     {activeDownload && (
                       <button
                         className="ghost-button"
-                        disabled={record.status !== 'queued' && !offlineRunningTargetsRef.current.has(getOfflineTargetKey(record.manifest.target)) && !targetBusy}
+                        disabled={allDownloadsBusy || (record.status !== 'queued' && !offlineRunningTargetsRef.current.has(getOfflineTargetKey(record.manifest.target)) && !targetBusy)}
                         onClick={() => void handleCancelDownload(record)}
                         type="button"
                       >
@@ -5761,7 +5807,7 @@ function App() {
                     )}
                     <button
                       className="ghost-button"
-                      disabled={Boolean(rowBusy)}
+                      disabled={allDownloadsBusy || Boolean(rowBusy)}
                       onClick={() => void handleDeleteDownload(record.id)}
                       type="button"
                     >

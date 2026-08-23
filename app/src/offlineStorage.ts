@@ -9,10 +9,11 @@ import type {
   SavedReadingPosition,
   SessionUser,
 } from './appTypes'
+import { getOfflineResourceStorageKey } from './offlineStorageKeys'
 import { isNativeApp, toNativeFileUrl } from './platform'
 
 const offlineDbName = 'orbital-offline-v1'
-const offlineDbVersion = 2
+const offlineDbVersion = 3
 const downloadsStoreName = 'downloads'
 const resourcesStoreName = 'resources'
 const readingStateStoreName = 'readingState'
@@ -20,6 +21,7 @@ const nativeDownloadsPath = 'orbital/downloads'
 const nativeStorageEnabled = isNativeApp && Capacitor.isNativePlatform()
 
 type OfflineResourceRecord = {
+  storageKey: string
   key: string
   downloadId: string
   ownerUserId: string
@@ -146,6 +148,14 @@ const transactionDone = (transaction: IDBTransaction) =>
     transaction.onerror = () => reject(transaction.error || new Error('IndexedDB transaction failed.'))
   })
 
+const createResourcesStore = (db: IDBDatabase) => {
+  const resources = db.createObjectStore(resourcesStoreName, { keyPath: 'storageKey' })
+  resources.createIndex('downloadId', 'downloadId', { unique: false })
+  resources.createIndex('ownerUserId', 'ownerUserId', { unique: false })
+  resources.createIndex('resourceKey', 'key', { unique: false })
+  return resources
+}
+
 const openOfflineDb = () =>
   new Promise<IDBDatabase>((resolve, reject) => {
     if (!canUseIndexedDb()) {
@@ -155,8 +165,9 @@ const openOfflineDb = () =>
 
     const request = indexedDB.open(offlineDbName, offlineDbVersion)
 
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result
+      const upgradeTransaction = request.transaction
 
       if (!db.objectStoreNames.contains(downloadsStoreName)) {
         const downloads = db.createObjectStore(downloadsStoreName, { keyPath: 'id' })
@@ -165,9 +176,23 @@ const openOfflineDb = () =>
       }
 
       if (!db.objectStoreNames.contains(resourcesStoreName)) {
-        const resources = db.createObjectStore(resourcesStoreName, { keyPath: 'key' })
-        resources.createIndex('downloadId', 'downloadId', { unique: false })
-        resources.createIndex('ownerUserId', 'ownerUserId', { unique: false })
+        createResourcesStore(db)
+      } else if (event.oldVersion < 3 && upgradeTransaction) {
+        const previousResources = upgradeTransaction.objectStore(resourcesStoreName)
+        const migration = previousResources.getAll()
+
+        migration.onsuccess = () => {
+          const previousRecords = migration.result as Array<OfflineResourceRecord & { storageKey?: string }>
+          db.deleteObjectStore(resourcesStoreName)
+          const resources = createResourcesStore(db)
+
+          previousRecords.forEach((record) => {
+            resources.put({
+              ...record,
+              storageKey: getOfflineResourceStorageKey(record.downloadId, record.key),
+            })
+          })
+        }
       }
 
       if (!db.objectStoreNames.contains(readingStateStoreName)) {
@@ -587,6 +612,7 @@ export const putOfflineResource = async (
 
   const db = await openOfflineDb()
   const record: OfflineResourceRecord = {
+    storageKey: getOfflineResourceStorageKey(downloadId, resource.key),
     key: resource.key,
     downloadId,
     ownerUserId,
@@ -632,6 +658,7 @@ export const getOfflineResource = async (resourceKey: string) => {
         const blob = base64ToBlob(encoded, resource.contentType)
 
         return {
+          storageKey: getOfflineResourceStorageKey(download.id, resource.key),
           key: resource.key,
           downloadId: download.id,
           ownerUserId: download.ownerUserId,
@@ -654,7 +681,7 @@ export const getOfflineResource = async (resourceKey: string) => {
     const transaction = db.transaction(resourcesStoreName, 'readonly')
     const done = transactionDone(transaction)
     const record = await toPromise<OfflineResourceRecord | undefined>(
-      transaction.objectStore(resourcesStoreName).get(resourceKey),
+      transaction.objectStore(resourcesStoreName).index('resourceKey').get(resourceKey),
     )
     await done
     return record ?? null
@@ -687,7 +714,7 @@ export const deleteOfflineDownload = async (downloadId: string) => {
     const downloads = transaction.objectStore(downloadsStoreName)
     const resources = transaction.objectStore(resourcesStoreName)
 
-    resourceRecords.forEach((record) => resources.delete(record.key))
+    resourceRecords.forEach((record) => resources.delete(record.storageKey))
     downloads.delete(downloadId)
     await done
   } finally {
@@ -736,7 +763,7 @@ export const deleteAllOfflineDownloadsForUser = async (ownerUserId: string) => {
     const readingStateStore = transaction.objectStore(readingStateStoreName)
 
     downloads.forEach((record) => downloadsStore.delete(record.id))
-    resources.forEach((record) => resourcesStore.delete(record.key))
+    resources.forEach((record) => resourcesStore.delete(record.storageKey))
     readingStateStore.delete(ownerUserId)
     await done
   } finally {

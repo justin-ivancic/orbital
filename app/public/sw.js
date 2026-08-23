@@ -1,17 +1,29 @@
 const SHELL_CACHE = 'orbital-shell-v1'
 const ASSET_CACHE = 'orbital-assets-v1'
 const OFFLINE_DB = 'orbital-offline-v1'
-const OFFLINE_DB_VERSION = 2
+const OFFLINE_DB_VERSION = 3
 const RESOURCES_STORE = 'resources'
 
 const shellUrls = ['/', '/site.webmanifest']
+
+const offlineResourceStorageKey = (downloadId, resourceKey) =>
+  `${downloadId}\u0000${resourceKey}`
+
+const createResourcesStore = (db) => {
+  const resources = db.createObjectStore(RESOURCES_STORE, { keyPath: 'storageKey' })
+  resources.createIndex('downloadId', 'downloadId', { unique: false })
+  resources.createIndex('ownerUserId', 'ownerUserId', { unique: false })
+  resources.createIndex('resourceKey', 'key', { unique: false })
+  return resources
+}
 
 const openOfflineDb = () =>
   new Promise((resolve, reject) => {
     const request = indexedDB.open(OFFLINE_DB, OFFLINE_DB_VERSION)
 
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result
+      const upgradeTransaction = request.transaction
 
       if (!db.objectStoreNames.contains('downloads')) {
         const downloads = db.createObjectStore('downloads', { keyPath: 'id' })
@@ -20,9 +32,23 @@ const openOfflineDb = () =>
       }
 
       if (!db.objectStoreNames.contains(RESOURCES_STORE)) {
-        const resources = db.createObjectStore(RESOURCES_STORE, { keyPath: 'key' })
-        resources.createIndex('downloadId', 'downloadId', { unique: false })
-        resources.createIndex('ownerUserId', 'ownerUserId', { unique: false })
+        createResourcesStore(db)
+      } else if (event.oldVersion < 3 && upgradeTransaction) {
+        const previousResources = upgradeTransaction.objectStore(RESOURCES_STORE)
+        const migration = previousResources.getAll()
+
+        migration.onsuccess = () => {
+          const previousRecords = migration.result || []
+          db.deleteObjectStore(RESOURCES_STORE)
+          const resources = createResourcesStore(db)
+
+          previousRecords.forEach((record) => {
+            resources.put({
+              ...record,
+              storageKey: offlineResourceStorageKey(record.downloadId, record.key),
+            })
+          })
+        }
       }
 
       if (!db.objectStoreNames.contains('readingState')) {
@@ -40,7 +66,7 @@ const readOfflineResource = async (resourceKey) => {
   try {
     return await new Promise((resolve, reject) => {
       const transaction = db.transaction(RESOURCES_STORE, 'readonly')
-      const request = transaction.objectStore(RESOURCES_STORE).get(resourceKey)
+      const request = transaction.objectStore(RESOURCES_STORE).index('resourceKey').get(resourceKey)
 
       request.onsuccess = () => resolve(request.result || null)
       request.onerror = () => reject(request.error || new Error('Could not read offline resource.'))
