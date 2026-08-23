@@ -3555,6 +3555,11 @@ function App() {
   }
 
   const handleLogout = async () => {
+    if (cacheWriteTimerRef.current) {
+      window.clearTimeout(cacheWriteTimerRef.current)
+      cacheWriteTimerRef.current = null
+    }
+
     await api.logout()
     await clearImageCache(sessionUser?.id)
     clearCachedReaderState(sessionUser?.id)
