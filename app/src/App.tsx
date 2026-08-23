@@ -126,6 +126,7 @@ const TextFileReader = lazy(() => import('./LocalFileReaders').then((module) => 
 const VideoPlayer = lazy(() => import('./VideoPlayer').then((module) => ({ default: module.VideoPlayer })))
 
 const emptyLibrary: SeriesSummary[] = []
+const emptyOfflineReadingStateUpdatedAt = new Date(0).toISOString()
 const emptyMetadataReviewItems: AppState['metadataQueue'] = []
 const defaultReaderCategory: CategoryId = 'books'
 const readerCategoryOrder = categoryOrder.filter((category) => category !== 'anime')
@@ -1357,6 +1358,8 @@ const buildOfflinePagesForEntry = (
 
 const buildOfflineSeriesDetail = (record: OfflineDownloadRecord): SeriesDetail => {
   const { manifest } = record
+  const coverResource = manifest.resources.find((resource) => resource.kind === 'cover')
+  const bannerResource = manifest.resources.find((resource) => resource.kind === 'banner')
   const seriesId =
     manifest.target.type === 'series'
       ? manifest.target.seriesId
@@ -1400,8 +1403,8 @@ const buildOfflineSeriesDetail = (record: OfflineDownloadRecord): SeriesDetail =
     progressLabel: `${manifest.entryCount} offline ${manifest.entryCount === 1 ? 'item' : 'items'}`,
     description: manifest.subtitle,
     folder: 'This device',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: coverResource ? offlineResourceUrl(coverResource) : null,
+    bannerUrl: bannerResource ? offlineResourceUrl(bannerResource) : null,
     coverSource: 'Offline package',
     metadataSource: 'Offline package',
     externalUrl: null,
@@ -2034,6 +2037,10 @@ function App() {
     () => offlineDownloads.filter((record) => record.status === 'ready'),
     [offlineDownloads],
   )
+  const readyOfflineLibrary = useMemo(
+    () => readyOfflineDownloads.map((record) => buildOfflineSeriesDetail(record)),
+    [readyOfflineDownloads],
+  )
   const getReadyOfflineDownloadForEntry = useCallback(
     (entryId: string | null | undefined) => {
       if (!entryId) {
@@ -2082,6 +2089,14 @@ function App() {
 
     cacheWriteTimerRef.current = window.setTimeout(() => {
       writeCachedReaderState(appState, seriesCache)
+      if (isNativeApp && appState.user) {
+        void putOfflineReadingState({
+          ownerUserId: appState.user.id,
+          bookmarks: appState.bookmarks,
+          readingPositions: appState.readingPositions,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => undefined)
+      }
       cacheWriteTimerRef.current = null
     }, 500)
 
@@ -2618,21 +2633,33 @@ function App() {
     const applyOfflineProfile = async (offlineProfile: SessionUser) => {
       const localState = offlineStateForProfile(offlineProfile)
       const readingState = await getOfflineReadingState(offlineProfile.id).catch(() => null)
+      const cachedReaderState = readCachedReaderState(localState.bootstrapState)
+      const hasPersistedOfflineReadingState = Boolean(
+        readingState && readingState.updatedAt !== emptyOfflineReadingStateUpdatedAt,
+      )
+      const offlineBookmarks = hasPersistedOfflineReadingState
+        ? readingState?.bookmarks ?? []
+        : cachedReaderState?.appState.bookmarks ?? []
+      const offlineReadingPositions = hasPersistedOfflineReadingState
+        ? readingState?.readingPositions ?? {}
+        : cachedReaderState?.appState.readingPositions ?? {}
       api.setCsrfToken(null)
       setBootstrapState(localState.bootstrapState)
       setAppState(
-        readingState
-          ? {
-              ...localState.appState,
-              bookmarks: readingState.bookmarks,
-              readingPositions: readingState.readingPositions,
-            }
-          : localState.appState,
+        {
+          ...localState.appState,
+          bookmarks: offlineBookmarks,
+          readingPositions: offlineReadingPositions,
+        },
       )
       setOfflineMode(true)
       const currentLocation = routeForLocation()
-      if (currentLocation.name !== 'downloads' && currentLocation.name !== 'offlineReader') {
-        navigateRoute({ name: 'downloads' }, { replace: true })
+      if (
+        currentLocation.name !== 'bookmarks' &&
+        currentLocation.name !== 'downloads' &&
+        currentLocation.name !== 'offlineReader'
+      ) {
+        navigateRoute({ name: 'bookmarks', scope: 'all' }, { replace: true })
       }
       setCachedStateNeedsRefresh(false)
       setStateError(text.offlineModeHelp)
@@ -5098,8 +5125,12 @@ function App() {
     )
   }
 
-  const renderBookmarks = () => (
-    <div className="page page--bookmarks">
+  const renderBookmarks = () => {
+    const bookmarkLibrary = offlineMode ? readyOfflineLibrary : visibleLibrary
+    const bookmarkLibraryLoading = offlineMode && !offlineDownloadsLoaded
+
+    return (
+      <div className="page page--bookmarks">
       <section className="toolbar-panel toolbar-panel--bookmarks">
         <div>
           <p className="section-kicker">{text.welcome}</p>
@@ -5126,7 +5157,9 @@ function App() {
         </div>
       </section>
 
-      {visibleLibrary.length === 0 ? (
+      {bookmarkLibraryLoading ? (
+        <article aria-live="polite" className="panel panel--padded">{text.loading}</article>
+      ) : bookmarkLibrary.length === 0 ? (
         <article className="panel panel--padded">{text.noLibrary}</article>
       ) : (
         <section className="bookmark-list">
@@ -5134,12 +5167,13 @@ function App() {
             <article className="panel panel--padded">No manual bookmark set yet.</article>
           ) : (
             sortedBookmarks.map((bookmark) => {
-              const series = library.find((item) => item.id === bookmark.seriesId)
+              const series = bookmarkLibrary.find((item) => item.id === bookmark.seriesId)
 
               if (!series) {
                 return null
               }
 
+              const bookmarkOfflineDownload = getReadyOfflineDownloadForEntry(bookmark.entryId)
               const displayTitle = getSeriesDisplayTitle(series)
               const progressHint = shouldUseEntryBookmarkProgress(series.category)
                 ? null
@@ -5153,25 +5187,46 @@ function App() {
                   className={`bookmark-card bookmark-card--list ${bookmarkMenuOpen ? 'is-menu-open' : ''}`}
                   key={`${bookmark.seriesId}-${bookmark.entryId}`}
                 >
-                  <RouteLink
-                    ariaLabel={`${text.resume}: ${displayTitle}`}
-                    className="bookmark-card__primary"
-                    navigate={navigateRoute}
-                    route={readerRoute(series, bookmark.entryId)}
-                  >
-                    {renderPoster(series, true)}
-                    <span className="bookmark-card__progress-track" aria-hidden="true">
-                      <span style={{ width: `${bookmarkStats.ratio * 100}%` }} />
-                    </span>
-                    <span className="bookmark-card__mobile-meta">
-                      <strong>{bookmarkStats.mobileCurrent}</strong>
-                      {bookmarkStats.mobileSuffix && <span>{bookmarkStats.mobileSuffix}</span>}
-                    </span>
-                  </RouteLink>
+                  {bookmarkOfflineDownload ? (
+                    <button
+                      aria-label={`${text.resume}: ${displayTitle}`}
+                      className="bookmark-card__primary"
+                      onClick={() => openOfflineDownload(bookmarkOfflineDownload, bookmark.entryId)}
+                      type="button"
+                    >
+                      {renderPoster(series, true)}
+                      <span className="bookmark-card__progress-track" aria-hidden="true">
+                        <span style={{ width: `${bookmarkStats.ratio * 100}%` }} />
+                      </span>
+                      <span className="bookmark-card__mobile-meta">
+                        <strong>{bookmarkStats.mobileCurrent}</strong>
+                        {bookmarkStats.mobileSuffix && <span>{bookmarkStats.mobileSuffix}</span>}
+                      </span>
+                    </button>
+                  ) : (
+                    <RouteLink
+                      ariaLabel={`${text.resume}: ${displayTitle}`}
+                      className="bookmark-card__primary"
+                      navigate={navigateRoute}
+                      route={readerRoute(series, bookmark.entryId)}
+                    >
+                      {renderPoster(series, true)}
+                      <span className="bookmark-card__progress-track" aria-hidden="true">
+                        <span style={{ width: `${bookmarkStats.ratio * 100}%` }} />
+                      </span>
+                      <span className="bookmark-card__mobile-meta">
+                        <strong>{bookmarkStats.mobileCurrent}</strong>
+                        {bookmarkStats.mobileSuffix && <span>{bookmarkStats.mobileSuffix}</span>}
+                      </span>
+                    </RouteLink>
+                  )}
                   <div className="bookmark-card__content">
                     <div className="bookmark-card__topline">
                       <span className="section-kicker">{categoryLabel(series.category)}</span>
-                      {progressHint && <span className="chip">{progressHint}</span>}
+                      <div className="chip-row">
+                        {progressHint && <span className="chip">{progressHint}</span>}
+                        {bookmarkOfflineDownload && <span className="chip">{text.downloadsReady}</span>}
+                      </div>
                     </div>
                     <div className="bookmark-card__headline">
                       <div>
@@ -5181,14 +5236,25 @@ function App() {
                     </div>
                     <p className="bookmark-card__cue">{bookmarkStats.cue}</p>
                     <div className="bookmark-card__actions">
-                      <RouteLink
-                        className="primary-button"
-                        navigate={navigateRoute}
-                        route={readerRoute(series, bookmark.entryId)}
-                      >
-                        <AppIcon name="read" />
-                        {text.resume}
-                      </RouteLink>
+                      {bookmarkOfflineDownload ? (
+                        <button
+                          className="primary-button"
+                          onClick={() => openOfflineDownload(bookmarkOfflineDownload, bookmark.entryId)}
+                          type="button"
+                        >
+                          <AppIcon name="offline" />
+                          {text.resume}
+                        </button>
+                      ) : (
+                        <RouteLink
+                          className="primary-button"
+                          navigate={navigateRoute}
+                          route={readerRoute(series, bookmark.entryId)}
+                        >
+                          <AppIcon name="read" />
+                          {text.resume}
+                        </RouteLink>
+                      )}
                       <RouteLink
                         className="ghost-button"
                         navigate={navigateRoute}
@@ -5238,8 +5304,9 @@ function App() {
           )}
         </section>
       )}
-    </div>
-  )
+      </div>
+    )
+  }
 
   const renderDownloads = () => {
     const filteredDownloads = offlineDownloads.filter((record) => {
