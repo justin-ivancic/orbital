@@ -49,7 +49,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import './App.css'
-import { ApiError, api } from './api'
+import { ApiError, api, normalizeAppState, normalizeSeriesDetail } from './api'
 import type {
   AppState,
   Bookmark,
@@ -113,7 +113,7 @@ import {
   type AppRoute,
   type LibraryRouteCategory,
 } from './routing'
-import { isNativeApp, resolveApiUrl } from './platform'
+import { androidAppVersionCode, isNativeApp, resolveApiUrl } from './platform'
 
 const CbzReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.CbzReader })))
 const EpubReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.EpubReader })))
@@ -442,7 +442,7 @@ const readCachedReaderState = (bootstrapState: BootstrapState) => {
       return null
     }
 
-    const appState: AppState = {
+    const appState = normalizeAppState({
       appName: bootstrapState.appName,
       bootstrapAdmin: bootstrapState.bootstrapAdmin,
       openSignup: bootstrapState.openSignup,
@@ -457,13 +457,20 @@ const readCachedReaderState = (bootstrapState: BootstrapState) => {
       sourceFolders: [],
       users: [],
       metadataQueue: [],
-    }
+    })
+
+    const seriesCache = cache.seriesCache && typeof cache.seriesCache === 'object'
+      ? Object.fromEntries(
+          Object.entries(cache.seriesCache).map(([seriesId, series]) => [
+            seriesId,
+            normalizeSeriesDetail(series),
+          ]),
+        )
+      : {}
 
     return {
       appState,
-      seriesCache: cache.seriesCache && typeof cache.seriesCache === 'object'
-        ? cache.seriesCache
-        : {},
+      seriesCache,
     }
   } catch {
     return null
@@ -1307,7 +1314,7 @@ const getPrimaryResourceForEntry = (
 }
 
 const offlineResourceUrl = (resource: OfflineDownloadManifest['resources'][number]) =>
-  isNativeApp ? resource.url : getOfflineResourceUrl(resource.key)
+  isNativeApp ? resolveApiUrl(resource.url) : getOfflineResourceUrl(resource.key)
 
 const buildOfflinePagesForEntry = (
   manifest: OfflineDownloadManifest,
@@ -5531,7 +5538,7 @@ function App() {
           <a
             className="settings-row settings-row--button"
             download="orbital-android.apk"
-            href={resolveApiUrl('/api/mobile/app.apk')}
+            href={resolveApiUrl(`/api/mobile/app.apk?v=${androidAppVersionCode}`)}
           >
             <span className="settings-row__icon">
               <AppIcon name="download" />

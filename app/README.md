@@ -67,7 +67,10 @@ npm run mobile:publish
 This rebuilds the Android app and copies the result to
 `mobile-distribution/orbital-android.apk`. The production server serves that
 file at `/api/mobile/app.apk`; keep the route reachable for the browser and
-native client.
+native client. For later APK releases, increment the Android `versionCode` in
+`android/app/build.gradle` and the matching `androidAppVersionCode` in
+`src/platform.ts` so Android accepts the update and the download URL bypasses
+old edge-cache entries.
 
 The server accepts the native bearer-token client from the origins in
 `APP_MOBILE_ORIGINS` (default: `https://localhost,capacitor://localhost`). If a

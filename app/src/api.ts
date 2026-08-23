@@ -8,6 +8,7 @@ import type {
   CreateRootPayload,
   CreateSourcePayload,
   DirectoryListing,
+  MediaTrackCollection,
   MetadataOverridePayload,
   MediaTracksResponse,
   MobileAuthResponse,
@@ -22,7 +23,9 @@ import type {
   ScopeId,
   ScanStatusResponse,
   SearchResponse,
+  SeriesDetail,
   SeriesResponse,
+  SeriesSummary,
   UpdateSourcePayload,
 } from './appTypes'
 import { resolveApiUrl, isNativeApp } from './platform'
@@ -46,6 +49,57 @@ export class ApiError extends Error {
 }
 
 const unsafeHttpMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+const normalizeUrl = (url: string | null) => (url ? resolveApiUrl(url) : url)
+
+const normalizeMediaTracks = (tracks: MediaTrackCollection): MediaTrackCollection => ({
+  audio: tracks.audio.map((track) => ({
+    ...track,
+    url: resolveApiUrl(track.url),
+  })),
+  subtitles: tracks.subtitles.map((track) => ({
+    ...track,
+    url: resolveApiUrl(track.url),
+  })),
+})
+
+export const normalizeSeriesSummary = (series: SeriesSummary): SeriesSummary => ({
+  ...series,
+  coverUrl: normalizeUrl(series.coverUrl),
+  bannerUrl: normalizeUrl(series.bannerUrl),
+})
+
+export const normalizeSeriesDetail = (series: SeriesDetail): SeriesDetail => ({
+  ...normalizeSeriesSummary(series),
+  comments: series.comments,
+  entries: series.entries.map((entry) => ({
+    ...entry,
+    variants: entry.variants.map((variant) => ({
+      ...variant,
+      fileUrl: resolveApiUrl(variant.fileUrl),
+      downloadUrl: resolveApiUrl(variant.downloadUrl),
+      mediaTracks: normalizeMediaTracks(variant.mediaTracks),
+    })),
+  })),
+})
+
+export const normalizeAppState = <T extends AppState>(state: T): T => ({
+  ...state,
+  library: state.library.map(normalizeSeriesSummary),
+  metadataQueue: state.metadataQueue.map((item) => ({
+    ...item,
+    coverUrl: normalizeUrl(item.coverUrl),
+  })),
+})
+
+const normalizeOfflineManifest = (manifest: OfflineDownloadManifest): OfflineDownloadManifest => ({
+  ...manifest,
+  resources: manifest.resources.map((resource) => ({
+    ...resource,
+    url: resolveApiUrl(resource.url),
+    onlineUrl: resolveApiUrl(resource.onlineUrl),
+  })),
+})
 
 const isUnsafeRequest = (method: string | undefined) =>
   unsafeHttpMethods.has((method || 'GET').toUpperCase())
@@ -107,13 +161,13 @@ export const api = {
     csrfToken = token || null
   },
   getBootstrap: () => request<BootstrapState>('/api/bootstrap'),
-  getState: () => request<AppState>('/api/state'),
+  getState: async () => normalizeAppState(await request<AppState>('/api/state')),
   login: async (payload: AuthPayload) => {
     if (!isNativeApp) {
-      return request<AppState>('/api/auth/login', {
+      return normalizeAppState(await request<AppState>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify(payload),
-      })
+      }))
     }
 
     const response = await request<MobileAuthResponse>('/api/mobile/auth/login', {
@@ -126,13 +180,13 @@ export const api = {
       expiresAt: response.accessTokenExpiresAt,
     })
 
-    return response
+    return normalizeAppState(response)
   },
-  signup: (payload: AuthPayload) =>
-    request<AppState>('/api/auth/signup', {
+  signup: async (payload: AuthPayload) =>
+    normalizeAppState(await request<AppState>('/api/auth/signup', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
+    })),
   logout: async () => {
     const response = await request<{ ok: true }>('/api/auth/logout', {
       method: 'POST',
@@ -145,29 +199,45 @@ export const api = {
 
     return response
   },
-  changePassword: (payload: ChangePasswordPayload) =>
-    request<AppState>('/api/auth/change-password', {
+  changePassword: async (payload: ChangePasswordPayload) =>
+    normalizeAppState(await request<AppState>('/api/auth/change-password', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
-  getSeries: (seriesId: string) => request<SeriesResponse>(`/api/series/${seriesId}`),
-  getEntryTracks: (entryId: string) =>
-    request<MediaTracksResponse>(`/api/media-tracks/${entryId}`),
+    })),
+  getSeries: async (seriesId: string) => {
+    const response = await request<SeriesResponse>(`/api/series/${seriesId}`)
+    return {
+      ...response,
+      series: normalizeSeriesDetail(response.series),
+    }
+  },
+  getEntryTracks: async (entryId: string) => {
+    const response = await request<MediaTracksResponse>(`/api/media-tracks/${entryId}`)
+    return {
+      ...response,
+      mediaTracks: normalizeMediaTracks(response.mediaTracks),
+    }
+  },
   getOfflineCapabilities: () => request<OfflineCapabilities>('/api/offline/capabilities'),
   estimateOfflineDownload: (target: OfflineDownloadTarget) =>
     request<OfflineDownloadEstimate>('/api/offline/estimate', {
       method: 'POST',
       body: JSON.stringify({ target }),
     }),
-  createOfflineManifest: (target: OfflineDownloadTarget) =>
-    request<OfflineDownloadManifest>('/api/offline/manifests', {
+  createOfflineManifest: async (target: OfflineDownloadTarget) =>
+    normalizeOfflineManifest(await request<OfflineDownloadManifest>('/api/offline/manifests', {
       method: 'POST',
       body: JSON.stringify({ target }),
-    }),
-  search: (query: string, scope: ScopeId) =>
-    request<SearchResponse>(
+    })),
+  search: async (query: string, scope: ScopeId) => {
+    const response = await request<SearchResponse>(
       `/api/search?q=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}`,
-    ),
+    )
+    return {
+      ...response,
+      results: response.results.map(normalizeSeriesSummary),
+    }
+  },
   setBookmark: (
     payload: {
       seriesId: string
@@ -209,61 +279,66 @@ export const api = {
         keepalive: options?.keepalive,
       },
     ),
-  addComment: (payload: CreateCommentPayload) =>
-    request<SeriesResponse>('/api/comments', {
+  addComment: async (payload: CreateCommentPayload) => {
+    const response = await request<SeriesResponse>('/api/comments', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
-  createRoot: (payload: CreateRootPayload) =>
-    request<AppState>('/api/admin/roots', {
+    })
+    return {
+      ...response,
+      series: normalizeSeriesDetail(response.series),
+    }
+  },
+  createRoot: async (payload: CreateRootPayload) =>
+    normalizeAppState(await request<AppState>('/api/admin/roots', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
-  deleteRoot: (rootId: string) =>
-    request<AppState>(`/api/admin/roots/${rootId}`, {
+    })),
+  deleteRoot: async (rootId: string) =>
+    normalizeAppState(await request<AppState>(`/api/admin/roots/${rootId}`, {
       method: 'DELETE',
-    }),
+    })),
   listDirectories: (rootId: string, relativePath: string) =>
     request<DirectoryListing>(
       `/api/admin/directories?rootId=${encodeURIComponent(rootId)}&relativePath=${encodeURIComponent(relativePath)}`,
     ),
-  createSource: (payload: CreateSourcePayload) =>
-    request<AppState>('/api/admin/sources', {
+  createSource: async (payload: CreateSourcePayload) =>
+    normalizeAppState(await request<AppState>('/api/admin/sources', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
-  updateSource: (sourceId: string, payload: UpdateSourcePayload) =>
-    request<AppState>(`/api/admin/sources/${sourceId}`, {
+    })),
+  updateSource: async (sourceId: string, payload: UpdateSourcePayload) =>
+    normalizeAppState(await request<AppState>(`/api/admin/sources/${sourceId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
-    }),
-  deleteSource: (sourceId: string) =>
-    request<AppState>(`/api/admin/sources/${sourceId}`, {
+    })),
+  deleteSource: async (sourceId: string) =>
+    normalizeAppState(await request<AppState>(`/api/admin/sources/${sourceId}`, {
       method: 'DELETE',
-    }),
-  runScan: (sourceId?: string) =>
-    request<AppState>('/api/admin/scan', {
+    })),
+  runScan: async (sourceId?: string) =>
+    normalizeAppState(await request<AppState>('/api/admin/scan', {
       method: 'POST',
       body: JSON.stringify(sourceId ? { sourceId } : {}),
-    }),
+    })),
   getScanStatus: () => request<ScanStatusResponse>('/api/admin/scan/status'),
-  resetPassword: (userId: string, payload: ResetPasswordPayload) =>
-    request<AppState>(`/api/admin/users/${userId}/reset-password`, {
+  resetPassword: async (userId: string, payload: ResetPasswordPayload) =>
+    normalizeAppState(await request<AppState>(`/api/admin/users/${userId}/reset-password`, {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
-  saveMetadataOverride: (seriesId: string, payload: MetadataOverridePayload) =>
-    request<AppState>(`/api/admin/series/${seriesId}/metadata-override`, {
+    })),
+  saveMetadataOverride: async (seriesId: string, payload: MetadataOverridePayload) =>
+    normalizeAppState(await request<AppState>(`/api/admin/series/${seriesId}/metadata-override`, {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
-  clearMetadataOverride: (seriesId: string) =>
-    request<AppState>(`/api/admin/series/${seriesId}/metadata-override`, {
+    })),
+  clearMetadataOverride: async (seriesId: string) =>
+    normalizeAppState(await request<AppState>(`/api/admin/series/${seriesId}/metadata-override`, {
       method: 'DELETE',
-    }),
-  refreshSeriesMetadata: (seriesId: string) =>
-    request<AppState>(`/api/admin/series/${seriesId}/metadata-refresh`, {
+    })),
+  refreshSeriesMetadata: async (seriesId: string) =>
+    normalizeAppState(await request<AppState>(`/api/admin/series/${seriesId}/metadata-refresh`, {
       method: 'POST',
       body: JSON.stringify({}),
-    }),
+    })),
 }
