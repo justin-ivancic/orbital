@@ -90,6 +90,7 @@ const dataDirectory = process.env.APP_DATA_DIR
 const demoFilesRoot = process.env.APP_DEMO_FILES_ROOT
   ? path.resolve(process.env.APP_DEMO_FILES_ROOT)
   : ''
+const androidApkPath = path.join(appRoot, 'mobile-distribution', 'orbital-android.apk')
 const {
   db,
   coversDirectory,
@@ -904,6 +905,20 @@ app.get('/api/health', sendHealthResponse)
 app.get('/healthz', sendHealthResponse)
 app.get('/api/ready', sendReadyResponse)
 app.get('/readyz', sendReadyResponse)
+
+app.get('/api/mobile/app.apk', (_request, response) => {
+  if (!fs.existsSync(androidApkPath)) {
+    response.status(404).json({ error: 'The Android app download is not available yet.' })
+    return
+  }
+
+  const apkSize = fs.statSync(androidApkPath).size
+  response.setHeader('Content-Type', 'application/vnd.android.package-archive')
+  response.setHeader('Content-Disposition', 'attachment; filename="orbital-android.apk"')
+  response.setHeader('Content-Length', String(apkSize))
+  response.setHeader('Cache-Control', 'no-cache, max-age=0, must-revalidate')
+  response.sendFile(androidApkPath)
+})
 
 app.post('/api/auth/login', async (request, response) => {
   const username = String(request.body?.username || '')

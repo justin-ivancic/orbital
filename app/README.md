@@ -17,8 +17,9 @@ Orbital Library is a self-hosted media library for browsing and reading locally 
 - PWA app shell with explicit offline downloads for chapters, books, and series
 - Installable Capacitor Android app with app-private offline storage
 - Downloads management with estimated size, verified local bytes, browser quota, repair, and delete controls
+- Direct Android APK download from the authenticated Profile page
 
-The repository does not include personal media, databases, logs, generated builds, or local environment files.
+The repository does not include personal media, databases, logs, or local environment files. It includes the current debug APK in `mobile-distribution/` so the deployed Profile page can provide a direct device download.
 
 ## Local Development
 
@@ -56,6 +57,17 @@ The APK is written to
 `android/app/build/outputs/apk/debug/app-debug.apk`. The native client defaults
 to `https://library.justinivancic.com`; set `VITE_ORBITAL_API_BASE_URL` before
 building to target another server.
+
+To rebuild and publish the APK that the hosted Profile page serves, run:
+
+```bash
+npm run mobile:publish
+```
+
+This rebuilds the Android app and copies the result to
+`mobile-distribution/orbital-android.apk`. The production server serves that
+file at `/api/mobile/app.apk`; keep the route reachable for the browser and
+native client.
 
 The server accepts the native bearer-token client from the origins in
 `APP_MOBILE_ORIGINS` (default: `https://localhost,capacitor://localhost`). If a

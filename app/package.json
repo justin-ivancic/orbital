@@ -12,6 +12,7 @@
     "build": "tsc -b && vite build",
     "mobile:build": "npm run build && cap sync android",
     "mobile:assemble": "npm run mobile:build && cd android && ./gradlew assembleDebug",
+    "mobile:publish": "npm run mobile:assemble && node scripts/publish-android-apk.mjs",
     "mobile:sync": "cap sync android",
     "mobile:open": "cap open android",
     "lint": "eslint .",

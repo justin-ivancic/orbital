@@ -105,7 +105,10 @@ npm run mobile:assemble
 
 The result is `app/android/app/build/outputs/apk/debug/app-debug.apk`. Transfer
 that file to the Boox and install it, then sign in and download the content you
-want before leaving connectivity.
+want before leaving connectivity. To make the current APK available from
+Orbital’s Profile page, run `npm run mobile:publish` from `app/`; it copies the
+APK to `app/mobile-distribution/orbital-android.apk` and serves it at
+`/api/mobile/app.apk`.
 
 The native client defaults to `https://library.justinivancic.com`. Set
 `VITE_ORBITAL_API_BASE_URL` at build time only when using another server.

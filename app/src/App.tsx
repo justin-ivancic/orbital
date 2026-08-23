@@ -113,7 +113,7 @@ import {
   type AppRoute,
   type LibraryRouteCategory,
 } from './routing'
-import { isNativeApp } from './platform'
+import { isNativeApp, resolveApiUrl } from './platform'
 
 const CbzReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.CbzReader })))
 const EpubReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.EpubReader })))
@@ -540,6 +540,8 @@ const ui = {
     changePassword: 'Change password',
     accountSettings: 'Account settings',
     passwordChangeHelp: 'Update your own password here. Admin resets stay available in Admin.',
+    androidAppDownload: 'Download Android app',
+    androidAppDownloadBody: 'Install or update Orbital directly on this device while you are online.',
     passwordChangeSuccess: 'Password updated.',
     passwordMismatch: 'New password and confirmation do not match.',
     resetLocalCache: 'Reset local cache',
@@ -816,6 +818,8 @@ const ui = {
     changePassword: 'Passwort ändern',
     accountSettings: 'Kontoeinstellungen',
     passwordChangeHelp: 'Hier kannst du dein eigenes Passwort ändern. Admin-Resets bleiben im Admin-Bereich.',
+    androidAppDownload: 'Android-App herunterladen',
+    androidAppDownloadBody: 'Orbital direkt auf diesem Gerät installieren oder aktualisieren, solange du online bist.',
     passwordChangeSuccess: 'Passwort aktualisiert.',
     passwordMismatch: 'Neues Passwort und Bestätigung stimmen nicht überein.',
     resetLocalCache: 'Lokalen Cache zurücksetzen',
@@ -5523,6 +5527,23 @@ function App() {
               <AppIcon name="chevronRight" />
             </span>
           </RouteLink>
+
+          <a
+            className="settings-row settings-row--button"
+            download="orbital-android.apk"
+            href={resolveApiUrl('/api/mobile/app.apk')}
+          >
+            <span className="settings-row__icon">
+              <AppIcon name="download" />
+            </span>
+            <div>
+              <strong>{text.androidAppDownload}</strong>
+              <p>{text.androidAppDownloadBody}</p>
+            </div>
+            <span className="settings-row__chevron">
+              <AppIcon name="chevronRight" />
+            </span>
+          </a>
 
           <button
             className="settings-row settings-row--button"
