@@ -4,11 +4,13 @@ import { useAuthenticatedResourceUrl } from './authenticatedResource'
 import { isNativeApp } from './platform'
 
 type AuthenticatedResourceImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, 'src'> & {
+  offlineOnly?: boolean
   ownerUserId?: string | null
   sourceUrl: string
 }
 
 export function AuthenticatedResourceImage({
+  offlineOnly,
   ownerUserId,
   sourceUrl,
   ...imageProps
@@ -46,6 +48,7 @@ export function AuthenticatedResourceImage({
 
   const { url } = useAuthenticatedResourceUrl(nearViewport ? sourceUrl : null, {
     cacheMode: 'image',
+    offlineOnly,
     ownerUserId,
   })
 

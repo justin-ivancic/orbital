@@ -412,7 +412,7 @@ const enqueueImageRequest = (key: string, task: () => Promise<Blob>) => {
 export const loadCachedImage = (
   ownerUserId: string,
   url: string,
-  fetcher: () => Promise<Response>,
+  fetcher?: () => Promise<Response>,
 ) => {
   const key = memoryKey(ownerUserId, url)
   const memoryImage = readMemoryImage(key)
@@ -428,6 +428,10 @@ export const loadCachedImage = (
         rememberImage(key, persistentImage)
       }
       return persistentImage
+    }
+
+    if (!fetcher) {
+      throw new Error('Image is not cached on this device.')
     }
 
     const response = await fetcher()

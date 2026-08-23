@@ -4,16 +4,41 @@ import type {
   OfflineDownloadManifest,
   OfflineDownloadRecord,
   OfflineDownloadResource,
+  SeriesSummary,
 } from './appTypes'
 import {
   isOfflineResourceComplete,
   isRetryableOfflineDownloadError,
   mergeOfflineDownloadRecord,
+  mergeOfflineLibrary,
   mergeOfflineManifestWithStoredResources,
   OfflineResourceIntegrityError,
   planReusableOfflineResources,
   progressForOfflineResources,
 } from './offlineDownloads'
+
+const makeSeriesSummary = (id: string, title: string): SeriesSummary => ({
+  id,
+  title,
+  titleShort: title,
+  category: 'novels',
+  year: 2026,
+  format: 'HTML',
+  status: 'Ready',
+  progressLabel: '3 chapters',
+  description: 'Cached catalogue description',
+  folder: '/library/novels',
+  coverUrl: `/api/covers/${id}.jpg`,
+  bannerUrl: null,
+  coverSource: 'Local cover',
+  metadataSource: 'Local metadata',
+  externalUrl: null,
+  sourceName: 'Author',
+  sourceRole: 'Writer',
+  genres: [],
+  tags: [],
+  stats: { fileCount: 3, lastScanAt: '2026-08-23T00:00:00.000Z' },
+})
 
 const makeResource = (
   key: string,
@@ -76,6 +101,35 @@ const makeRecord = (manifest: OfflineDownloadManifest): OfflineDownloadRecord =>
   downloadedResourceCount: 0,
   failureReason: null,
   retryAt: null,
+})
+
+test('offline catalogue merge keeps cached metadata and adds local-only series', () => {
+  const cachedSeries = makeSeriesSummary('series-1', 'Cached title')
+  const downloadedSeries = {
+    ...cachedSeries,
+    title: 'Offline manifest title',
+    coverUrl: 'capacitor://localhost/_capacitor_file_/cover.jpg',
+    bannerUrl: 'capacitor://localhost/_capacitor_file_/banner.jpg',
+  }
+  const localOnlySeries = {
+    ...makeSeriesSummary('series-2', 'Downloaded only'),
+    coverUrl: 'capacitor://localhost/_capacitor_file_/cover-2.jpg',
+  }
+
+  const merged = mergeOfflineLibrary(
+    [cachedSeries],
+    [downloadedSeries, localOnlySeries].map((series) => ({
+      ...series,
+      entries: [],
+      comments: [],
+    })),
+  )
+
+  assert.deepEqual(merged.map((series) => series.id), ['series-1', 'series-2'])
+  assert.equal(merged[0].title, 'Cached title')
+  assert.equal(merged[0].coverUrl, downloadedSeries.coverUrl)
+  assert.equal(merged[0].bannerUrl, downloadedSeries.bannerUrl)
+  assert.equal(merged[1].title, 'Downloaded only')
 })
 
 test('offline resource completion requires matching key, version, and size', () => {

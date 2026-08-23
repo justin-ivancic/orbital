@@ -144,3 +144,13 @@ test('uses a fresh image from persistent cache before fetching the network', asy
     }
   }
 })
+
+test('offline image reads fail locally without attempting a network request', async () => {
+  const ownerUserId = 'image-cache-offline-user'
+  const url = 'https://example.test/api/media/cover/not-cached?v=1'
+
+  await assert.rejects(
+    loadCachedImage(ownerUserId, url),
+    /Image is not cached on this device\./,
+  )
+})

@@ -109,6 +109,7 @@ import {
   OfflineDownloadCancelledError,
   OfflineResourceIntegrityError,
   planReusableOfflineResources,
+  mergeOfflineLibrary,
   waitForOfflineRetry,
 } from './offlineDownloads'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
@@ -148,6 +149,8 @@ const readerScopeOrder: ScopeId[] = ['all', ...readerCategoryOrder]
 const isReaderCategory = (category: CategoryId) => category !== 'anime'
 const resolveReaderCategory = (category: CategoryId) =>
   isReaderCategory(category) ? category : defaultReaderCategory
+const isOfflineLocalResourceUrl = (url: string) =>
+  /^(?:blob|capacitor|data|file):/i.test(url) || url.startsWith('/__orbital_offline/')
 
 const offlineStateForProfile = (offlineProfile: SessionUser) => {
   const bootstrapState: BootstrapState = {
@@ -604,7 +607,11 @@ const ui = {
     persistentStorageGranted: 'Protected by browser storage',
     persistentStorageHelp: 'Ask the browser not to evict downloaded media when space is low.',
     offlineMode: 'Offline mode',
-    offlineModeHelp: 'The server is unreachable, so only downloads stored on this device are available.',
+    offlineModeHelp: 'The server is unreachable. Your cached catalogue and bookmarks remain visible; only downloaded items can be read offline.',
+    offlineOnly: 'Online only',
+    offlineOnlyTitle: 'Not downloaded for offline reading',
+    offlineOnlyBody: 'This item is still visible from your cached catalogue, but its content is not stored on this device. Reconnect and download it first.',
+    offlineDownloadedReaderBody: 'This item is downloaded on this device. Open the offline copy to read it now.',
     downloadedBytes: 'Downloaded',
     estimatedBytes: 'Estimated',
     verifiedBytes: 'Verified',
@@ -889,7 +896,11 @@ const ui = {
     persistentStorageGranted: 'Vom Browser geschuetzt',
     persistentStorageHelp: 'Bitte den Browser, heruntergeladene Medien bei wenig Speicher nicht automatisch zu entfernen.',
     offlineMode: 'Offline-Modus',
-    offlineModeHelp: 'Der Server ist nicht erreichbar, daher sind nur Downloads auf diesem Geraet verfuegbar.',
+    offlineModeHelp: 'Der Server ist nicht erreichbar. Dein zwischengespeicherter Katalog und deine Lesezeichen bleiben sichtbar; nur heruntergeladene Inhalte können offline gelesen werden.',
+    offlineOnly: 'Nur online',
+    offlineOnlyTitle: 'Nicht für Offline-Lesen heruntergeladen',
+    offlineOnlyBody: 'Dieser Eintrag ist aus deinem zwischengespeicherten Katalog sichtbar, aber sein Inhalt liegt nicht auf diesem Gerät. Verbinde dich erneut und lade ihn zuerst herunter.',
+    offlineDownloadedReaderBody: 'Dieser Eintrag ist auf diesem Gerät heruntergeladen. Öffne die Offline-Kopie, um ihn jetzt zu lesen.',
     downloadedBytes: 'Heruntergeladen',
     estimatedBytes: 'Geschaetzt',
     verifiedBytes: 'Geprueft',
@@ -2111,7 +2122,9 @@ function App() {
         return getReadyOfflineDownloadForEntry(entries[0].preferredVariantId)
       }
 
-      return null
+      return readyOfflineDownloads.find((record) => (
+        record.manifest.resources.some((resource) => resource.seriesId === series.id)
+      )) ?? null
     },
     [getReadyOfflineDownloadForEntry, readyOfflineDownloads],
   )
@@ -2122,7 +2135,7 @@ function App() {
       cacheWriteTimerRef.current = null
     }
 
-    if (!authenticated || !appState?.user || appState.scanStatus.active) {
+    if (offlineMode || !authenticated || !appState?.user || appState.scanStatus.active) {
       return
     }
 
@@ -2145,13 +2158,25 @@ function App() {
         cacheWriteTimerRef.current = null
       }
     }
-  }, [authenticated, appState, seriesCache])
+  }, [authenticated, appState, offlineMode, seriesCache])
 
-  const visibleLibrary = library.filter((series) => isReaderCategory(series.category))
+  const visibleLibrary = useMemo(
+    () => library.filter((series) => isReaderCategory(series.category)),
+    [library],
+  )
+  const readerLibraryForDisplay = useMemo(
+    () => offlineMode
+      ? mergeOfflineLibrary(
+          visibleLibrary,
+          readyOfflineLibrary.filter((series) => isReaderCategory(series.category)),
+        )
+      : visibleLibrary,
+    [offlineMode, readyOfflineLibrary, visibleLibrary],
+  )
 
   const selectedSeriesDetail = selectedSeriesId ? seriesCache[selectedSeriesId] ?? null : null
   const selectedSeriesSummary =
-    library.find((series) => series.id === selectedSeriesId) ??
+    readerLibraryForDisplay.find((series) => series.id === selectedSeriesId) ??
     selectedSeriesDetail ??
     (activeOfflineSeries?.id === selectedSeriesId ? activeOfflineSeries : null)
   const selectedSeriesDisplayTitle = selectedSeriesSummary
@@ -2159,7 +2184,7 @@ function App() {
     : null
   const { url: selectedSeriesBannerUrl } = useAuthenticatedResourceUrl(
     selectedSeriesSummary?.bannerUrl ?? null,
-    { cacheMode: 'image', ownerUserId: sessionUser?.id },
+    { cacheMode: 'image', offlineOnly: offlineMode, ownerUserId: sessionUser?.id },
   )
   const scanStatus = appState?.scanStatus ?? null
   const scanIsActive = Boolean(scanStatus?.active)
@@ -2599,7 +2624,7 @@ function App() {
       ? library.find((series) => series.id === metadataReviewItems[0].id) ?? null
       : null)
   const creatorProfiles = Object.values(
-    visibleLibrary.reduce<Record<string, CreatorProfile>>((profiles, series) => {
+    readerLibraryForDisplay.reduce<Record<string, CreatorProfile>>((profiles, series) => {
       if (!series.sourceName) {
         return profiles
       }
@@ -2652,7 +2677,7 @@ function App() {
     ? (selectedSeriesCreatorProfile?.series.filter((series) => series.id !== selectedSeriesSummary.id) ?? []).slice(0, 6)
     : []
   const bookTopicOptions = [...new Set(
-    library
+    readerLibraryForDisplay
       .filter((series) => series.category === 'books')
       .flatMap((series) => getSeriesTopicTags(series)),
   )].sort((left, right) => left.localeCompare(right))
@@ -2682,11 +2707,28 @@ function App() {
       const offlineReadingPositions = hasPersistedOfflineReadingState
         ? readingState?.readingPositions ?? {}
         : cachedReaderState?.appState.readingPositions ?? {}
+      const cachedAppState = cachedReaderState?.appState
+      const restoredAppState: AppState = cachedAppState
+        ? {
+            ...cachedAppState,
+            appName: localState.appState.appName,
+            bootstrapAdmin: localState.appState.bootstrapAdmin,
+            openSignup: false,
+            user: offlineProfile,
+            csrfToken: null,
+            scanStatus: cachedAppState.scanStatus.active ? emptyScanStatus : cachedAppState.scanStatus,
+            sourceRoots: [],
+            sourceFolders: [],
+            users: [],
+            metadataQueue: [],
+          }
+        : localState.appState
       api.setCsrfToken(null)
       setBootstrapState(localState.bootstrapState)
+      setSeriesCache(cachedReaderState?.seriesCache ?? {})
       setAppState(
         {
-          ...localState.appState,
+          ...restoredAppState,
           bookmarks: offlineBookmarks,
           readingPositions: offlineReadingPositions,
         },
@@ -3313,6 +3355,7 @@ function App() {
     if (
       !selectedSeriesId ||
       !authenticated ||
+      offlineMode ||
       seriesCache[selectedSeriesId] ||
       activeOfflineSeries?.id === selectedSeriesId
     ) {
@@ -3358,7 +3401,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [activeOfflineSeries?.id, authenticated, selectedSeriesId, seriesCache, text.loadingSeries])
+  }, [activeOfflineSeries?.id, authenticated, offlineMode, selectedSeriesId, seriesCache, text.loadingSeries])
 
   useEffect(() => {
     if (!selectedSeries || !selectedSeries.entries.length) {
@@ -5085,6 +5128,7 @@ function App() {
             onError={(event) => {
               event.currentTarget.style.display = 'none'
             }}
+            offlineOnly={offlineMode}
             ownerUserId={sessionUser?.id}
             sourceUrl={series.coverUrl || ''}
           />
@@ -5137,7 +5181,16 @@ function App() {
         <div className="series-card__body">
           <div className="series-card__topline">
             <span className="section-kicker">{categoryLabel(series.category)}</span>
-            <span className="series-card__progress">{series.progressLabel}</span>
+            <div className="chip-row">
+              {offlineMode && (
+                <span className="chip">
+                  {getReadyOfflineDownloadForSeries(series, seriesCache[series.id] ?? null)
+                    ? text.downloadsReady
+                    : text.offlineOnly}
+                </span>
+              )}
+              <span className="series-card__progress">{series.progressLabel}</span>
+            </div>
           </div>
           <h3 className="series-card__title">{displayTitle}</h3>
           <p className="series-card__description">{series.description}</p>
@@ -5194,7 +5247,7 @@ function App() {
       </>
     ) : null
 
-  const filteredCategoryLibrary = visibleLibrary.filter((series) => {
+  const filteredCategoryLibrary = readerLibraryForDisplay.filter((series) => {
     if (series.category !== currentCategory) {
       return false
     }
@@ -5224,7 +5277,7 @@ function App() {
   const scopedSearchLibrary =
     searchScope === 'all'
       ? []
-      : visibleLibrary
+      : readerLibraryForDisplay
           .filter((series) => series.category === searchScope)
           .sort((left, right) => left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' }))
 
@@ -5232,15 +5285,16 @@ function App() {
   const searchPageBrowseResults = deferredSearch === '' ? scopedSearchLibrary : []
   const seriesDetailLoading = Boolean(
     selectedSeriesId &&
-      authenticated &&
-      !seriesCache[selectedSeriesId] &&
-      activeOfflineSeries?.id !== selectedSeriesId,
+    authenticated &&
+    !offlineMode &&
+    !seriesCache[selectedSeriesId] &&
+    activeOfflineSeries?.id !== selectedSeriesId,
   )
   const routedSeriesMissing =
     Boolean(appState) &&
     !cachedStateNeedsRefresh &&
     isSeriesRoute(currentRoute) &&
-    !library.some(
+    !readerLibraryForDisplay.some(
       (series) =>
         series.id === currentRoute.seriesId &&
         isReaderCategory(series.category),
@@ -5513,8 +5567,8 @@ function App() {
   }
 
   const renderBookmarks = () => {
-    const bookmarkLibrary = offlineMode ? readyOfflineLibrary : visibleLibrary
-    const bookmarkLibraryLoading = offlineMode && !offlineDownloadsLoaded
+    const bookmarkLibrary = readerLibraryForDisplay
+    const bookmarkLibraryLoading = offlineMode && !offlineDownloadsLoaded && bookmarkLibrary.length === 0
 
     return (
       <div className="page page--bookmarks">
@@ -5612,7 +5666,9 @@ function App() {
                       <span className="section-kicker">{categoryLabel(series.category)}</span>
                       <div className="chip-row">
                         {progressHint && <span className="chip">{progressHint}</span>}
-                        {bookmarkOfflineDownload && <span className="chip">{text.downloadsReady}</span>}
+                        {bookmarkOfflineDownload
+                          ? <span className="chip">{text.downloadsReady}</span>
+                          : offlineMode && <span className="chip">{text.offlineOnly}</span>}
                       </div>
                     </div>
                     <div className="bookmark-card__headline">
@@ -6498,7 +6554,7 @@ function App() {
             )}
             <button
               className="ghost-button"
-              disabled={Boolean(seriesOfflineBusy)}
+              disabled={offlineMode || Boolean(seriesOfflineBusy)}
               onClick={() => (
                 seriesOfflineDownload
                   ? openOfflineDownload(seriesOfflineDownload)
@@ -6553,7 +6609,12 @@ function App() {
 
   const renderEntriesTab = () => {
     if (!selectedSeries) {
-      return <article className="panel panel--padded">{seriesError || text.loadingSeries}</article>
+      return (
+        <article className="panel panel--padded">
+          <h3>{offlineMode ? text.offlineOnlyTitle : (seriesError || text.loadingSeries)}</h3>
+          <p>{offlineMode ? text.offlineOnlyBody : text.loadingSeries}</p>
+        </article>
+      )
     }
 
     const seriesOfflineTarget = {
@@ -6574,7 +6635,7 @@ function App() {
           </div>
           <button
             className="ghost-button"
-            disabled={Boolean(seriesOfflineBusy)}
+            disabled={offlineMode || Boolean(seriesOfflineBusy)}
             onClick={() => (
               seriesOfflineDownload
                 ? openOfflineDownload(seriesOfflineDownload)
@@ -6751,6 +6812,13 @@ function App() {
 
             <div className="chip-row">
               <span className="chip chip--accent">{selectedSeriesSummary.progressLabel}</span>
+              {offlineMode && (
+                <span className="chip">
+                  {getReadyOfflineDownloadForSeries(selectedSeriesSummary, selectedSeries)
+                    ? text.downloadsReady
+                    : text.offlineOnly}
+                </span>
+              )}
               {selectedSeriesSummary.sourceName && selectedSeriesCreatorProfile && (
                 <RouteLink
                   className="chip-button chip"
@@ -6859,7 +6927,44 @@ function App() {
   }
 
   const renderReaderPreview = () => {
+    if (
+      offlineMode &&
+      currentEntry &&
+      currentVariant &&
+      !isOfflineLocalResourceUrl(currentVariant.fileUrl)
+    ) {
+      return (
+        <article className="panel panel--padded">
+          <h3>{currentEntryOfflineDownload ? text.downloadsReady : text.offlineOnlyTitle}</h3>
+          <p>
+            {currentEntryOfflineDownload
+              ? text.offlineDownloadedReaderBody
+              : text.offlineOnlyBody}
+          </p>
+          {currentEntryOfflineDownload && (
+            <button
+              className="primary-button"
+              onClick={() => openOfflineDownload(currentEntryOfflineDownload, currentEntry.id)}
+              type="button"
+            >
+              <AppIcon name="offline" />
+              {text.openOffline}
+            </button>
+          )}
+        </article>
+      )
+    }
+
     if (!selectedSeriesSummary || !currentEntry || !currentVariant) {
+      if (offlineMode) {
+        return (
+          <article className="panel panel--padded">
+            <h3>{text.offlineOnlyTitle}</h3>
+            <p>{text.offlineOnlyBody}</p>
+          </article>
+        )
+      }
+
       return <article className="panel panel--padded">{text.loadingSeries}</article>
     }
 

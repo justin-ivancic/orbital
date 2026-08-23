@@ -31,6 +31,7 @@ const fetchLocalResource = (url: string) =>
 export type AuthenticatedResourceOptions = {
   cacheMode?: 'image'
   ownerUserId?: string | null
+  offlineOnly?: boolean
 }
 
 export const fetchAuthenticatedResource = async (input: string) => {
@@ -82,7 +83,7 @@ export const useAuthenticatedResourceUrl = (
       ? loadCachedImage(
           options.ownerUserId || '',
           resolvedInput,
-          () => fetchAuthenticatedResource(resolvedInput),
+          options.offlineOnly ? undefined : () => fetchAuthenticatedResource(resolvedInput),
         )
       : fetchAuthenticatedResource(resolvedInput).then(async (response) => {
           if (!response.ok) {
@@ -119,7 +120,7 @@ export const useAuthenticatedResourceUrl = (
         URL.revokeObjectURL(objectUrl)
       }
     }
-  }, [options.cacheMode, options.ownerUserId, resolvedInput, shouldCacheImage])
+  }, [options.cacheMode, options.offlineOnly, options.ownerUserId, resolvedInput, shouldCacheImage])
 
   return state
 }

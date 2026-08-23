@@ -2,6 +2,8 @@ import type {
   OfflineDownloadManifest,
   OfflineDownloadRecord,
   OfflineDownloadResource,
+  SeriesDetail,
+  SeriesSummary,
 } from './appTypes'
 import type { OfflineStoredResource } from './offlineStorage'
 
@@ -14,6 +16,35 @@ export type OfflineResourceTransfer = {
   sourceDownloadId: string
   resource: OfflineDownloadResource
   stored: OfflineStoredResource
+}
+
+/**
+ * Keeps the last-known catalogue visible while replacing only media URLs that
+ * have a verified local copy. A single-entry download must not replace the
+ * richer cached series metadata with the small offline manifest.
+ */
+export const mergeOfflineLibrary = (
+  cachedLibrary: SeriesSummary[],
+  offlineLibrary: SeriesDetail[],
+): SeriesSummary[] => {
+  const mergedById = new Map(cachedLibrary.map((series) => [series.id, series]))
+
+  offlineLibrary.forEach((offlineSeries) => {
+    const cachedSeries = mergedById.get(offlineSeries.id)
+
+    mergedById.set(
+      offlineSeries.id,
+      cachedSeries
+        ? {
+            ...cachedSeries,
+            coverUrl: offlineSeries.coverUrl ?? cachedSeries.coverUrl,
+            bannerUrl: offlineSeries.bannerUrl ?? cachedSeries.bannerUrl,
+          }
+        : offlineSeries,
+    )
+  })
+
+  return [...mergedById.values()]
 }
 
 export class OfflineDownloadCancelledError extends Error {
