@@ -54,8 +54,9 @@ require another login.
 > run the commands below from this directory. The pinned Gradle wrapper is
 > downloaded automatically when needed.
 
-Before each release, increment both `versionCode` in
-`android/app/build.gradle` and `androidAppVersionCode` in `src/platform.ts`.
+Before each release, increment `versionCode` and `versionName` in
+`android/app/build.gradle`, and `androidAppVersionCode` and
+`androidAppVersionName` in `src/platform.ts`.
 Keeping the version code higher than the installed APK lets Android update the
 app in place without requiring an uninstall, which preserves downloaded books
 and series.

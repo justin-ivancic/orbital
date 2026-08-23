@@ -1,16 +1,19 @@
 import { Capacitor } from '@capacitor/core'
+import { Directory, Encoding, Filesystem } from '@capacitor/filesystem'
 
 const imageCacheNamePrefix = 'orbital-images-v1'
 const imageDatabaseName = 'orbital-image-cache-v1'
 const imageDatabaseVersion = 1
 const imageStoreName = 'images'
-const imageCacheTtlMs = 30 * 24 * 60 * 60 * 1000
-const imageCacheMaxEntries = 128
-const imageCacheMaxBytes = 100 * 1024 * 1024
+const imageCacheTtlMs = 90 * 24 * 60 * 60 * 1000
+const imageCacheMaxEntries = 1024
+const imageCacheMaxBytes = 256 * 1024 * 1024
 const imageRequestConcurrency = 3
 const cachedAtHeader = 'X-Orbital-Cached-At'
 const accessedAtHeader = 'X-Orbital-Accessed-At'
 const sizeHeader = 'X-Orbital-Size'
+const nativeImageRootPath = 'orbital/covers'
+const nativeImageStorageEnabled = Capacitor.isNativePlatform()
 
 type MemoryImage = {
   blob: Blob
@@ -30,6 +33,13 @@ type IndexedDbImageRecord = {
   blob: Blob
   cachedAt: number
   accessedAt: number
+  size: number
+}
+
+type NativeImageMetadata = {
+  url: string
+  cachedAt: number
+  contentType: string
   size: number
 }
 
@@ -55,6 +65,172 @@ const canUseIndexedDb = () => typeof indexedDB !== 'undefined'
 
 const imageStorageKey = (ownerUserId: string, url: string) =>
   `${encodeURIComponent(ownerUserId)}:${url}`
+
+const nativeImageOwnerPath = (ownerUserId: string) =>
+  `${nativeImageRootPath}/${encodeURIComponent(ownerUserId)}`
+
+const nativeImageHash = (url: string) => {
+  let first = 2166136261
+  let second = 2166136261 ^ 0x9e3779b9
+
+  for (let index = 0; index < url.length; index += 1) {
+    const code = url.charCodeAt(index)
+    first = Math.imul(first ^ code, 16777619)
+    second = Math.imul(second ^ (code + index), 16777619)
+  }
+
+  return `${(first >>> 0).toString(16)}-${(second >>> 0).toString(16)}`
+}
+
+const nativeImagePath = (ownerUserId: string, url: string) =>
+  `${nativeImageOwnerPath(ownerUserId)}/${nativeImageHash(url)}.bin`
+
+const nativeImageMetadataPath = (ownerUserId: string, url: string) =>
+  `${nativeImageOwnerPath(ownerUserId)}/${nativeImageHash(url)}.json`
+
+const blobToBase64 = async (blob: Blob) => {
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  let binary = ''
+
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+
+  return btoa(binary)
+}
+
+const base64ToBlob = (value: string, contentType: string) => {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+
+  return new Blob([bytes], { type: contentType })
+}
+
+const readNativeImage = async (ownerUserId: string, url: string) => {
+  if (!nativeImageStorageEnabled) {
+    return null
+  }
+
+  try {
+    const metadataResult = await Filesystem.readFile({
+      path: nativeImageMetadataPath(ownerUserId, url),
+      directory: Directory.Data,
+      encoding: Encoding.UTF8,
+    })
+    const metadata = JSON.parse(String(metadataResult.data)) as NativeImageMetadata
+
+    if (
+      metadata.url !== url ||
+      !Number.isFinite(metadata.cachedAt) ||
+      Date.now() - metadata.cachedAt >= imageCacheTtlMs
+    ) {
+      throw new Error('Native image cache entry is stale.')
+    }
+
+    const imageResult = await Filesystem.readFile({
+      path: nativeImagePath(ownerUserId, url),
+      directory: Directory.Data,
+    })
+    if (typeof imageResult.data !== 'string') {
+      return null
+    }
+
+    const blob = base64ToBlob(imageResult.data, metadata.contentType || 'application/octet-stream')
+    return blob.size === metadata.size ? blob : null
+  } catch {
+    return null
+  }
+}
+
+const writeNativeImage = async (ownerUserId: string, url: string, blob: Blob) => {
+  if (!nativeImageStorageEnabled) {
+    return false
+  }
+
+  const path = nativeImagePath(ownerUserId, url)
+  const temporaryPath = `${path}.part`
+  const previousPath = `${path}.previous`
+  const metadataPath = nativeImageMetadataPath(ownerUserId, url)
+  const temporaryMetadataPath = `${metadataPath}.part`
+  const previousMetadataPath = `${metadataPath}.previous`
+  const metadata: NativeImageMetadata = {
+    url,
+    cachedAt: Date.now(),
+    contentType: blob.type || 'application/octet-stream',
+    size: blob.size,
+  }
+
+  await Filesystem.deleteFile({ path: temporaryPath, directory: Directory.Data }).catch(() => undefined)
+  await Filesystem.deleteFile({ path: temporaryMetadataPath, directory: Directory.Data }).catch(() => undefined)
+  await Filesystem.writeFile({
+    path: temporaryPath,
+    directory: Directory.Data,
+    data: await blobToBase64(blob),
+    recursive: true,
+  })
+  await Filesystem.writeFile({
+    path: temporaryMetadataPath,
+    directory: Directory.Data,
+    data: JSON.stringify(metadata),
+    encoding: Encoding.UTF8,
+    recursive: true,
+  })
+
+  await Filesystem.deleteFile({ path: previousPath, directory: Directory.Data }).catch(() => undefined)
+  await Filesystem.deleteFile({ path: previousMetadataPath, directory: Directory.Data }).catch(() => undefined)
+
+  let previousImageMoved = false
+  let previousMetadataMoved = false
+
+  try {
+    await Filesystem.rename({ from: path, to: previousPath, directory: Directory.Data })
+    previousImageMoved = true
+  } catch {
+    // There may not be an existing image on the first attempt.
+  }
+
+  try {
+    await Filesystem.rename({
+      from: metadataPath,
+      to: previousMetadataPath,
+      directory: Directory.Data,
+    })
+    previousMetadataMoved = true
+  } catch {
+    // There may not be existing metadata on the first attempt.
+  }
+
+  try {
+    await Filesystem.rename({ from: temporaryPath, to: path, directory: Directory.Data })
+    await Filesystem.rename({
+      from: temporaryMetadataPath,
+      to: metadataPath,
+      directory: Directory.Data,
+    })
+  } catch (error) {
+    await Filesystem.deleteFile({ path, directory: Directory.Data }).catch(() => undefined)
+    await Filesystem.deleteFile({ path: metadataPath, directory: Directory.Data }).catch(() => undefined)
+    if (previousImageMoved) {
+      await Filesystem.rename({ from: previousPath, to: path, directory: Directory.Data }).catch(() => undefined)
+    }
+    if (previousMetadataMoved) {
+      await Filesystem.rename({
+        from: previousMetadataPath,
+        to: metadataPath,
+        directory: Directory.Data,
+      }).catch(() => undefined)
+    }
+    throw error
+  }
+
+  await Filesystem.deleteFile({ path: previousPath, directory: Directory.Data }).catch(() => undefined)
+  await Filesystem.deleteFile({ path: previousMetadataPath, directory: Directory.Data }).catch(() => undefined)
+  return true
+}
 
 const openImageDb = () =>
   new Promise<IDBDatabase>((resolve, reject) => {
@@ -279,7 +455,17 @@ const readCacheStorageImage = async (ownerUserId: string, url: string) => {
 
 const readPersistentImage = async (ownerUserId: string, url: string) => {
   const cacheImage = await readCacheStorageImage(ownerUserId, url)
-  return cacheImage || await readIndexedDbImage(ownerUserId, url).catch(() => null)
+  if (cacheImage) {
+    return cacheImage
+  }
+
+  const nativeImage = await readNativeImage(ownerUserId, url)
+  if (nativeImage) {
+    return nativeImage
+  }
+
+  const indexedDbImage = await readIndexedDbImage(ownerUserId, url).catch(() => null)
+  return indexedDbImage
 }
 
 const prunePersistentImages = async (cache: Cache) => {
@@ -357,11 +543,16 @@ const writePersistentImage = async (
   blob: Blob,
 ) => {
   const nativeImageCache = Capacitor.isNativePlatform()
-  const cacheStored = nativeImageCache
-    ? false
-    : await writeCacheStorageImage(ownerUserId, url, blob)
+  if (nativeImageCache) {
+    const nativeStored = await writeNativeImage(ownerUserId, url, blob).catch(() => false)
+    if (!nativeStored) {
+      await writeIndexedDbImage(ownerUserId, url, blob).catch(() => undefined)
+    }
+    return
+  }
 
-  if (!cacheStored || nativeImageCache) {
+  const cacheStored = await writeCacheStorageImage(ownerUserId, url, blob)
+  if (!cacheStored) {
     await writeIndexedDbImage(ownerUserId, url, blob).catch(() => undefined)
   }
 }
@@ -463,6 +654,14 @@ export const clearImageCache = async (ownerUserId?: string) => {
 
   if (ownerUserId) {
     ownerGenerations.set(ownerUserId, (ownerGenerations.get(ownerUserId) || 0) + 1)
+  }
+
+  if (nativeImageStorageEnabled) {
+    await Filesystem.rmdir({
+      path: ownerUserId ? nativeImageOwnerPath(ownerUserId) : nativeImageRootPath,
+      directory: Directory.Data,
+      recursive: true,
+    }).catch(() => undefined)
   }
 
   await (async () => {

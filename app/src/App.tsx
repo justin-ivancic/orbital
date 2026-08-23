@@ -131,7 +131,12 @@ import {
   type AppRoute,
   type LibraryRouteCategory,
 } from './routing'
-import { androidAppVersionCode, isNativeApp, resolveApiUrl } from './platform'
+import {
+  androidAppVersionCode,
+  androidAppVersionName,
+  isNativeApp,
+  resolveApiUrl,
+} from './platform'
 
 const CbzReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.CbzReader })))
 const EpubReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.EpubReader })))
@@ -441,6 +446,8 @@ const resetOrbitalLocalCaches = async () => {
       // Orbital does not currently register a service worker; this keeps future resets robust.
     }
   }
+
+  await clearImageCache()
 }
 
 const readCachedReaderState = (bootstrapState: BootstrapState) => {
@@ -574,6 +581,9 @@ const ui = {
     confirmPassword: 'Confirm password',
     changePassword: 'Change password',
     accountSettings: 'Account settings',
+    appVersion: 'App version',
+    androidApp: 'Android app',
+    webApp: 'Web app',
     passwordChangeHelp: 'Update your own password here. Admin resets stay available in Admin.',
     androidAppDownload: 'Download Android app',
     androidAppDownloadBody: 'Install or update Orbital directly on this device while you are online.',
@@ -863,6 +873,9 @@ const ui = {
     confirmPassword: 'Passwort bestätigen',
     changePassword: 'Passwort ändern',
     accountSettings: 'Kontoeinstellungen',
+    appVersion: 'App-Version',
+    androidApp: 'Android-App',
+    webApp: 'Web-App',
     passwordChangeHelp: 'Hier kannst du dein eigenes Passwort ändern. Admin-Resets bleiben im Admin-Bereich.',
     androidAppDownload: 'Android-App herunterladen',
     androidAppDownloadBody: 'Orbital direkt auf diesem Gerät installieren oder aktualisieren, solange du online bist.',
@@ -5124,7 +5137,7 @@ function App() {
             alt=""
             className="poster__image"
             decoding="async"
-            loading="lazy"
+            loading={offlineMode ? 'eager' : 'lazy'}
             onError={(event) => {
               event.currentTarget.style.display = 'none'
             }}
@@ -5359,9 +5372,26 @@ function App() {
     bookmarkFilter === 'all'
       ? readerBookmarks
       : readerBookmarks.filter((bookmark) => bookmark.category === bookmarkFilter)
-  const sortedBookmarks = [...filteredBookmarks].sort(
-    (left, right) => new Date(right.lastSeen).getTime() - new Date(left.lastSeen).getTime(),
-  )
+  const sortedBookmarks = [...filteredBookmarks].sort((left, right) => {
+    const leftTime = Date.parse(left.lastSeen)
+    const rightTime = Date.parse(right.lastSeen)
+
+    if (Number.isFinite(leftTime) || Number.isFinite(rightTime)) {
+      if (!Number.isFinite(leftTime)) {
+        return 1
+      }
+
+      if (!Number.isFinite(rightTime)) {
+        return -1
+      }
+
+      if (rightTime !== leftTime) {
+        return rightTime - leftTime
+      }
+    }
+
+    return left.seriesId.localeCompare(right.seriesId) || left.entryId.localeCompare(right.entryId)
+  })
   const getBookmarkStats = (bookmark: Bookmark, series: SeriesSummary) => {
     const entryTotal = Math.max(series.stats.fileCount, bookmark.entryIndex + 1, 1)
     const entryCurrent = Math.min(entryTotal, Math.max(bookmark.entryIndex + 1, 1))
@@ -5985,6 +6015,20 @@ function App() {
             <div>
               <strong>{text.accountSettings}</strong>
               <p>{appState?.user?.role || 'member'}</p>
+            </div>
+          </div>
+
+          <div className="settings-row">
+            <span className="settings-row__icon">
+              <AppIcon name="settings" />
+            </span>
+            <div>
+              <strong>{text.appVersion}</strong>
+              <p>
+                {isNativeApp
+                  ? `${text.androidApp} ${androidAppVersionName} (build ${androidAppVersionCode})`
+                  : text.webApp}
+              </p>
             </div>
           </div>
 
