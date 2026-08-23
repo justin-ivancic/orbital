@@ -50,6 +50,7 @@ import {
 } from 'lucide-react'
 import './App.css'
 import { ApiError, api, normalizeAppState, normalizeSeriesDetail } from './api'
+import { AuthenticatedResourceImage } from './AuthenticatedResourceImage'
 import type {
   AppState,
   Bookmark,
@@ -97,6 +98,7 @@ import {
   requestOfflineStoragePersistence,
 } from './offlineStorage'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
+import { useAuthenticatedResourceUrl } from './authenticatedResource'
 import {
   appRoutePath,
   categoryForRoute,
@@ -190,7 +192,6 @@ const readerChromeInteractionSelector = [
 const isReaderChromeInteractionTarget = (target: EventTarget | null) =>
   target instanceof Element && Boolean(target.closest(readerChromeInteractionSelector))
 
-const preloadedPosterUrls = new Set<string>()
 const appStateCacheVersion = 2
 const maxCachedSeriesDetails = 24
 const appStateCachePrefix = `orbital:reader-cache:v${appStateCacheVersion}`
@@ -301,17 +302,6 @@ const routeReadingPosition = (
     page: route.page ?? route.percent ?? savedPosition?.page ?? 0,
     locationType: route.percent != null ? 'percent' : 'page',
   }
-}
-
-const preloadPosterImage = (url: string) => {
-  if (typeof window === 'undefined' || preloadedPosterUrls.has(url)) {
-    return
-  }
-
-  preloadedPosterUrls.add(url)
-  const image = new Image()
-  image.decoding = 'async'
-  image.src = url
 }
 
 type CachedReaderState = {
@@ -2061,19 +2051,6 @@ function App() {
   )
 
   useEffect(() => {
-    if (!authenticated || !appState?.bookmarks.length) {
-      return
-    }
-
-    const coverUrlsBySeriesId = new Map(library.map((series) => [series.id, series.coverUrl]))
-    const bookmarkedCoverUrls = appState.bookmarks
-      .map((bookmark) => coverUrlsBySeriesId.get(bookmark.seriesId))
-      .filter((coverUrl): coverUrl is string => Boolean(coverUrl))
-
-    bookmarkedCoverUrls.slice(0, 48).forEach(preloadPosterImage)
-  }, [authenticated, appState?.bookmarks, library])
-
-  useEffect(() => {
     if (cacheWriteTimerRef.current) {
       window.clearTimeout(cacheWriteTimerRef.current)
       cacheWriteTimerRef.current = null
@@ -2098,25 +2075,15 @@ function App() {
 
   const visibleLibrary = library.filter((series) => isReaderCategory(series.category))
 
-  useEffect(() => {
-    if (!authenticated) {
-      return
-    }
-
-    library
-      .filter((series) => isReaderCategory(series.category))
-      .map((series) => series.coverUrl)
-      .filter((coverUrl): coverUrl is string => Boolean(coverUrl))
-      .slice(0, 72)
-      .forEach(preloadPosterImage)
-  }, [authenticated, library])
-
   const selectedSeriesSummary =
     library.find((series) => series.id === selectedSeriesId) ??
     (activeOfflineSeries?.id === selectedSeriesId ? activeOfflineSeries : null)
   const selectedSeriesDisplayTitle = selectedSeriesSummary
     ? getSeriesDisplayTitle(selectedSeriesSummary)
     : null
+  const { url: selectedSeriesBannerUrl } = useAuthenticatedResourceUrl(
+    selectedSeriesSummary?.bannerUrl ?? null,
+  )
   const scanStatus = appState?.scanStatus ?? null
   const scanIsActive = Boolean(scanStatus?.active)
   const selectedSeries =
@@ -4687,7 +4654,7 @@ function App() {
         className={`poster ${compact ? 'poster--compact' : ''} ${hasCover ? 'poster--covered' : ''}`}
       >
         {hasCover && (
-          <img
+          <AuthenticatedResourceImage
             alt=""
             className="poster__image"
             decoding="async"
@@ -4695,7 +4662,7 @@ function App() {
             onError={(event) => {
               event.currentTarget.style.display = 'none'
             }}
-            src={series.coverUrl || undefined}
+            sourceUrl={series.coverUrl || ''}
           />
         )}
         <span className="poster__badge">{categoryLabel(series.category)}</span>
@@ -6230,12 +6197,12 @@ function App() {
 
     return (
       <div className="page page--series">
-        <section className={`series-hero ${selectedSeriesSummary.bannerUrl ? 'series-hero--banner' : ''}`}>
-          {selectedSeriesSummary.bannerUrl && (
+        <section className={`series-hero ${selectedSeriesBannerUrl ? 'series-hero--banner' : ''}`}>
+          {selectedSeriesBannerUrl && (
             <div
               aria-hidden="true"
               className="series-hero__banner"
-              style={{ backgroundImage: `url(${selectedSeriesSummary.bannerUrl})` }}
+              style={{ backgroundImage: `url(${selectedSeriesBannerUrl})` }}
             />
           )}
           <div className="series-hero__poster">{renderPoster(selectedSeriesSummary)}</div>
@@ -6757,7 +6724,11 @@ function App() {
               type="button"
             >
               {item.coverUrl ? (
-                <img alt="" className="metadata-review__cover" src={item.coverUrl} />
+                <AuthenticatedResourceImage
+                  alt=""
+                  className="metadata-review__cover"
+                  sourceUrl={item.coverUrl}
+                />
               ) : (
                 <div className="metadata-review__cover metadata-review__cover--empty" />
               )}
@@ -6823,7 +6794,11 @@ function App() {
         <>
           <div className="metadata-editor__summary">
             {selectedMetadataSeries.coverUrl ? (
-              <img alt="" className="metadata-editor__cover" src={selectedMetadataSeries.coverUrl} />
+              <AuthenticatedResourceImage
+                alt=""
+                className="metadata-editor__cover"
+                sourceUrl={selectedMetadataSeries.coverUrl}
+              />
             ) : (
               <div className="metadata-editor__cover metadata-editor__cover--empty" />
             )}

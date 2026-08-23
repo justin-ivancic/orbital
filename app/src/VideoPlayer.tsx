@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import type { EntryVariant, MediaTrackCollection } from './appTypes'
+import { useAuthenticatedResourceUrl } from './authenticatedResource'
 
 type VideoPlayerProps = {
   variant: EntryVariant
@@ -27,6 +28,27 @@ const embeddedSubtitlePrefix = 'embedded-subtitle-'
 const japaneseAudioAliases = ['japanese', 'jpn', 'ja', 'jp']
 const englishSubtitleAliases = ['english', 'eng']
 const germanSubtitleAliases = ['german', 'deutsch', 'deu', 'ger']
+
+function AuthenticatedSubtitleTrack({
+  track,
+}: {
+  track: MediaTrackCollection['subtitles'][number]
+}) {
+  const { url } = useAuthenticatedResourceUrl(track.url)
+
+  if (!url) {
+    return null
+  }
+
+  return (
+    <track
+      default={false}
+      kind="subtitles"
+      label={`${track.label} (${track.format})`}
+      src={url}
+    />
+  )
+}
 
 const trackMatchesLanguage = (value: string, aliases: string[]) => {
   const normalizedValue = value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
@@ -86,6 +108,10 @@ const selectPreferredSubtitleTrack = (tracks: MediaTrackCollection['subtitles'])
 }
 
 export function VideoPlayer({ variant }: VideoPlayerProps) {
+  const {
+    url: authenticatedVideoUrl,
+    error: videoResourceError,
+  } = useAuthenticatedResourceUrl(variant.fileUrl)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const defaultEmbeddedAudioIndexRef = useRef<number | null>(null)
@@ -118,6 +144,9 @@ export function VideoPlayer({ variant }: VideoPlayerProps) {
   )
   const selectedEmbeddedSubtitleTrack =
     embeddedSubtitleTracks.find((track) => track.id === selectedSubtitleTrackId) ?? null
+  const {
+    url: authenticatedAudioUrl,
+  } = useAuthenticatedResourceUrl(selectedAudioTrack?.url ?? null)
 
   useEffect(() => {
     setTracksOpen(false)
@@ -325,8 +354,16 @@ export function VideoPlayer({ variant }: VideoPlayerProps) {
       return
     }
 
-    if (audio.src !== new URL(selectedAudioTrack.url, window.location.origin).toString()) {
-      audio.src = selectedAudioTrack.url
+    if (!authenticatedAudioUrl) {
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+      video.muted = false
+      return
+    }
+
+    if (audio.src !== new URL(authenticatedAudioUrl, window.location.origin).toString()) {
+      audio.src = authenticatedAudioUrl
     }
 
     video.muted = true
@@ -387,7 +424,7 @@ export function VideoPlayer({ variant }: VideoPlayerProps) {
       video.removeEventListener('ended', handleEnded)
       audio.pause()
     }
-  }, [selectedAudioTrack, selectedEmbeddedAudioTrack])
+  }, [authenticatedAudioUrl, selectedAudioTrack, selectedEmbeddedAudioTrack])
 
   useEffect(() => {
     const video = videoRef.current
@@ -441,21 +478,16 @@ export function VideoPlayer({ variant }: VideoPlayerProps) {
   return (
     <article className="player-card">
       <video
+        aria-busy={!authenticatedVideoUrl}
         className="player-screen player-screen--video"
         controls
         playsInline
         preload="metadata"
         ref={videoRef}
-        src={variant.fileUrl}
+        src={authenticatedVideoUrl || undefined}
       >
         {supportedSubtitleTracks.map((track) => (
-          <track
-            default={false}
-            key={track.id}
-            kind="subtitles"
-            label={`${track.label} (${track.format})`}
-            src={track.url}
-          />
+          <AuthenticatedSubtitleTrack key={track.id} track={track} />
         ))}
       </video>
       <audio aria-hidden="true" preload="metadata" ref={audioRef} />
@@ -481,6 +513,10 @@ export function VideoPlayer({ variant }: VideoPlayerProps) {
           </span>
         )}
       </div>
+
+      {videoResourceError && (
+        <p className="player-track-bar__hint">Unable to load this video: {videoResourceError}</p>
+      )}
 
       {tracksOpen && (
         <div className="player-track-panel">

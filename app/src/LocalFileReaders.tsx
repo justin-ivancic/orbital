@@ -46,6 +46,12 @@ import {
   readingStyleLabels,
 } from './readerSettings'
 import { resolvePagedSwipeAction } from './readerGestures'
+import { AuthenticatedResourceImage } from './AuthenticatedResourceImage'
+import {
+  fetchAuthenticatedResource,
+  useAuthenticatedResourceUrl,
+} from './authenticatedResource'
+import { resolveApiUrl } from './platform'
 
 const imagePattern = /\.(avif|gif|jpe?g|png|webp)$/i
 const minReaderWidth = 280
@@ -1388,6 +1394,11 @@ export function PdfEmbed({
   settings,
   toolbarAccessory,
 }: PdfEmbedProps) {
+  const {
+    url: authenticatedFileUrl,
+    loading: resourceLoading,
+    error: resourceError,
+  } = useAuthenticatedResourceUrl(fileUrl)
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const pageRefs = useRef<Array<HTMLDivElement | null>>([])
   const didInitialScrollRef = useRef(false)
@@ -1418,8 +1429,19 @@ export function PdfEmbed({
     setNativeFallback(false)
     didInitialScrollRef.current = false
 
+    if (resourceError) {
+      setLoading(false)
+      setError(resourceError)
+      return
+    }
+
+    if (resourceLoading || !authenticatedFileUrl) {
+      setLoading(true)
+      return
+    }
+
     const loadingTask = getDocument({
-      url: fileUrl,
+      url: authenticatedFileUrl,
       iccUrl: pdfIccUrl,
       disableAutoFetch: true,
       disableStream: true,
@@ -1471,7 +1493,7 @@ export function PdfEmbed({
       disposed = true
       void loadingTask.destroy()
     }
-  }, [fileUrl, initialPage, touchPdfCompatibility])
+  }, [authenticatedFileUrl, fileUrl, initialPage, resourceError, resourceLoading, touchPdfCompatibility])
 
   useEffect(() => {
     const element = viewportRef.current
@@ -1801,13 +1823,15 @@ export function PdfEmbed({
 
   const showNativePdf = nativeFallback || Boolean(error)
   const nativePdfUrl = useMemo(() => {
-    if (fileUrl.includes('#')) {
-      return fileUrl
+    const sourceUrl = authenticatedFileUrl || fileUrl
+
+    if (sourceUrl.includes('#')) {
+      return sourceUrl
     }
 
     const targetPage = pageCount > 0 ? clampPage(visiblePage, pageCount) : Math.max(1, initialPage)
-    return `${fileUrl}#page=${targetPage}`
-  }, [fileUrl, initialPage, pageCount, visiblePage])
+    return `${sourceUrl}#page=${targetPage}`
+  }, [authenticatedFileUrl, fileUrl, initialPage, pageCount, visiblePage])
 
   const movePdfGroup = (offset: number) => {
     const nextGroup = pdfGroups[Math.min(Math.max(activePdfGroupIndex + offset, 0), pdfGroups.length - 1)]
@@ -1994,9 +2018,7 @@ export function EpubReader({
 
     const load = async () => {
       try {
-        const response = await fetch(fileUrl, {
-          credentials: 'same-origin',
-        })
+        const response = await fetchAuthenticatedResource(fileUrl)
 
         if (!response.ok) {
           throw new Error(`Failed to load EPUB (${response.status})`)
@@ -2262,12 +2284,8 @@ export function CbzReader({
           return
         }
 
-        const response = await fetch(
+        const response = await fetchAuthenticatedResource(
           `/api/media/cbz/${encodeURIComponent(entryId)}/manifest?refresh=${Date.now()}`,
-          {
-            cache: 'no-store',
-            credentials: 'same-origin',
-          },
         )
 
         if (!response.ok) {
@@ -2286,7 +2304,7 @@ export function CbzReader({
           .map((page, index) => ({
             archiveIndex: Number.isFinite(page.archiveIndex) ? page.archiveIndex : index,
             name: page.name,
-            url: page.url,
+            url: resolveApiUrl(page.url),
           }))
 
         if (disposed) {
@@ -2503,24 +2521,6 @@ export function CbzReader({
     }
   }
 
-  useEffect(() => {
-    if (settings.layout !== 'paged' || !activeGroup) {
-      return
-    }
-
-    const nearbyGroups = groups.slice(
-      Math.max(activeGroupIndex - 1, 0),
-      Math.min(activeGroupIndex + 2, groups.length),
-    )
-
-    nearbyGroups.flatMap((group) => group.pages).forEach((page) => {
-      const image = new Image()
-      image.decoding = 'async'
-      image.src = page.url
-      void image.decode?.().catch(() => undefined)
-    })
-  }, [activeGroup, activeGroupIndex, groups, settings.layout])
-
   const renderCbzGroup = (group: CbzGroup, index: number, paged: boolean) => {
     const isSinglePageGroup = group.pages.length === 1 && effectiveViewMode === 'single'
     const isSpreadPair = group.pages.length > 1
@@ -2589,11 +2589,11 @@ export function CbzReader({
 
               return (
                 <div className={panelClassName} key={page.url}>
-                  <img
+                  <AuthenticatedResourceImage
                     alt={`${title} page ${page.logicalPage}`}
                     decoding="async"
                     loading={shouldEagerLoadGroup ? 'eager' : 'lazy'}
-                    src={page.url}
+                    sourceUrl={page.url}
                   />
                 </div>
               )
@@ -2693,7 +2693,7 @@ export function HtmlChapterReader({
 
     const load = async () => {
       try {
-        const response = await fetch(fileUrl)
+        const response = await fetchAuthenticatedResource(fileUrl)
 
         if (!response.ok) {
           throw new Error(`Failed to load chapter (${response.status})`)
@@ -3005,7 +3005,7 @@ export function TextFileReader({
 
     const load = async () => {
       try {
-        const response = await fetch(fileUrl)
+        const response = await fetchAuthenticatedResource(fileUrl)
 
         if (!response.ok) {
           throw new Error(`Failed to load document (${response.status})`)

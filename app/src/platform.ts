@@ -1,7 +1,7 @@
 import { Capacitor } from '@capacitor/core'
 
 export const isNativeApp = Capacitor.isNativePlatform()
-export const androidAppVersionCode = 2
+export const androidAppVersionCode = 3
 
 const configuredApiBaseUrl = String(import.meta.env.VITE_ORBITAL_API_BASE_URL || '').trim()
 const defaultApiBaseUrl = 'https://library.justinivancic.com'
@@ -11,7 +11,7 @@ export const apiBaseUrl = isNativeApp
   : ''
 
 export const resolveApiUrl = (input: string) => {
-  if (/^https?:\/\//i.test(input)) {
+  if (/^[a-z][a-z\d+\-.]*:/i.test(input)) {
     return input
   }
 
