@@ -44,6 +44,12 @@ type NativeImageMetadata = {
   size: number
 }
 
+export type ImageCacheSummary = {
+  storedBytes: number
+  imageCount: number
+  persistent: boolean
+}
+
 const memoryImages = new Map<string, MemoryImage>()
 const inFlightImages = new Map<string, Promise<Blob>>()
 const imageQueue: ImageQueueItem[] = []
@@ -111,6 +117,40 @@ const base64ToBlob = (value: string, contentType: string) => {
   return new Blob([bytes], { type: contentType })
 }
 
+const readNativeImageRecord = async (
+  ownerUserId: string,
+  url: string,
+  cacheKey: string,
+  suffix: string,
+  allowStaleUrl: boolean,
+) => {
+  const metadataResult = await Filesystem.readFile({
+    path: `${nativeImageMetadataPath(ownerUserId, cacheKey)}${suffix}`,
+    directory: Directory.Data,
+    encoding: Encoding.UTF8,
+  })
+  const metadata = JSON.parse(String(metadataResult.data)) as NativeImageMetadata
+
+  if (
+    (!allowStaleUrl && metadata.url !== url) ||
+    !Number.isFinite(metadata.cachedAt) ||
+    Date.now() - metadata.cachedAt >= imageCacheTtlMs
+  ) {
+    return null
+  }
+
+  const imageResult = await Filesystem.readFile({
+    path: `${nativeImagePath(ownerUserId, cacheKey)}${suffix}`,
+    directory: Directory.Data,
+  })
+  if (typeof imageResult.data !== 'string') {
+    return null
+  }
+
+  const blob = base64ToBlob(imageResult.data, metadata.contentType || 'application/octet-stream')
+  return blob.size === metadata.size ? blob : null
+}
+
 const readNativeImage = async (
   ownerUserId: string,
   url: string,
@@ -124,32 +164,54 @@ const readNativeImage = async (
   const candidateKeys = [...new Set([cacheKey, url])]
   for (const candidateKey of candidateKeys) {
     try {
-      const metadataResult = await Filesystem.readFile({
-        path: nativeImageMetadataPath(ownerUserId, candidateKey),
-        directory: Directory.Data,
-        encoding: Encoding.UTF8,
-      })
-      const metadata = JSON.parse(String(metadataResult.data)) as NativeImageMetadata
-
-      if (
-        (!allowStaleUrl && metadata.url !== url) ||
-        !Number.isFinite(metadata.cachedAt) ||
-        Date.now() - metadata.cachedAt >= imageCacheTtlMs
-      ) {
-        continue
-      }
-
-      const imageResult = await Filesystem.readFile({
-        path: nativeImagePath(ownerUserId, candidateKey),
-        directory: Directory.Data,
-      })
-      if (typeof imageResult.data !== 'string') {
-        continue
-      }
-
-      const blob = base64ToBlob(imageResult.data, metadata.contentType || 'application/octet-stream')
-      if (blob.size === metadata.size) {
+      const blob = await readNativeImageRecord(ownerUserId, url, candidateKey, '', allowStaleUrl)
+      if (blob) {
         return blob
+      }
+    } catch {
+      // Try an interrupted-write recovery below, then the next key.
+    }
+
+    try {
+      const previousBlob = await readNativeImageRecord(
+        ownerUserId,
+        url,
+        candidateKey,
+        '.previous',
+        allowStaleUrl,
+      )
+      if (previousBlob) {
+        await Filesystem.deleteFile({
+          path: nativeImagePath(ownerUserId, candidateKey),
+          directory: Directory.Data,
+        }).catch(() => undefined)
+        await Filesystem.deleteFile({
+          path: nativeImageMetadataPath(ownerUserId, candidateKey),
+          directory: Directory.Data,
+        }).catch(() => undefined)
+        let imageRestored = false
+        try {
+          await Filesystem.rename({
+            from: `${nativeImagePath(ownerUserId, candidateKey)}.previous`,
+            to: nativeImagePath(ownerUserId, candidateKey),
+            directory: Directory.Data,
+          })
+          imageRestored = true
+          await Filesystem.rename({
+            from: `${nativeImageMetadataPath(ownerUserId, candidateKey)}.previous`,
+            to: nativeImageMetadataPath(ownerUserId, candidateKey),
+            directory: Directory.Data,
+          })
+          return previousBlob
+        } catch {
+          if (imageRestored) {
+            await Filesystem.rename({
+              from: nativeImagePath(ownerUserId, candidateKey),
+              to: `${nativeImagePath(ownerUserId, candidateKey)}.previous`,
+              directory: Directory.Data,
+            }).catch(() => undefined)
+          }
+        }
       }
     } catch {
       // Try the next key. Older builds stored covers under their full URL.
@@ -232,6 +294,8 @@ const writeNativeImage = async (
   } catch (error) {
     await Filesystem.deleteFile({ path, directory: Directory.Data }).catch(() => undefined)
     await Filesystem.deleteFile({ path: metadataPath, directory: Directory.Data }).catch(() => undefined)
+    await Filesystem.deleteFile({ path: temporaryPath, directory: Directory.Data }).catch(() => undefined)
+    await Filesystem.deleteFile({ path: temporaryMetadataPath, directory: Directory.Data }).catch(() => undefined)
     if (previousImageMoved) {
       await Filesystem.rename({ from: previousPath, to: path, directory: Directory.Data }).catch(() => undefined)
     }
@@ -394,6 +458,43 @@ const readIndexedDbImagesForOwner = async (ownerUserId: string) => {
     }
 
     await done
+  } finally {
+    db.close()
+  }
+}
+
+const getIndexedDbImageSummary = async (ownerUserId: string): Promise<ImageCacheSummary> => {
+  if (!canUseIndexedDb()) {
+    return { storedBytes: 0, imageCount: 0, persistent: false }
+  }
+
+  const db = await openImageDb()
+
+  try {
+    const transaction = db.transaction(imageStoreName, 'readonly')
+    const done = imageTransactionDone(transaction)
+    const request = transaction
+      .objectStore(imageStoreName)
+      .index('ownerUserId')
+      .getAll(IDBKeyRange.only(ownerUserId))
+    const records = await new Promise<IndexedDbImageRecord[]>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result as IndexedDbImageRecord[])
+      request.onerror = () => reject(request.error || new Error('Could not inspect image cache.'))
+    })
+    await done
+
+    const freshRecords = records.filter((record) => (
+      Number.isFinite(record.cachedAt) &&
+      Date.now() - record.cachedAt < imageCacheTtlMs &&
+      Number.isFinite(record.size) &&
+      record.size > 0
+    ))
+
+    return {
+      storedBytes: freshRecords.reduce((total, record) => total + record.size, 0),
+      imageCount: freshRecords.length,
+      persistent: true,
+    }
   } finally {
     db.close()
   }
@@ -614,6 +715,111 @@ const writePersistentImage = async (
   const cacheStored = await writeCacheStorageImage(ownerUserId, url, blob)
   if (!cacheStored) {
     await writeIndexedDbImage(ownerUserId, url, cacheKey, blob).catch(() => undefined)
+  }
+}
+
+const getNativeImageSummary = async (ownerUserId: string): Promise<ImageCacheSummary> => {
+  if (!nativeImageStorageEnabled) {
+    return { storedBytes: 0, imageCount: 0, persistent: false }
+  }
+
+  try {
+    const result = await Filesystem.readdir({
+      path: nativeImageOwnerPath(ownerUserId),
+      directory: Directory.Data,
+    })
+    const imageFiles = result.files.filter((file) => file.type === 'file' && file.name.endsWith('.bin'))
+    const imageSizes = await Promise.all(imageFiles.map(async (file) => {
+      const fileSize = Number(file.size)
+      if (Number.isFinite(fileSize) && fileSize > 0) {
+        return fileSize
+      }
+
+      try {
+        const metadataResult = await Filesystem.readFile({
+          path: `${nativeImageOwnerPath(ownerUserId)}/${file.name.replace(/\.bin$/, '.json')}`,
+          directory: Directory.Data,
+          encoding: Encoding.UTF8,
+        })
+        const metadata = JSON.parse(String(metadataResult.data)) as NativeImageMetadata
+        return Number.isFinite(metadata.size) && metadata.size > 0 ? metadata.size : null
+      } catch {
+        return null
+      }
+    }))
+    const validSizes = imageSizes.filter((size): size is number => size != null)
+
+    return {
+      storedBytes: validSizes.reduce((total, size) => total + size, 0),
+      imageCount: validSizes.length,
+      persistent: true,
+    }
+  } catch {
+    return { storedBytes: 0, imageCount: 0, persistent: true }
+  }
+}
+
+const getCacheStorageSummary = async (ownerUserId: string): Promise<ImageCacheSummary> => {
+  const storage = cacheStorage()
+  if (!storage) {
+    return { storedBytes: 0, imageCount: 0, persistent: false }
+  }
+
+  try {
+    const cache = await storage.open(cacheNameForOwner(ownerUserId))
+    const requests = await cache.keys()
+    const entries = await Promise.all(
+      requests.map(async (request) => {
+        const response = await cache.match(request)
+        if (!response || !isFresh(response)) {
+          return null
+        }
+
+        const headerSize = Number(response.headers.get(sizeHeader))
+        const size = Number.isFinite(headerSize) && headerSize > 0
+          ? headerSize
+          : (await response.blob()).size
+
+        return size > 0 ? size : null
+      }),
+    )
+    const sizes = entries.filter((size): size is number => size != null)
+
+    return {
+      storedBytes: sizes.reduce((total, size) => total + size, 0),
+      imageCount: sizes.length,
+      persistent: true,
+    }
+  } catch {
+    return { storedBytes: 0, imageCount: 0, persistent: false }
+  }
+}
+
+export const getImageCacheSummary = async (ownerUserId: string): Promise<ImageCacheSummary> => {
+  if (nativeImageStorageEnabled) {
+    const nativeSummary = await getNativeImageSummary(ownerUserId)
+    const fallbackSummary = await getIndexedDbImageSummary(ownerUserId).catch(() => ({
+      storedBytes: 0,
+      imageCount: 0,
+      persistent: true,
+    }))
+    return {
+      storedBytes: nativeSummary.storedBytes + fallbackSummary.storedBytes,
+      imageCount: nativeSummary.imageCount + fallbackSummary.imageCount,
+      persistent: true,
+    }
+  }
+
+  const cacheSummary = await getCacheStorageSummary(ownerUserId)
+  const fallbackSummary = await getIndexedDbImageSummary(ownerUserId).catch(() => ({
+    storedBytes: 0,
+    imageCount: 0,
+    persistent: false,
+  }))
+  return {
+    storedBytes: cacheSummary.storedBytes + fallbackSummary.storedBytes,
+    imageCount: cacheSummary.imageCount + fallbackSummary.imageCount,
+    persistent: cacheSummary.persistent || fallbackSummary.persistent,
   }
 }
 

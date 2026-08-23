@@ -118,7 +118,11 @@ import {
 } from './offlineDownloads'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
 import { useAuthenticatedResourceUrl } from './authenticatedResource'
-import { clearImageCache } from './imageCache'
+import {
+  clearImageCache,
+  getImageCacheSummary,
+  type ImageCacheSummary,
+} from './imageCache'
 import {
   appRoutePath,
   categoryForRoute,
@@ -639,6 +643,11 @@ const ui = {
     verifiedBytes: 'Verified',
     browserStorageUsed: 'Browser storage used',
     browserStorageQuota: 'Browser storage limit',
+    coverStorage: 'Cover images stored',
+    coverStorageHelp: 'Covers that appeared on this device are kept locally for offline browsing.',
+    clearCoverStorage: 'Free cover space',
+    clearCoverStorageBusy: 'Freeing cover space...',
+    clearCoverStorageConfirm: 'Remove the locally stored cover images? They can be downloaded again when you browse the library online.',
     downloadFailed: 'Download failed',
     downloadStale: 'Server copy changed',
     repairDownload: 'Repair',
@@ -931,6 +940,11 @@ const ui = {
     verifiedBytes: 'Geprueft',
     browserStorageUsed: 'Browser-Speicher genutzt',
     browserStorageQuota: 'Browser-Speicherlimit',
+    coverStorage: 'Gespeicherte Titelbilder',
+    coverStorageHelp: 'Titelbilder, die auf diesem Gerät angezeigt wurden, bleiben zum Offline-Durchsuchen lokal gespeichert.',
+    clearCoverStorage: 'Titelbildspeicher freigeben',
+    clearCoverStorageBusy: 'Titelbildspeicher wird freigegeben...',
+    clearCoverStorageConfirm: 'Gespeicherte Titelbilder von diesem Gerät entfernen? Sie können beim nächsten Online-Besuch erneut geladen werden.',
     downloadFailed: 'Download fehlgeschlagen',
     downloadStale: 'Server-Kopie geaendert',
     repairDownload: 'Reparieren',
@@ -1833,6 +1847,9 @@ function App() {
   const [offlineDownloadsLoaded, setOfflineDownloadsLoaded] = useState(false)
   const [offlineStorageSummary, setOfflineStorageSummary] =
     useState<OfflineStorageSummary | null>(null)
+  const [imageCacheSummary, setImageCacheSummary] =
+    useState<ImageCacheSummary | null>(null)
+  const [imageCacheBusy, setImageCacheBusy] = useState(false)
   const [offlineFilter, setOfflineFilter] = useState<'active' | 'ready' | 'attention' | 'all'>('all')
   const [offlineBusyIds, setOfflineBusyIds] = useState<Record<string, string>>({})
   const [offlineResumeTick, setOfflineResumeTick] = useState(0)
@@ -3038,6 +3055,7 @@ function App() {
       }
       setOfflineDownloads([])
       setOfflineStorageSummary(null)
+      setImageCacheSummary(null)
       setOfflineDownloadsLoaded(true)
       return
     }
@@ -3045,9 +3063,10 @@ function App() {
     setOfflineDownloadsLoaded(false)
 
     try {
-      const [downloads, summary] = await Promise.all([
+      const [downloads, summary, covers] = await Promise.all([
         listOfflineDownloads(sessionUser.id),
         getOfflineStorageSummary(sessionUser.id),
+        getImageCacheSummary(sessionUser.id),
       ])
 
       if (refreshRequest !== offlineRefreshRequestRef.current) {
@@ -3056,6 +3075,7 @@ function App() {
 
       setOfflineDownloads(downloads)
       setOfflineStorageSummary(summary)
+      setImageCacheSummary(covers)
     } catch (error) {
       if (refreshRequest === offlineRefreshRequestRef.current && !offlineMode) {
         setStateError(error instanceof Error ? error.message : text.authErrorFallback)
@@ -3070,6 +3090,14 @@ function App() {
   useEffect(() => {
     void refreshOfflineDownloads()
   }, [refreshOfflineDownloads])
+
+  useEffect(() => {
+    if (currentView !== 'downloads' || !sessionUser) {
+      return
+    }
+
+    void getImageCacheSummary(sessionUser.id).then(setImageCacheSummary).catch(() => undefined)
+  }, [currentView, sessionUser])
 
   useEffect(() => {
     const shouldPollForTransportRecovery =
@@ -3772,9 +3800,13 @@ function App() {
       )
     })
     if (sessionUser) {
-      getOfflineStorageSummary(sessionUser.id)
-        .then(setOfflineStorageSummary)
-        .catch(() => undefined)
+      Promise.all([
+        getOfflineStorageSummary(sessionUser.id),
+        getImageCacheSummary(sessionUser.id),
+      ]).then(([summary, covers]) => {
+        setOfflineStorageSummary(summary)
+        setImageCacheSummary(covers)
+      }).catch(() => undefined)
     }
   }
 
@@ -4269,6 +4301,27 @@ function App() {
       setStateError(error instanceof Error ? error.message : text.authErrorFallback)
     } finally {
       setPersistentStorageBusy(false)
+    }
+  }
+
+  const handleClearImageCache = async () => {
+    if (!sessionUser || imageCacheBusy || imageCacheSummary?.storedBytes === 0) {
+      return
+    }
+
+    if (!window.confirm(text.clearCoverStorageConfirm)) {
+      return
+    }
+
+    setImageCacheBusy(true)
+
+    try {
+      await clearImageCache(sessionUser.id)
+      setImageCacheSummary(await getImageCacheSummary(sessionUser.id))
+    } catch (error) {
+      setStateError(error instanceof Error ? error.message : text.authErrorFallback)
+    } finally {
+      setImageCacheBusy(false)
     }
   }
 
@@ -5166,7 +5219,7 @@ function App() {
             cacheKey={`cover:${series.id}`}
             className="poster__image"
             decoding="async"
-            loading={offlineMode ? 'eager' : 'lazy'}
+            loading={offlineMode || compact ? 'eager' : 'lazy'}
             onError={(event) => {
               event.currentTarget.style.display = 'none'
             }}
@@ -5843,6 +5896,13 @@ function App() {
               <strong>{formatBytes(offlineStorageSummary?.verifiedBytes ?? 0, language)}</strong>
             </div>
             <div className="downloads-storage-card__row">
+              <span>{text.coverStorage}</span>
+              <strong>
+                {formatBytes(imageCacheSummary?.storedBytes ?? 0, language)}
+                {imageCacheSummary?.imageCount ? ` · ${imageCacheSummary.imageCount}` : ''}
+              </strong>
+            </div>
+            <div className="downloads-storage-card__row">
               <span>{text.browserStorageUsed}</span>
               <strong>{formatBytes(offlineStorageSummary?.browserUsageBytes, language)}</strong>
             </div>
@@ -5872,8 +5932,18 @@ function App() {
                 <AppIcon name="trash" />
                 {text.deleteAllDownloads}
               </button>
+              <button
+                className="ghost-button ghost-button--small"
+                disabled={!imageCacheSummary?.storedBytes || imageCacheBusy}
+                onClick={() => void handleClearImageCache()}
+                type="button"
+              >
+                <AppIcon name="trash" />
+                {imageCacheBusy ? text.clearCoverStorageBusy : text.clearCoverStorage}
+              </button>
             </div>
             <p className="helper-text">{text.persistentStorageHelp}</p>
+            <p className="helper-text">{text.coverStorageHelp}</p>
           </div>
         </section>
 
@@ -8087,7 +8157,7 @@ function App() {
   }
 
   return (
-    <div className={`app-shell ${currentView === 'reader' ? 'app-shell--reader' : ''}`}>
+    <div className={`app-shell ${isNativeApp ? 'app-shell--native' : ''} ${currentView === 'reader' ? 'app-shell--reader' : ''}`}>
       <a className="skip-link" href="#main-content">{text.skipToContent}</a>
       {currentView !== 'reader' && (
       <header className={`topbar ${topbarHidden ? 'topbar--hidden' : ''}`}>

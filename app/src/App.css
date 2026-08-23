@@ -7421,6 +7421,14 @@ button[aria-label] {
   }
 }
 
+@media (max-width: 900px) {
+  /* Android 15 can draw the WebView below the transparent status bar. Keep the
+     library controls below that system touch zone without changing browser layout. */
+  .app-shell--native:not(.app-shell--reader) .main-shell {
+    padding-top: calc(40px + env(safe-area-inset-top));
+  }
+}
+
 @media print {
   .topbar,
   .bottom-nav,

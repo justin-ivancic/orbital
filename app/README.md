@@ -17,6 +17,7 @@ Orbital Library is a self-hosted media library for browsing and reading locally 
 - PWA app shell with explicit offline downloads for chapters, books, and series
 - Installable Capacitor Android app with app-private offline storage
 - Downloads management with estimated size, verified local bytes, browser quota, repair, and delete controls
+- Naturally loaded cover images are stored in app-private storage for offline browsing, with cover storage accounting and cleanup controls in Downloads
 - Direct Android APK download from the authenticated Profile page
 
 The repository does not include personal media, databases, logs, or local environment files. It includes the current debug APK in `mobile-distribution/` so the deployed Profile page can provide a direct device download.
@@ -44,8 +45,10 @@ The Android target packages the Orbital interface inside an installable APK.
 The server, SQLite database, and NAS-backed media remain unchanged. After
 installing, sign in while online and download the books or series you want from
 `Downloads`; those copies are stored in Android app-private storage and remain
-readable without Wi-Fi. Offline startup uses the local profile and does not
-require another login.
+readable without Wi-Fi. Cover images that become visible while browsing are
+stored separately in the same app-private area, so cached bookmarks and library
+sections can retain their covers offline. Offline startup uses the local profile
+and does not require another login.
 
 > **Future APK release note:** The Capacitor Filesystem plugin requires JDK 21;
 > JDK 17 is not sufficient. The Android build also needs Android SDK platform

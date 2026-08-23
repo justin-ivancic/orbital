@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clearImageCache, loadCachedImage } from './imageCache.ts'
+import {
+  clearImageCache,
+  getImageCacheSummary,
+  loadCachedImage,
+} from './imageCache.ts'
 
 class TestCache {
   private readonly responses = new Map<string, Response>()
@@ -132,6 +136,49 @@ test('uses a fresh image from persistent cache before fetching the network', asy
 
     assert.equal(requestCount, 0)
     assert.equal(await blob.text(), 'persisted')
+  } finally {
+    await clearImageCache(ownerUserId)
+    if (previousWindow === undefined) {
+      Reflect.deleteProperty(globalThis, 'window')
+    } else {
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        value: previousWindow,
+      })
+    }
+  }
+})
+
+test('reports persisted cover bytes and count for storage management', async () => {
+  const ownerUserId = 'image-cache-summary-user'
+  const url = 'https://example.test/api/media/cover/summary?v=1'
+  const storage = new TestCacheStorage()
+  const previousWindow = (globalThis as { window?: unknown }).window
+
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { caches: storage },
+  })
+
+  try {
+    await clearImageCache(ownerUserId)
+    await storage.cache.put(
+      url,
+      new Response(new Blob(['persisted-cover'], { type: 'image/png' }), {
+        headers: {
+          'Content-Type': 'image/png',
+          'X-Orbital-Accessed-At': String(Date.now()),
+          'X-Orbital-Cached-At': String(Date.now()),
+          'X-Orbital-Size': '15',
+        },
+      }),
+    )
+
+    assert.deepEqual(await getImageCacheSummary(ownerUserId), {
+      storedBytes: 15,
+      imageCount: 1,
+      persistent: true,
+    })
   } finally {
     await clearImageCache(ownerUserId)
     if (previousWindow === undefined) {
