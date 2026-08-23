@@ -178,7 +178,40 @@ test('reports persisted cover bytes and count for storage management', async () 
       storedBytes: 15,
       imageCount: 1,
       persistent: true,
+      lastWriteError: null,
     })
+  } finally {
+    await clearImageCache(ownerUserId)
+    if (previousWindow === undefined) {
+      Reflect.deleteProperty(globalThis, 'window')
+    } else {
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        value: previousWindow,
+      })
+    }
+  }
+})
+
+test('updates persistent cover storage after a cover is loaded', async () => {
+  const ownerUserId = 'image-cache-write-summary-user'
+  const url = 'https://example.test/api/media/cover/write-summary?v=1'
+  const storage = new TestCacheStorage()
+  const previousWindow = (globalThis as { window?: unknown }).window
+
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { caches: storage },
+  })
+
+  try {
+    await clearImageCache(ownerUserId)
+    await loadCachedImage(ownerUserId, url, async () => responseFor('stored-cover'))
+
+    const summary = await getImageCacheSummary(ownerUserId)
+    assert.equal(summary.imageCount, 1)
+    assert.ok(summary.storedBytes > 0)
+    assert.equal(summary.lastWriteError, null)
   } finally {
     await clearImageCache(ownerUserId)
     if (previousWindow === undefined) {

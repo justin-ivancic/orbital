@@ -48,14 +48,28 @@ export type ImageCacheSummary = {
   storedBytes: number
   imageCount: number
   persistent: boolean
+  lastWriteError?: string | null
 }
+
+export const imageCacheChangedEvent = 'orbital:image-cache-changed'
 
 const memoryImages = new Map<string, MemoryImage>()
 const inFlightImages = new Map<string, Promise<Blob>>()
 const imageQueue: ImageQueueItem[] = []
 const ownerGenerations = new Map<string, number>()
+const imageCacheWriteErrors = new Map<string, string>()
 let memoryImageBytes = 0
 let activeImageRequests = 0
+
+const notifyImageCacheChanged = (ownerUserId: string) => {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') {
+    return
+  }
+
+  window.dispatchEvent(new CustomEvent(imageCacheChangedEvent, {
+    detail: { ownerUserId },
+  }))
+}
 
 const cacheNameForOwner = (ownerUserId: string) =>
   `${imageCacheNamePrefix}:${encodeURIComponent(ownerUserId)}`
@@ -507,7 +521,7 @@ const writeIndexedDbImage = async (
   blob: Blob,
 ) => {
   if (!canUseIndexedDb()) {
-    return
+    return false
   }
 
   const db = await openImageDb()
@@ -527,6 +541,7 @@ const writeIndexedDbImage = async (
     } satisfies IndexedDbImageRecord)
     await done
     await pruneIndexedDbImages(db, ownerUserId)
+    return true
   } finally {
     db.close()
   }
@@ -700,22 +715,61 @@ const writePersistentImage = async (
   cacheKey: string,
   blob: Blob,
 ) => {
-  const nativeImageCache = Capacitor.isNativePlatform()
-  if (nativeImageCache) {
-    const nativeStored = await writeNativeImage(ownerUserId, url, cacheKey, blob).catch(() => false)
-    const nativeVerified = nativeStored
-      ? Boolean(await readNativeImage(ownerUserId, url, cacheKey).catch(() => null))
-      : false
-    if (!nativeVerified) {
-      await writeIndexedDbImage(ownerUserId, url, cacheKey, blob).catch(() => undefined)
+  let stored = false
+  let lastError: unknown = null
+
+  if (Capacitor.isNativePlatform()) {
+    // IndexedDB is the canonical cover store on Android. It is app-private,
+    // survives WebView restarts, and is the same persistence layer used by the
+    // web fallback. Keep the native filesystem reader below for older covers
+    // and use it only if IndexedDB is unavailable on a particular WebView.
+    try {
+      stored = await writeIndexedDbImage(ownerUserId, url, cacheKey, blob)
+      if (stored) {
+        const verified = await readIndexedDbImage(ownerUserId, url, cacheKey)
+        stored = Boolean(verified && verified.size === blob.size)
+      }
+    } catch (error) {
+      lastError = error
     }
-    return
+
+    if (!stored) {
+      try {
+        stored = await writeNativeImage(ownerUserId, url, cacheKey, blob)
+        if (stored) {
+          const verified = await readNativeImage(ownerUserId, url, cacheKey)
+          stored = Boolean(verified && verified.size === blob.size)
+        }
+      } catch (error) {
+        lastError = error
+      }
+    }
+  } else {
+    try {
+      stored = await writeCacheStorageImage(ownerUserId, url, blob)
+    } catch (error) {
+      lastError = error
+    }
+
+    if (!stored) {
+      try {
+        stored = await writeIndexedDbImage(ownerUserId, url, cacheKey, blob)
+      } catch (error) {
+        lastError = error
+      }
+    }
   }
 
-  const cacheStored = await writeCacheStorageImage(ownerUserId, url, blob)
-  if (!cacheStored) {
-    await writeIndexedDbImage(ownerUserId, url, cacheKey, blob).catch(() => undefined)
+  if (stored) {
+    imageCacheWriteErrors.delete(ownerUserId)
+  } else {
+    imageCacheWriteErrors.set(
+      ownerUserId,
+      lastError instanceof Error ? lastError.message : 'Cover storage could not be verified.',
+    )
   }
+  notifyImageCacheChanged(ownerUserId)
+  return stored
 }
 
 const getNativeImageSummary = async (ownerUserId: string): Promise<ImageCacheSummary> => {
@@ -807,6 +861,7 @@ export const getImageCacheSummary = async (ownerUserId: string): Promise<ImageCa
       storedBytes: nativeSummary.storedBytes + fallbackSummary.storedBytes,
       imageCount: nativeSummary.imageCount + fallbackSummary.imageCount,
       persistent: true,
+      lastWriteError: imageCacheWriteErrors.get(ownerUserId) || null,
     }
   }
 
@@ -820,6 +875,7 @@ export const getImageCacheSummary = async (ownerUserId: string): Promise<ImageCa
     storedBytes: cacheSummary.storedBytes + fallbackSummary.storedBytes,
     imageCount: cacheSummary.imageCount + fallbackSummary.imageCount,
     persistent: cacheSummary.persistent || fallbackSummary.persistent,
+    lastWriteError: imageCacheWriteErrors.get(ownerUserId) || null,
   }
 }
 
@@ -921,6 +977,7 @@ export const clearImageCache = async (ownerUserId?: string) => {
 
   if (ownerUserId) {
     ownerGenerations.set(ownerUserId, (ownerGenerations.get(ownerUserId) || 0) + 1)
+    imageCacheWriteErrors.delete(ownerUserId)
   }
 
   if (nativeImageStorageEnabled) {
@@ -974,5 +1031,9 @@ export const clearImageCache = async (ownerUserId?: string) => {
     }
   } catch {
     // IndexedDB cleanup is best-effort and never blocks authentication or reading.
+  }
+
+  if (ownerUserId) {
+    notifyImageCacheChanged(ownerUserId)
   }
 }

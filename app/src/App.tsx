@@ -121,6 +121,7 @@ import { useAuthenticatedResourceUrl } from './authenticatedResource'
 import {
   clearImageCache,
   getImageCacheSummary,
+  imageCacheChangedEvent,
   type ImageCacheSummary,
 } from './imageCache'
 import {
@@ -3100,6 +3101,24 @@ function App() {
   }, [currentView, sessionUser])
 
   useEffect(() => {
+    if (!sessionUser) {
+      return
+    }
+
+    const handleImageCacheChanged = (event: Event) => {
+      const ownerUserId = (event as CustomEvent<{ ownerUserId?: string }>).detail?.ownerUserId
+      if (ownerUserId !== sessionUser.id) {
+        return
+      }
+
+      void getImageCacheSummary(sessionUser.id).then(setImageCacheSummary).catch(() => undefined)
+    }
+
+    window.addEventListener(imageCacheChangedEvent, handleImageCacheChanged)
+    return () => window.removeEventListener(imageCacheChangedEvent, handleImageCacheChanged)
+  }, [sessionUser])
+
+  useEffect(() => {
     const shouldPollForTransportRecovery =
       scanPollUntil != null && Date.now() < scanPollUntil
 
@@ -5944,6 +5963,11 @@ function App() {
             </div>
             <p className="helper-text">{text.persistentStorageHelp}</p>
             <p className="helper-text">{text.coverStorageHelp}</p>
+            {imageCacheSummary?.lastWriteError && (
+              <p className="auth-error">
+                Cover storage error: {imageCacheSummary.lastWriteError}
+              </p>
+            )}
           </div>
         </section>
 
