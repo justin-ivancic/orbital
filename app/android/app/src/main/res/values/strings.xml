@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Orbital Library</string>
+    <string name="title_activity_main">Orbital Library</string>
+    <string name="package_name">com.justinivancic.orbital</string>
+    <string name="custom_url_scheme">com.justinivancic.orbital</string>
+</resources>

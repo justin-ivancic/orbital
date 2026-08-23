@@ -79,6 +79,7 @@ type RequestWithUser = Request & {
   sessionUser: ReturnType<typeof findSessionUser>
   sessionId: string | null
   sessionCsrfToken: string | null
+  authMode: 'browser' | 'mobile'
 }
 
 const port = Number(process.env.PORT || 4300)
@@ -181,6 +182,12 @@ const useSecureSessionCookie = explicitCookieSecure
   ? explicitCookieSecure === '1'
   : process.env.NODE_ENV === 'production'
 const enableStrictTransportSecurity = process.env.APP_ENABLE_HSTS === '1'
+const mobileOrigins = new Set(
+  (process.env.APP_MOBILE_ORIGINS || 'https://localhost,capacitor://localhost')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+)
 
 const app = express()
 
@@ -463,12 +470,15 @@ const startBackgroundScan = (sourceId?: string) => {
 
 const getSessionFromRequest = (request: RequestWithUser) => {
   const cookies = parseCookie(request.headers.cookie || '')
-  const sessionId = cookies[SESSION_COOKIE_NAME] || null
+  const authorization = request.get('authorization') || ''
+  const bearerToken = authorization.match(/^Bearer\s+([^\s]+)$/i)?.[1] || null
+  const sessionId = bearerToken || cookies[SESSION_COOKIE_NAME] || null
   const sessionContext = findSessionContext(db, sessionId)
 
   request.sessionId = sessionId
   request.sessionUser = sessionContext?.user ?? null
   request.sessionCsrfToken = sessionContext?.csrfToken ?? null
+  request.authMode = bearerToken ? 'mobile' : 'browser'
 }
 
 app.use((request, _response, next) => {
@@ -505,7 +515,11 @@ const requireAdmin = (request: Request, response: Response, next: NextFunction) 
 }
 
 const unsafeHttpMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
-const csrfExemptPaths = new Set(['/api/auth/login', '/api/auth/signup'])
+const csrfExemptPaths = new Set([
+  '/api/auth/login',
+  '/api/auth/signup',
+  '/api/mobile/auth/login',
+])
 
 const safeTokenEquals = (left: string, right: string) => {
   const leftBuffer = Buffer.from(left)
@@ -537,6 +551,11 @@ const requireCsrfForUnsafeMethods = (request: Request, response: Response, next:
     return
   }
 
+  if (typedRequest.authMode === 'mobile') {
+    next()
+    return
+  }
+
   const fetchSite = request.get('sec-fetch-site')
   if (fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite)) {
     response.status(403).json({ error: 'Cross-site requests are not allowed.' })
@@ -561,6 +580,28 @@ const requireCsrfForUnsafeMethods = (request: Request, response: Response, next:
 }
 
 app.use('/api', requireCsrfForUnsafeMethods)
+
+app.use('/api', (request, response, next) => {
+  const origin = request.get('origin')
+
+  if (!origin || !mobileOrigins.has(origin)) {
+    next()
+    return
+  }
+
+  response.setHeader('Access-Control-Allow-Origin', origin)
+  response.setHeader('Access-Control-Allow-Credentials', 'false')
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-CSRF-Token')
+  response.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS')
+  response.setHeader('Vary', 'Origin')
+
+  if (request.method === 'OPTIONS') {
+    response.status(204).end()
+    return
+  }
+
+  next()
+})
 
 const setSessionCookie = (response: Response, sessionId: string, expiresAt: number) => {
   response.setHeader(
@@ -893,6 +934,41 @@ app.post('/api/auth/login', async (request, response) => {
   clearRateLimitBuckets(db, rateLimiters.map((rateLimiter) => rateLimiter.key))
   const session = startFreshSession(request, response, user.id)
   response.json(getStatePayload(user, session.csrfToken))
+})
+
+app.post('/api/mobile/auth/login', async (request, response) => {
+  const username = String(request.body?.username || '')
+  const rateLimiters = getLoginRateLimiters(request, username)
+  let user: Awaited<ReturnType<typeof loginUser>>
+
+  try {
+    assertRateLimitersAllowed(rateLimiters)
+    user = await loginUser(
+      db,
+      username,
+      String(request.body?.password || ''),
+    )
+  } catch (error) {
+    if (!(error instanceof RateLimitError)) {
+      try {
+        recordRateLimiterFailures(rateLimiters)
+      } catch (rateLimitError) {
+        sendError(response, rateLimitError)
+        return
+      }
+    }
+
+    sendError(response, error, 401)
+    return
+  }
+
+  clearRateLimitBuckets(db, rateLimiters.map((rateLimiter) => rateLimiter.key))
+  const session = createSession(db, user.id)
+  response.json({
+    ...getStatePayload(user, session.csrfToken),
+    accessToken: session.sessionId,
+    accessTokenExpiresAt: session.expiresAt,
+  })
 })
 
 app.post('/api/auth/signup', async (request, response) => {

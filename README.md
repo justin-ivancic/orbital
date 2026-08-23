@@ -13,6 +13,7 @@ The repository ships as an empty library app. It does not include personal media
 - Reader and player support for books, novels, manga, magazines, and video
 - Bookmark and reading-position tracking per user
 - Device-local offline downloads for chapters, books, and series through the PWA
+- Installable Android app with app-private offline storage for downloaded content
 - Downloads screen with estimated size, verified local bytes, browser quota, repair, and delete controls
 - Series comments and basic account management
 - Optional metadata refresh through remote providers
@@ -84,7 +85,30 @@ npm run dev
 npm run build
 npm run lint
 npm run start
+npm run mobile:assemble
 ```
+
+### Android app
+
+Orbital includes a Capacitor Android target. The APK bundles the web interface
+locally, while the existing Express server and NAS-backed media library remain
+the source of truth. Sign in while online, download books or series from the
+Downloads screen, and the installed app can open those copies without a network
+connection. The downloaded files live in the app's private Android storage and
+are separate from browser/PWA storage.
+
+Build a debug APK from `app/`:
+
+```bash
+npm run mobile:assemble
+```
+
+The result is `app/android/app/build/outputs/apk/debug/app-debug.apk`. Transfer
+that file to the Boox and install it, then sign in and download the content you
+want before leaving connectivity.
+
+The native client defaults to `https://library.justinivancic.com`. Set
+`VITE_ORBITAL_API_BASE_URL` at build time only when using another server.
 
 ## Configuration
 
@@ -102,6 +126,7 @@ The most important environment variables are:
 | `APP_COOKIE_SECURE` | Set to `1` when serving behind HTTPS. |
 | `APP_ENABLE_HSTS` | Set to `1` only after HTTPS is confirmed. |
 | `APP_TRUST_PROXY` | Set to `1` only when Orbital is behind a trusted reverse proxy. |
+| `APP_MOBILE_ORIGINS` | Comma-separated Capacitor origins allowed to call the bearer-token mobile API. The default is `https://localhost,capacitor://localhost`. |
 
 See [`app/.env.example`](app/.env.example) for the full example.
 
@@ -137,6 +162,7 @@ app/
 - Use `/healthz` for container and reverse-proxy health checks.
 - Serve `/sw.js` with `Service-Worker-Allowed: /` and `Cache-Control: no-cache`; the bundled server does this automatically.
 - Do not edge-cache `/api/*`, `/api/media/*`, `/api/offline/*`, or other authenticated media routes. Cache only immutable built assets such as `/assets/*`.
+- If Cloudflare applies a verification challenge globally, exclude the authenticated API and media paths used by the Android client; the native app cannot complete an interactive browser challenge for background API and download requests.
 - Keep proxy compression/transforms off for media responses so range requests and offline byte verification remain stable.
 - Keep `data/` backed up if bookmarks, users, comments, and scan state matter.
 - Do not commit `.env`, local databases, media folders, or generated builds.

@@ -10,6 +10,7 @@ import type {
   DirectoryListing,
   MetadataOverridePayload,
   MediaTracksResponse,
+  MobileAuthResponse,
   OfflineCapabilities,
   OfflineDownloadEstimate,
   OfflineDownloadManifest,
@@ -24,19 +25,47 @@ import type {
   SeriesResponse,
   UpdateSourcePayload,
 } from './appTypes'
+import { resolveApiUrl, isNativeApp } from './platform'
+import {
+  clearMobileSession,
+  ensureMobileSessionLoaded,
+  getMobileSession,
+  saveMobileSession,
+} from './mobileSession'
 
 let csrfToken: string | null = null
+
+export class ApiError extends Error {
+  readonly status: number | null
+
+  constructor(message: string, status: number | null = null) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
 
 const unsafeHttpMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
 const isUnsafeRequest = (method: string | undefined) =>
   unsafeHttpMethods.has((method || 'GET').toUpperCase())
 
+const getRequestHeaders = (init?: RequestInit) => {
+  const mobileSession = getMobileSession()
+
+  return {
+    ...(init?.body != null ? { 'Content-Type': 'application/json' } : {}),
+    ...(isUnsafeRequest(init?.method) && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+    ...(mobileSession ? { Authorization: `Bearer ${mobileSession.accessToken}` } : {}),
+  }
+}
+
 const request = async <T,>(input: string, init?: RequestInit) => {
-  const response = await fetch(input, {
-    credentials: 'same-origin',
+  await ensureMobileSessionLoaded()
+  const response = await fetch(resolveApiUrl(input), {
+    credentials: isNativeApp ? 'omit' : 'same-origin',
     headers: {
-      'Content-Type': 'application/json',
+      ...getRequestHeaders(init),
       ...(isUnsafeRequest(init?.method) && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
       ...(init?.headers || {}),
     },
@@ -45,33 +74,77 @@ const request = async <T,>(input: string, init?: RequestInit) => {
 
   if (!response.ok) {
     const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null
-    throw new Error(errorPayload?.error || `Request failed with ${response.status}`)
+    throw new ApiError(
+      errorPayload?.error || `Request failed with ${response.status}`,
+      response.status,
+    )
   }
 
   return (await response.json()) as T
 }
 
+const fetchResource = async (input: string) => {
+  await ensureMobileSessionLoaded()
+  const response = await fetch(resolveApiUrl(input), {
+    credentials: isNativeApp ? 'omit' : 'same-origin',
+    headers: getRequestHeaders(),
+  })
+
+  if (!response.ok) {
+    const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      errorPayload?.error || `Request failed with ${response.status}`,
+      response.status,
+    )
+  }
+
+  return response
+}
+
 export const api = {
+  fetchResource,
   setCsrfToken: (token: string | null | undefined) => {
     csrfToken = token || null
   },
   getBootstrap: () => request<BootstrapState>('/api/bootstrap'),
   getState: () => request<AppState>('/api/state'),
-  login: (payload: AuthPayload) =>
-    request<AppState>('/api/auth/login', {
+  login: async (payload: AuthPayload) => {
+    if (!isNativeApp) {
+      return request<AppState>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+    }
+
+    const response = await request<MobileAuthResponse>('/api/mobile/auth/login', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
+    })
+
+    await saveMobileSession({
+      accessToken: response.accessToken,
+      expiresAt: response.accessTokenExpiresAt,
+    })
+
+    return response
+  },
   signup: (payload: AuthPayload) =>
     request<AppState>('/api/auth/signup', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-  logout: () =>
-    request<{ ok: true }>('/api/auth/logout', {
+  logout: async () => {
+    const response = await request<{ ok: true }>('/api/auth/logout', {
       method: 'POST',
       body: JSON.stringify({}),
-    }),
+    })
+
+    if (isNativeApp) {
+      await clearMobileSession()
+    }
+
+    return response
+  },
   changePassword: (payload: ChangePasswordPayload) =>
     request<AppState>('/api/auth/change-password', {
       method: 'POST',

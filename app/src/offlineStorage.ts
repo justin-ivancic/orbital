@@ -1,15 +1,23 @@
+import { Capacitor } from '@capacitor/core'
+import { Directory, Encoding, Filesystem } from '@capacitor/filesystem'
 import type {
+  Bookmark,
   OfflineDownloadManifest,
   OfflineDownloadRecord,
   OfflineDownloadResource,
   OfflineStorageSummary,
+  SavedReadingPosition,
   SessionUser,
 } from './appTypes'
+import { isNativeApp, toNativeFileUrl } from './platform'
 
 const offlineDbName = 'orbital-offline-v1'
-const offlineDbVersion = 1
+const offlineDbVersion = 2
 const downloadsStoreName = 'downloads'
 const resourcesStoreName = 'resources'
+const readingStateStoreName = 'readingState'
+const nativeDownloadsPath = 'orbital/downloads'
+const nativeStorageEnabled = isNativeApp && Capacitor.isNativePlatform()
 
 type OfflineResourceRecord = {
   key: string
@@ -19,6 +27,103 @@ type OfflineResourceRecord = {
   blob: Blob
   size: number
   storedAt: string
+}
+
+export type OfflineReadingState = {
+  ownerUserId: string
+  bookmarks: Bookmark[]
+  readingPositions: Record<string, SavedReadingPosition>
+  updatedAt: string
+}
+
+const nativeDownloadPath = (downloadId: string) =>
+  `${nativeDownloadsPath}/${encodeURIComponent(downloadId)}`
+
+const nativeRecordPath = (downloadId: string) =>
+  `${nativeDownloadPath(downloadId)}/record.json`
+
+const nativeResourcePath = (downloadId: string, resourceKey: string) =>
+  `${nativeDownloadPath(downloadId)}/resources/${encodeURIComponent(resourceKey)}.bin`
+
+const nativeReadingStatePath = (ownerUserId: string) =>
+  `orbital/reading/${encodeURIComponent(ownerUserId)}.json`
+
+const readNativeJson = async <T,>(path: string): Promise<T | null> => {
+  try {
+    const result = await Filesystem.readFile({
+      path,
+      directory: Directory.Data,
+      encoding: Encoding.UTF8,
+    })
+
+    return JSON.parse(String(result.data)) as T
+  } catch {
+    return null
+  }
+}
+
+const writeNativeJson = async (path: string, value: unknown) => {
+  await Filesystem.writeFile({
+    path,
+    directory: Directory.Data,
+    data: JSON.stringify(value),
+    encoding: Encoding.UTF8,
+    recursive: true,
+  })
+}
+
+const blobToBase64 = async (blob: Blob) => {
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  let binary = ''
+
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+
+  return btoa(binary)
+}
+
+const base64ToBlob = (value: string, contentType: string) => {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+
+  return new Blob([bytes], { type: contentType })
+}
+
+const listNativeDownloadIds = async () => {
+  try {
+    const result = await Filesystem.readdir({
+      path: nativeDownloadsPath,
+      directory: Directory.Data,
+    })
+
+    return result.files
+      .filter((entry) => entry.type === 'directory' || entry.type == null)
+      .map((entry) => entry.name)
+  } catch {
+    return []
+  }
+}
+
+const readAllNativeRecords = async () => {
+  const ids = await listNativeDownloadIds()
+  const records: OfflineDownloadRecord[] = []
+
+  for (const encodedId of ids) {
+    const record = await readNativeJson<OfflineDownloadRecord>(
+      `${nativeDownloadsPath}/${encodedId}/record.json`,
+    )
+
+    if (record) {
+      records.push(record)
+    }
+  }
+
+  return records
 }
 
 const canUseIndexedDb = () => typeof indexedDB !== 'undefined'
@@ -58,6 +163,10 @@ const openOfflineDb = () =>
         const resources = db.createObjectStore(resourcesStoreName, { keyPath: 'key' })
         resources.createIndex('downloadId', 'downloadId', { unique: false })
         resources.createIndex('ownerUserId', 'ownerUserId', { unique: false })
+      }
+
+      if (!db.objectStoreNames.contains(readingStateStoreName)) {
+        db.createObjectStore(readingStateStoreName, { keyPath: 'ownerUserId' })
       }
     }
 
@@ -146,15 +255,22 @@ export const createOfflineDownloadRecord = (
 })
 
 export const putOfflineDownload = async (record: OfflineDownloadRecord) => {
+  const nextRecord = {
+    ...record,
+    updatedAt: new Date().toISOString(),
+  }
+
+  if (nativeStorageEnabled) {
+    await writeNativeJson(nativeRecordPath(record.id), nextRecord)
+    return
+  }
+
   const db = await openOfflineDb()
 
   try {
     const transaction = db.transaction(downloadsStoreName, 'readwrite')
     const done = transactionDone(transaction)
-    transaction.objectStore(downloadsStoreName).put({
-      ...record,
-      updatedAt: new Date().toISOString(),
-    })
+    transaction.objectStore(downloadsStoreName).put(nextRecord)
     await done
   } finally {
     db.close()
@@ -162,6 +278,10 @@ export const putOfflineDownload = async (record: OfflineDownloadRecord) => {
 }
 
 export const getOfflineDownload = async (downloadId: string) => {
+  if (nativeStorageEnabled) {
+    return readNativeJson<OfflineDownloadRecord>(nativeRecordPath(downloadId))
+  }
+
   const db = await openOfflineDb()
 
   try {
@@ -178,6 +298,16 @@ export const getOfflineDownload = async (downloadId: string) => {
 }
 
 export const listOfflineDownloads = async (ownerUserId: string) => {
+  if (nativeStorageEnabled) {
+    const records = await readAllNativeRecords()
+
+    return records
+      .filter((record) => record.ownerUserId === ownerUserId)
+      .sort(
+        (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+      )
+  }
+
   const db = await openOfflineDb()
 
   try {
@@ -197,6 +327,21 @@ export const listOfflineDownloads = async (ownerUserId: string) => {
 }
 
 export const getLastOfflineProfile = async (): Promise<SessionUser | null> => {
+  if (nativeStorageEnabled) {
+    const records = await readAllNativeRecords()
+    const latest = records
+      .filter((record) => record.ownerUserId && record.ownerUsername)
+      .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())[0]
+
+    return latest
+      ? {
+          id: latest.ownerUserId,
+          username: latest.ownerUsername,
+          role: 'member',
+        }
+      : null
+  }
+
   const db = await openOfflineDb()
 
   try {
@@ -217,12 +362,86 @@ export const getLastOfflineProfile = async (): Promise<SessionUser | null> => {
   }
 }
 
+const emptyOfflineReadingState = (ownerUserId: string): OfflineReadingState => ({
+  ownerUserId,
+  bookmarks: [],
+  readingPositions: {},
+  updatedAt: new Date(0).toISOString(),
+})
+
+export const getOfflineReadingState = async (ownerUserId: string): Promise<OfflineReadingState> => {
+  if (nativeStorageEnabled) {
+    return (
+      (await readNativeJson<OfflineReadingState>(nativeReadingStatePath(ownerUserId))) ||
+      emptyOfflineReadingState(ownerUserId)
+    )
+  }
+
+  const db = await openOfflineDb()
+
+  try {
+    const transaction = db.transaction(readingStateStoreName, 'readonly')
+    const done = transactionDone(transaction)
+    const state = await toPromise<OfflineReadingState | undefined>(
+      transaction.objectStore(readingStateStoreName).get(ownerUserId),
+    )
+    await done
+    return state || emptyOfflineReadingState(ownerUserId)
+  } finally {
+    db.close()
+  }
+}
+
+export const putOfflineReadingState = async (state: OfflineReadingState) => {
+  const nextState = {
+    ...state,
+    updatedAt: new Date().toISOString(),
+  }
+
+  if (nativeStorageEnabled) {
+    await writeNativeJson(nativeReadingStatePath(state.ownerUserId), nextState)
+    return nextState
+  }
+
+  const db = await openOfflineDb()
+
+  try {
+    const transaction = db.transaction(readingStateStoreName, 'readwrite')
+    const done = transactionDone(transaction)
+    transaction.objectStore(readingStateStoreName).put(nextState)
+    await done
+    return nextState
+  } finally {
+    db.close()
+  }
+}
+
 export const putOfflineResource = async (
   downloadId: string,
   ownerUserId: string,
   resource: OfflineDownloadResource,
   blob: Blob,
 ) => {
+  if (nativeStorageEnabled) {
+    const path = nativeResourcePath(downloadId, resource.key)
+    await Filesystem.writeFile({
+      path,
+      directory: Directory.Data,
+      data: await blobToBase64(blob),
+      recursive: true,
+    })
+
+    const uri = await Filesystem.getUri({
+      path,
+      directory: Directory.Data,
+    })
+
+    return {
+      ...resource,
+      url: toNativeFileUrl(uri.uri),
+    }
+  }
+
   const db = await openOfflineDb()
   const record: OfflineResourceRecord = {
     key: resource.key,
@@ -242,9 +461,45 @@ export const putOfflineResource = async (
   } finally {
     db.close()
   }
+
+  return resource
 }
 
 export const getOfflineResource = async (resourceKey: string) => {
+  if (nativeStorageEnabled) {
+    const records = await readAllNativeRecords()
+
+    for (const download of records) {
+      const resource = download.manifest.resources.find((item) => item.key === resourceKey)
+      if (!resource) {
+        continue
+      }
+
+      const path = nativeResourcePath(download.id, resource.key)
+      try {
+        const result = await Filesystem.readFile({
+          path,
+          directory: Directory.Data,
+        })
+        const encoded = typeof result.data === 'string' ? result.data : ''
+
+        return {
+          key: resource.key,
+          downloadId: download.id,
+          ownerUserId: download.ownerUserId,
+          resource,
+          blob: base64ToBlob(encoded, resource.contentType),
+          size: resource.size,
+          storedAt: download.updatedAt,
+        } satisfies OfflineResourceRecord
+      } catch {
+        return null
+      }
+    }
+
+    return null
+  }
+
   const db = await openOfflineDb()
 
   try {
@@ -261,6 +516,15 @@ export const getOfflineResource = async (resourceKey: string) => {
 }
 
 export const deleteOfflineDownload = async (downloadId: string) => {
+  if (nativeStorageEnabled) {
+    await Filesystem.rmdir({
+      path: nativeDownloadPath(downloadId),
+      directory: Directory.Data,
+      recursive: true,
+    }).catch(() => undefined)
+    return
+  }
+
   const db = await openOfflineDb()
 
   try {
@@ -284,6 +548,21 @@ export const deleteOfflineDownload = async (downloadId: string) => {
 }
 
 export const deleteAllOfflineDownloadsForUser = async (ownerUserId: string) => {
+  if (nativeStorageEnabled) {
+    const records = await readAllNativeRecords()
+
+    await Promise.all(
+      records
+        .filter((record) => record.ownerUserId === ownerUserId)
+        .map((record) => deleteOfflineDownload(record.id)),
+    )
+    await Filesystem.deleteFile({
+      path: nativeReadingStatePath(ownerUserId),
+      directory: Directory.Data,
+    }).catch(() => undefined)
+    return
+  }
+
   const db = await openOfflineDb()
 
   try {
@@ -299,13 +578,18 @@ export const deleteAllOfflineDownloadsForUser = async (ownerUserId: string) => {
       'ownerUserId',
       ownerUserId,
     )
-    const transaction = db.transaction([downloadsStoreName, resourcesStoreName], 'readwrite')
+    const transaction = db.transaction(
+      [downloadsStoreName, resourcesStoreName, readingStateStoreName],
+      'readwrite',
+    )
     const done = transactionDone(transaction)
     const downloadsStore = transaction.objectStore(downloadsStoreName)
     const resourcesStore = transaction.objectStore(resourcesStoreName)
+    const readingStateStore = transaction.objectStore(readingStateStoreName)
 
     downloads.forEach((record) => downloadsStore.delete(record.id))
     resources.forEach((record) => resourcesStore.delete(record.key))
+    readingStateStore.delete(ownerUserId)
     await done
   } finally {
     db.close()
@@ -315,6 +599,23 @@ export const deleteAllOfflineDownloadsForUser = async (ownerUserId: string) => {
 export const getOfflineStorageSummary = async (
   ownerUserId: string,
 ): Promise<OfflineStorageSummary> => {
+  if (nativeStorageEnabled) {
+    const records = (await readAllNativeRecords()).filter(
+      (record) => record.ownerUserId === ownerUserId,
+    )
+
+    return {
+      downloadedBytes: records.reduce((total, record) => total + record.downloadedBytes, 0),
+      verifiedBytes: records.reduce((total, record) => total + record.verifiedBytes, 0),
+      downloadCount: records.length,
+      readyCount: records.filter((record) => record.status === 'ready').length,
+      partialCount: records.filter((record) => ['partial', 'failed', 'stale'].includes(record.status)).length,
+      browserUsageBytes: null,
+      browserQuotaBytes: null,
+      persistent: true,
+    }
+  }
+
   const db = await openOfflineDb()
 
   try {
@@ -343,6 +644,10 @@ export const getOfflineStorageSummary = async (
 }
 
 export const requestOfflineStoragePersistence = async () => {
+  if (nativeStorageEnabled) {
+    return true
+  }
+
   if (!navigator.storage?.persist) {
     return null
   }

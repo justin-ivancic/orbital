@@ -349,6 +349,11 @@ export type AppState = {
   metadataQueue: MetadataQueueItem[]
 }
 
+export type MobileAuthResponse = AppState & {
+  accessToken: string
+  accessTokenExpiresAt: number
+}
+
 export type BootstrapState = {
   appName: string
   bootstrapAdmin: string

@@ -49,7 +49,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import './App.css'
-import { api } from './api'
+import { ApiError, api } from './api'
 import type {
   AppState,
   Bookmark,
@@ -68,6 +68,7 @@ import type {
   SavedReadingPosition,
   ScanLogEntry,
   ScanStatus,
+  SessionUser,
   ScopeId,
   SeriesDetail,
   SeriesSummary,
@@ -86,10 +87,12 @@ import {
   deleteAllOfflineDownloadsForUser,
   deleteOfflineDownload,
   getLastOfflineProfile,
+  getOfflineReadingState,
   getOfflineResourceUrl,
   getOfflineStorageSummary,
   listOfflineDownloads,
   putOfflineDownload,
+  putOfflineReadingState,
   putOfflineResource,
   requestOfflineStoragePersistence,
 } from './offlineStorage'
@@ -110,6 +113,7 @@ import {
   type AppRoute,
   type LibraryRouteCategory,
 } from './routing'
+import { isNativeApp } from './platform'
 
 const CbzReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.CbzReader })))
 const EpubReader = lazy(() => import('./LocalFileReaders').then((module) => ({ default: module.EpubReader })))
@@ -126,6 +130,40 @@ const readerScopeOrder: ScopeId[] = ['all', ...readerCategoryOrder]
 const isReaderCategory = (category: CategoryId) => category !== 'anime'
 const resolveReaderCategory = (category: CategoryId) =>
   isReaderCategory(category) ? category : defaultReaderCategory
+
+const offlineStateForProfile = (offlineProfile: SessionUser) => {
+  const bootstrapState: BootstrapState = {
+    appName: 'Orbital Library',
+    bootstrapAdmin: '',
+    openSignup: false,
+    user: offlineProfile,
+    csrfToken: null,
+  }
+
+  const appState: AppState = {
+    appName: bootstrapState.appName,
+    bootstrapAdmin: bootstrapState.bootstrapAdmin,
+    openSignup: false,
+    user: offlineProfile,
+    csrfToken: null,
+    scanSummary: {
+      lastScanAt: null,
+      changedFiles: 0,
+      sourceRootCount: 0,
+      sourceFolderCount: 0,
+    },
+    scanStatus: emptyScanStatus,
+    library: [],
+    bookmarks: [],
+    readingPositions: {},
+    sourceRoots: [],
+    sourceFolders: [],
+    users: [],
+    metadataQueue: [],
+  }
+
+  return { bootstrapState, appState }
+}
 const sourceCategoryOptions = (currentCategory: CategoryId) =>
   [...new Set([currentCategory, ...readerCategoryOrder])]
 const readerChromeInteractionSelector = [
@@ -1264,6 +1302,9 @@ const getPrimaryResourceForEntry = (
   return manifest.resources.find((resource) => resource.key === manifestEntry.resourceKeys[0]) ?? null
 }
 
+const offlineResourceUrl = (resource: OfflineDownloadManifest['resources'][number]) =>
+  isNativeApp ? resource.url : getOfflineResourceUrl(resource.key)
+
 const buildOfflinePagesForEntry = (
   manifest: OfflineDownloadManifest,
   entryId: string,
@@ -1285,7 +1326,7 @@ const buildOfflinePagesForEntry = (
       return {
         archiveIndex: index,
         name: resource.label,
-        url: getOfflineResourceUrl(resource.key),
+        url: offlineResourceUrl(resource),
       }
     })
     .filter((page): page is { archiveIndex: number; name: string; url: string } => Boolean(page))
@@ -1299,7 +1340,7 @@ const buildOfflineSeriesDetail = (record: OfflineDownloadRecord): SeriesDetail =
       : manifest.resources.find((resource) => resource.seriesId)?.seriesId || manifest.manifestId
   const variants = manifest.entries.map((entry): LibraryEntry => {
     const primaryResource = getPrimaryResourceForEntry(manifest, entry.entryId)
-    const fileUrl = primaryResource ? getOfflineResourceUrl(primaryResource.key) : '#'
+    const fileUrl = primaryResource ? offlineResourceUrl(primaryResource) : '#'
 
     return {
       id: entry.entryId,
@@ -2571,10 +2612,93 @@ function App() {
 
   useEffect(() => {
     let active = true
+    let remoteLoadStarted = false
+
+    const applyOfflineProfile = async (offlineProfile: SessionUser) => {
+      const localState = offlineStateForProfile(offlineProfile)
+      const readingState = await getOfflineReadingState(offlineProfile.id).catch(() => null)
+      api.setCsrfToken(null)
+      setBootstrapState(localState.bootstrapState)
+      setAppState(
+        readingState
+          ? {
+              ...localState.appState,
+              bookmarks: readingState.bookmarks,
+              readingPositions: readingState.readingPositions,
+            }
+          : localState.appState,
+      )
+      setOfflineMode(true)
+      const currentLocation = routeForLocation()
+      if (currentLocation.name !== 'downloads' && currentLocation.name !== 'offlineReader') {
+        navigateRoute({ name: 'downloads' }, { replace: true })
+      }
+      setCachedStateNeedsRefresh(false)
+      setStateError(text.offlineModeHelp)
+    }
+
+    const loadRemoteBootstrap = async () => {
+      if (remoteLoadStarted) {
+        return
+      }
+
+      remoteLoadStarted = true
+
+      try {
+        const nextState = await api.getBootstrap()
+
+        if (!active) {
+          return
+        }
+
+        api.setCsrfToken(nextState.csrfToken)
+        setBootstrapState(nextState)
+        setOfflineMode(false)
+        const cachedReaderState = readCachedReaderState(nextState)
+
+        if (cachedReaderState) {
+          setAppState(cachedReaderState.appState)
+          setSeriesCache(cachedReaderState.seriesCache)
+          setCachedStateNeedsRefresh(true)
+          setSelectedSeriesId((previousSeriesId) =>
+            previousSeriesId || firstSeriesId(cachedReaderState.appState),
+          )
+        } else {
+          setCachedStateNeedsRefresh(true)
+        }
+
+        setStateError(null)
+      } catch (error) {
+        if (active) {
+          setStateError(
+            error instanceof ApiError && error.status != null
+              ? error.message
+              : text.offlineModeHelp,
+          )
+        }
+      }
+    }
 
     const loadBootstrap = async () => {
+      setBootLoading(true)
+
+      const localProfile = isNativeApp
+        ? await getLastOfflineProfile().catch(() => null)
+        : null
+
+      if (localProfile) {
+        await applyOfflineProfile(localProfile)
+        setBootLoading(false)
+
+        if (navigator.onLine) {
+          void loadRemoteBootstrap()
+        }
+
+        window.addEventListener('online', loadRemoteBootstrap)
+        return
+      }
+
       try {
-        setBootLoading(true)
         const nextState = await api.getBootstrap()
 
         if (!active) {
@@ -2604,40 +2728,7 @@ function App() {
         const offlineProfile = await getLastOfflineProfile().catch(() => null)
 
         if (offlineProfile) {
-          const offlineBootstrap: BootstrapState = {
-            appName: 'Orbital Library',
-            bootstrapAdmin: '',
-            openSignup: false,
-            user: offlineProfile,
-            csrfToken: null,
-          }
-          const offlineState: AppState = {
-            appName: offlineBootstrap.appName,
-            bootstrapAdmin: offlineBootstrap.bootstrapAdmin,
-            openSignup: false,
-            user: offlineProfile,
-            csrfToken: null,
-            scanSummary: { lastScanAt: null, changedFiles: 0, sourceRootCount: 0, sourceFolderCount: 0 },
-            scanStatus: emptyScanStatus,
-            library: [],
-            bookmarks: [],
-            readingPositions: {},
-            sourceRoots: [],
-            sourceFolders: [],
-            users: [],
-            metadataQueue: [],
-          }
-
-          api.setCsrfToken(null)
-          setBootstrapState(offlineBootstrap)
-          setAppState(offlineState)
-          setOfflineMode(true)
-          const failedRoute = routeForLocation()
-          if (failedRoute.name !== 'downloads' && failedRoute.name !== 'offlineReader') {
-            navigateRoute({ name: 'downloads' }, { replace: true })
-          }
-          setCachedStateNeedsRefresh(false)
-          setStateError(text.offlineModeHelp)
+          await applyOfflineProfile(offlineProfile)
           return
         }
 
@@ -2653,6 +2744,7 @@ function App() {
 
     return () => {
       active = false
+      window.removeEventListener('online', loadRemoteBootstrap)
     }
   }, [navigateRoute, text.authErrorFallback, text.offlineModeHelp])
 
@@ -2673,6 +2765,35 @@ function App() {
 
     let active = true
 
+    const syncLocalReadingState = async (nextState: AppState) => {
+      if (!isNativeApp || !nextState.user) {
+        return nextState
+      }
+
+      const localState = await getOfflineReadingState(nextState.user.id)
+      if (!localState.bookmarks.length) {
+        return nextState
+      }
+
+      try {
+        for (const bookmark of localState.bookmarks) {
+          await api.setBookmark({
+            seriesId: bookmark.seriesId,
+            entryId: bookmark.entryId,
+            entryIndex: bookmark.entryIndex,
+            category: bookmark.category,
+            progress: bookmark.progress,
+            cue: bookmark.cue,
+            position: localState.readingPositions[bookmark.entryId] || { page: 1 },
+          })
+        }
+
+        return await api.getState()
+      } catch {
+        return nextState
+      }
+    }
+
     const loadState = async () => {
       try {
         const nextState = await api.getState()
@@ -2682,11 +2803,17 @@ function App() {
         }
 
         api.setCsrfToken(nextState.csrfToken)
-        setBootstrapState(toBootstrapState(nextState))
-        setAppState(nextState)
+        const syncedState = await syncLocalReadingState(nextState)
+        if (!active) {
+          return
+        }
+
+        api.setCsrfToken(syncedState.csrfToken)
+        setBootstrapState(toBootstrapState(syncedState))
+        setAppState(syncedState)
         setCachedStateNeedsRefresh(false)
-        setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, nextState.library))
-        setSelectedSeriesId((previousSeriesId) => previousSeriesId || firstSeriesId(nextState))
+        setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, syncedState.library))
+        setSelectedSeriesId((previousSeriesId) => previousSeriesId || firstSeriesId(syncedState))
         setStateError(null)
       } catch (error) {
         if (!active) {
@@ -3554,10 +3681,7 @@ function App() {
       await updateOfflineRecord(record)
 
       for (const resource of manifest.resources) {
-        const response = await fetch(resource.url, {
-          cache: 'no-store',
-          credentials: 'same-origin',
-        })
+        const response = await api.fetchResource(resource.url)
 
         if (!response.ok) {
           const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null
@@ -3570,9 +3694,15 @@ function App() {
           throw new Error(`Downloaded size mismatch for ${resource.label}.`)
         }
 
-        await putOfflineResource(record.id, record.ownerUserId, resource, blob)
+        const localResource = await putOfflineResource(record.id, record.ownerUserId, resource, blob)
         record = {
           ...record,
+          manifest: {
+            ...record.manifest,
+            resources: record.manifest.resources.map((candidate) =>
+              candidate.key === localResource.key ? localResource : candidate,
+            ),
+          },
           status: 'downloading',
           downloadedBytes: record.downloadedBytes + blob.size,
           verifiedBytes: record.verifiedBytes + (resource.size || blob.size),
@@ -3795,10 +3925,6 @@ function App() {
   }
 
   const persistCurrentReaderPosition = useCallback(async (manual = false, keepalive = false) => {
-    if (offlineReaderDownloadId) {
-      return
-    }
-
     if (!selectedSeriesSummary || !currentEntry || !currentVariant || !appState?.user) {
       return
     }
@@ -3850,6 +3976,48 @@ function App() {
 
     lastAutoSaveKeyRef.current = saveKey
 
+    if (offlineReaderDownloadId) {
+      const existingState = await getOfflineReadingState(appState.user.id)
+      const nextBookmark = {
+        seriesId: payload.seriesId,
+        category: payload.category,
+        entryId: payload.entryId,
+        entryIndex: payload.entryIndex,
+        entryLabel: currentEntry.label,
+        entryTitle: currentEntry.title,
+        progress: payload.progress,
+        cue: payload.cue,
+        lastSeen: new Date().toISOString(),
+      } satisfies Bookmark
+      const nextState = await putOfflineReadingState({
+        ownerUserId: appState.user.id,
+        bookmarks: [
+          ...existingState.bookmarks.filter((bookmark) => bookmark.seriesId !== payload.seriesId),
+          nextBookmark,
+        ],
+        readingPositions: {
+          ...existingState.readingPositions,
+          [payload.entryId]: payload.position,
+        },
+        updatedAt: existingState.updatedAt,
+      })
+
+      setAppState((previousState) =>
+        previousState
+          ? {
+              ...previousState,
+              bookmarks: nextState.bookmarks,
+              readingPositions: nextState.readingPositions,
+            }
+          : previousState,
+      )
+
+      if (manual) {
+        setBookmarkJustSet(true)
+      }
+      return
+    }
+
     const response = await api.setBookmark(payload, { keepalive })
 
     setAppState((previousState) =>
@@ -3883,6 +4051,28 @@ function App() {
   const handleRemoveBookmark = async (seriesId: string) => {
     try {
       setRemovingBookmarkSeriesId(seriesId)
+
+      if (offlineMode && appState?.user) {
+        const existingState = await getOfflineReadingState(appState.user.id)
+        const nextState = await putOfflineReadingState({
+          ownerUserId: appState.user.id,
+          bookmarks: existingState.bookmarks.filter((bookmark) => bookmark.seriesId !== seriesId),
+          readingPositions: existingState.readingPositions,
+          updatedAt: existingState.updatedAt,
+        })
+        setAppState((previousState) =>
+          previousState
+            ? {
+                ...previousState,
+                bookmarks: nextState.bookmarks,
+                readingPositions: nextState.readingPositions,
+              }
+            : previousState,
+        )
+        setOpenBookmarkMenuKey(null)
+        return
+      }
+
       const response = await api.removeBookmark(seriesId)
 
       setAppState((previousState) =>
@@ -3904,7 +4094,7 @@ function App() {
 
   useEffect(() => {
     if (
-      currentView !== 'reader' ||
+      !isReaderRoute(currentRoute) ||
       !readerProgress ||
       !selectedSeriesSummary ||
       !currentEntry ||
@@ -3925,7 +4115,7 @@ function App() {
     appState?.user,
     currentEntry,
     currentVariant,
-    currentView,
+    currentRoute,
     persistCurrentReaderPosition,
     readerProgress,
     selectedEntryIndex,
@@ -3933,7 +4123,7 @@ function App() {
   ])
 
   useEffect(() => {
-    if (currentView !== 'reader') {
+    if (!isReaderRoute(currentRoute)) {
       return
     }
 
@@ -3953,7 +4143,7 @@ function App() {
       window.removeEventListener('pagehide', persistBeforeLeaving)
       document.removeEventListener('visibilitychange', persistWhenHidden)
     }
-  }, [currentView, persistCurrentReaderPosition])
+  }, [currentRoute, persistCurrentReaderPosition])
 
   useEffect(() => {
     if (
@@ -6368,34 +6558,17 @@ function App() {
           <div className="reader-overlay__progress">
             {progressLabel && <span>{progressLabel}</span>}
             <button
-              aria-label={
-                offlineReaderDownloadId
-                  ? text.openOffline
-                  : bookmarkJustSet
-                    ? text.bookmarked
-                    : text.setBookmark
-              }
+              aria-label={bookmarkJustSet ? text.bookmarked : text.setBookmark}
               className="primary-button"
-              disabled={Boolean(offlineReaderDownloadId)}
               onClick={() => void handleSetBookmark()}
               type="button"
             >
-              <AppIcon name={offlineReaderDownloadId ? 'offline' : 'check'} />
+              <AppIcon name="check" />
               <span
                 className="reader-overlay__button-label"
-                data-short-label={
-                  offlineReaderDownloadId
-                    ? text.offlineMode
-                    : bookmarkJustSet
-                      ? text.bookmarkedShort
-                      : text.setBookmarkShort
-                }
+                data-short-label={bookmarkJustSet ? text.bookmarkedShort : text.setBookmarkShort}
               >
-                {offlineReaderDownloadId
-                  ? text.openOffline
-                  : bookmarkJustSet
-                    ? text.bookmarked
-                    : text.setBookmark}
+                {bookmarkJustSet ? text.bookmarked : text.setBookmark}
               </span>
             </button>
           </div>

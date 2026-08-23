@@ -1,7 +1,7 @@
 const SHELL_CACHE = 'orbital-shell-v1'
 const ASSET_CACHE = 'orbital-assets-v1'
 const OFFLINE_DB = 'orbital-offline-v1'
-const OFFLINE_DB_VERSION = 1
+const OFFLINE_DB_VERSION = 2
 const RESOURCES_STORE = 'resources'
 
 const shellUrls = ['/', '/site.webmanifest']
@@ -23,6 +23,10 @@ const openOfflineDb = () =>
         const resources = db.createObjectStore(RESOURCES_STORE, { keyPath: 'key' })
         resources.createIndex('downloadId', 'downloadId', { unique: false })
         resources.createIndex('ownerUserId', 'ownerUserId', { unique: false })
+      }
+
+      if (!db.objectStoreNames.contains('readingState')) {
+        db.createObjectStore('readingState', { keyPath: 'ownerUserId' })
       }
     }
 

@@ -15,6 +15,7 @@ Orbital Library is a self-hosted media library for browsing and reading locally 
 - Authenticated local media serving
 - Local cover fallbacks for folders, PDFs, CBZ files, and generated placeholders
 - PWA app shell with explicit offline downloads for chapters, books, and series
+- Installable Capacitor Android app with app-private offline storage
 - Downloads management with estimated size, verified local bytes, browser quota, repair, and delete controls
 
 The repository does not include personal media, databases, logs, generated builds, or local environment files.
@@ -35,6 +36,32 @@ Set `APP_ADMIN_PASSWORD` in `.env` before starting the server.
 The default bootstrap admin username is `admin` unless `APP_ADMIN_USERNAME` is set.
 
 Demo seeding is disabled by default. To seed demo files in a local-only environment, set `APP_ENABLE_DEMO_SEED=1` and provide `APP_DEMO_FILES_ROOT`.
+
+## Android app
+
+The Android target packages the Orbital interface inside an installable APK.
+The server, SQLite database, and NAS-backed media remain unchanged. After
+installing, sign in while online and download the books or series you want from
+`Downloads`; those copies are stored in Android app-private storage and remain
+readable without Wi-Fi. Offline startup uses the local profile and does not
+require another login.
+
+Build the debug APK from this directory:
+
+```bash
+npm run mobile:assemble
+```
+
+The APK is written to
+`android/app/build/outputs/apk/debug/app-debug.apk`. The native client defaults
+to `https://library.justinivancic.com`; set `VITE_ORBITAL_API_BASE_URL` before
+building to target another server.
+
+The server accepts the native bearer-token client from the origins in
+`APP_MOBILE_ORIGINS` (default: `https://localhost,capacitor://localhost`). If a
+Cloudflare verification challenge is enabled for the whole site, exempt the
+authenticated API, offline manifest, and media download paths so the installed
+client can make non-interactive requests.
 
 ## Production Build
 
@@ -91,6 +118,7 @@ Common environment variables:
 - `APP_COOKIE_SECURE`: set to `1` when serving behind HTTPS
 - `APP_ENABLE_HSTS`: set to `1` only after HTTPS is confirmed
 - `APP_TRUST_PROXY`: set to `1` only when Orbital is behind a trusted reverse proxy
+- `APP_MOBILE_ORIGINS`: comma-separated Capacitor origins allowed for the native client
 
 After the container starts:
 

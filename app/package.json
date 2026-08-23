@@ -10,6 +10,10 @@
     "dev:client": "vite",
     "prebuild": "node scripts/sync-pdfjs-assets.mjs",
     "build": "tsc -b && vite build",
+    "mobile:build": "npm run build && cap sync android",
+    "mobile:assemble": "npm run mobile:build && cd android && ./gradlew assembleDebug",
+    "mobile:sync": "cap sync android",
+    "mobile:open": "cap open android",
     "lint": "eslint .",
     "preview": "vite preview",
     "start": "tsx server/index.ts",
@@ -26,6 +30,9 @@
     "test:search": "tsx --test server/searchIndex.test.ts"
   },
   "dependencies": {
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/filesystem": "^8.1.2",
     "@napi-rs/canvas": "^0.1.97",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.8.0",
@@ -43,6 +50,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.0.0",
     "@eslint/js": "^9.39.4",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cookie": "^0.6.0",
