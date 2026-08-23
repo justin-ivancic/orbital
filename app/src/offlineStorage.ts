@@ -634,6 +634,110 @@ export const putOfflineResource = async (
   return resource
 }
 
+const readOfflineResourceForDownload = async (
+  downloadId: string,
+  resourceKey: string,
+): Promise<OfflineResourceRecord | null> => {
+  if (nativeStorageEnabled) {
+    const download = await readNativeJson<OfflineDownloadRecord>(nativeRecordPath(downloadId))
+    const resource = download?.manifest.resources.find((item) => item.key === resourceKey)
+
+    if (!download || !resource) {
+      return null
+    }
+
+    const path = nativeResourcePath(downloadId, resource.key)
+    let encoded = ''
+
+    try {
+      const result = await Filesystem.readFile({
+        path,
+        directory: Directory.Data,
+      })
+      encoded = typeof result.data === 'string' ? result.data : ''
+    } catch {
+      try {
+        await Filesystem.rename({
+          from: `${path}.previous`,
+          to: path,
+          directory: Directory.Data,
+        })
+        const result = await Filesystem.readFile({
+          path,
+          directory: Directory.Data,
+        })
+        encoded = typeof result.data === 'string' ? result.data : ''
+      } catch {
+        return null
+      }
+    }
+
+    if (!encoded) {
+      return null
+    }
+
+    try {
+      const uri = await Filesystem.getUri({
+        path,
+        directory: Directory.Data,
+      })
+      const blob = base64ToBlob(encoded, resource.contentType)
+
+      return {
+        storageKey: getOfflineResourceStorageKey(downloadId, resource.key),
+        key: resource.key,
+        downloadId,
+        ownerUserId: download.ownerUserId,
+        resource: { ...resource, url: toNativeFileUrl(uri.uri) },
+        blob,
+        size: blob.size,
+        storedAt: download.updatedAt,
+      }
+    } catch {
+      return null
+    }
+  }
+
+  const db = await openOfflineDb()
+
+  try {
+    const records = await readAllFromIndex<OfflineResourceRecord>(
+      db,
+      resourcesStoreName,
+      'downloadId',
+      downloadId,
+    )
+    return records.find((record) => record.key === resourceKey) ?? null
+  } finally {
+    db.close()
+  }
+}
+
+export const copyOfflineResource = async (
+  sourceDownloadId: string,
+  targetDownloadId: string,
+  ownerUserId: string,
+  resource: OfflineDownloadResource,
+) => {
+  if (sourceDownloadId === targetDownloadId) {
+    return resource
+  }
+
+  const source = await readOfflineResourceForDownload(sourceDownloadId, resource.key)
+
+  if (
+    !source ||
+    source.ownerUserId !== ownerUserId ||
+    source.resource.kind !== resource.kind ||
+    source.resource.version !== resource.version ||
+    (resource.size > 0 && source.size !== resource.size)
+  ) {
+    throw new Error(`Offline resource ${resource.key} is not reusable.`)
+  }
+
+  return putOfflineResource(targetDownloadId, ownerUserId, resource, source.blob)
+}
+
 export const getOfflineResource = async (resourceKey: string) => {
   if (nativeStorageEnabled) {
     const records = await readAllNativeRecords()

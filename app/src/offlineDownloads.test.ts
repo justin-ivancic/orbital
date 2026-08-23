@@ -11,6 +11,7 @@ import {
   mergeOfflineDownloadRecord,
   mergeOfflineManifestWithStoredResources,
   OfflineResourceIntegrityError,
+  planReusableOfflineResources,
   progressForOfflineResources,
 } from './offlineDownloads'
 
@@ -173,6 +174,45 @@ test('changed content creates a replacement package instead of reusing the old p
   assert.equal(replacement.id, 'pkg_changed')
   assert.notEqual(replacement.id, existing.id)
   assert.equal(replacement.manifest.contentKey, 'content-2')
+})
+
+test('incremental series updates plan matching resources for local reuse', () => {
+  const existing = makeResource('entry-1', 'v1', 100)
+  const newEntry = makeResource('entry-2', 'v1', 200)
+  const changed = makeResource('entry-3', 'v2', 300)
+  const manifest = makeManifest([existing, newEntry, changed])
+
+  const transfers = planReusableOfflineResources(manifest, [
+    {
+      downloadId: 'pkg_previous',
+      resources: [
+        { resource: { ...existing, url: 'file:///existing.pdf' }, size: 100 },
+        { resource: { ...changed, version: 'v1', url: 'file:///old.pdf' }, size: 300 },
+      ],
+    },
+  ])
+
+  assert.deepEqual(
+    transfers.map((transfer) => [transfer.sourceDownloadId, transfer.resource.key]),
+    [['pkg_previous', existing.key]],
+  )
+})
+
+test('incremental series updates do not copy resources already present in the replacement package', () => {
+  const existing = makeResource('entry-1', 'v1', 100)
+  const newEntry = makeResource('entry-2', 'v1', 200)
+  const manifest = makeManifest([existing, newEntry])
+
+  const transfers = planReusableOfflineResources(
+    manifest,
+    [{
+      downloadId: 'pkg_previous',
+      resources: [{ resource: { ...existing, url: 'file:///existing.pdf' }, size: 100 }],
+    }],
+    [{ resource: { ...existing, url: 'file:///replacement.pdf' }, size: 100 }],
+  )
+
+  assert.deepEqual(transfers, [])
 })
 
 test('offline retry classification distinguishes network failures from authorization failures', () => {

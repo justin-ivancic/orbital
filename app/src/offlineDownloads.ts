@@ -5,6 +5,17 @@ import type {
 } from './appTypes'
 import type { OfflineStoredResource } from './offlineStorage'
 
+export type OfflineStoredResourcePackage = {
+  downloadId: string
+  resources: OfflineStoredResource[]
+}
+
+export type OfflineResourceTransfer = {
+  sourceDownloadId: string
+  resource: OfflineDownloadResource
+  stored: OfflineStoredResource
+}
+
 export class OfflineDownloadCancelledError extends Error {
   constructor() {
     super('Download cancelled.')
@@ -53,6 +64,48 @@ export const mergeOfflineManifestWithStoredResources = (
       isOfflineResourceComplete(resource, storedByKey.get(resource.key))
     )),
   }
+}
+
+export const planReusableOfflineResources = (
+  manifest: OfflineDownloadManifest,
+  packages: OfflineStoredResourcePackage[],
+  existingResources: OfflineStoredResource[] = [],
+): OfflineResourceTransfer[] => {
+  const manifestResourcesByKey = new Map(
+    manifest.resources.map((resource) => [resource.key, resource]),
+  )
+  const reservedKeys = new Set(
+    existingResources
+      .filter((stored) => {
+        const resource = manifestResourcesByKey.get(stored.resource.key)
+        return resource && isOfflineResourceComplete(resource, stored)
+      })
+      .map((stored) => stored.resource.key),
+  )
+  const transfers: OfflineResourceTransfer[] = []
+
+  for (const offlinePackage of packages) {
+    for (const stored of offlinePackage.resources) {
+      const resource = manifestResourcesByKey.get(stored.resource.key)
+
+      if (
+        !resource ||
+        reservedKeys.has(resource.key) ||
+        !isOfflineResourceComplete(resource, stored)
+      ) {
+        continue
+      }
+
+      reservedKeys.add(resource.key)
+      transfers.push({
+        sourceDownloadId: offlinePackage.downloadId,
+        resource,
+        stored,
+      })
+    }
+  }
+
+  return transfers
 }
 
 export const progressForOfflineResources = (

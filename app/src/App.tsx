@@ -85,6 +85,7 @@ import {
 } from './readerSettings'
 import {
   createOfflineDownloadRecord,
+  copyOfflineResource,
   deleteAllOfflineDownloadsForUser,
   deleteOfflineDownload,
   getOfflineDownload,
@@ -107,6 +108,7 @@ import {
   offlineRetryDelay,
   OfflineDownloadCancelledError,
   OfflineResourceIntegrityError,
+  planReusableOfflineResources,
   waitForOfflineRetry,
 } from './offlineDownloads'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
@@ -3756,7 +3758,7 @@ function App() {
     let record = offlineDownloads.find(
       (download) => getOfflineTargetKey(download.manifest.target) === busyKey,
     ) ?? null
-    let replacementRecord: OfflineDownloadRecord | null = null
+    let replacementRecords: OfflineDownloadRecord[] = []
     let downloadStateStarted = record?.status !== 'ready'
     setOfflineBusy(busyKey, text.downloadForOffline)
 
@@ -3766,16 +3768,64 @@ function App() {
       deletedOfflineDownloadIdsRef.current.delete(manifest.manifestId)
 
       const storedRecord = await getOfflineDownload(manifest.manifestId)
-      const storedResources = await getOfflineResourceInventory(manifest.manifestId)
+      const candidateRecords = Array.from(
+        new Map(
+          [
+            ...offlineDownloads,
+            ...(storedRecord ? [storedRecord] : []),
+          ]
+            .filter((download) => (
+              download.ownerUserId === sessionUser.id &&
+              getOfflineTargetKey(download.manifest.target) === busyKey
+            ))
+            .map((download) => [download.id, download] as const),
+        ).values(),
+      )
+      const existingRecord = candidateRecords.find(
+        (download) => download.id === manifest.manifestId,
+      ) ?? null
+      replacementRecords = candidateRecords.filter(
+        (download) => download.id !== manifest.manifestId,
+      )
+
+      let storedResources = await getOfflineResourceInventory(manifest.manifestId)
+      const previousPackages = await Promise.all(
+        replacementRecords.map(async (download) => ({
+          downloadId: download.id,
+          resources: await getOfflineResourceInventory(download.id),
+        })),
+      )
+      const reusableResources = planReusableOfflineResources(
+        manifest,
+        previousPackages,
+        storedResources,
+      )
+
+      for (const reusable of reusableResources) {
+        if (controller.signal.aborted) {
+          throw new OfflineDownloadCancelledError()
+        }
+
+        try {
+          const localResource = await copyOfflineResource(
+            reusable.sourceDownloadId,
+            manifest.manifestId,
+            sessionUser.id,
+            reusable.resource,
+          )
+          storedResources = [
+            ...storedResources,
+            {
+              resource: localResource,
+              size: reusable.stored.size,
+            },
+          ]
+        } catch {
+          // If a previous local resource cannot be copied, the normal download path repairs it.
+        }
+      }
+
       const merged = mergeOfflineManifestWithStoredResources(manifest, storedResources)
-      const existingRecord = storedRecord?.ownerUserId === sessionUser.id
-        ? storedRecord
-        : record?.ownerUserId === sessionUser.id
-          ? record
-          : null
-      replacementRecord = existingRecord && existingRecord.manifest.contentKey !== manifest.contentKey
-        ? existingRecord
-        : null
 
       record = mergeOfflineDownloadRecord(
         manifest,
@@ -3874,9 +3924,11 @@ function App() {
         updatedAt: new Date().toISOString(),
       }
       await updateOfflineRecord(record)
-      if (replacementRecord && replacementRecord.id !== record.id) {
-        await deleteOfflineDownload(replacementRecord.id).catch(() => undefined)
-      }
+      await Promise.all(
+        replacementRecords
+          .filter((download) => download.id !== record?.id)
+          .map((download) => deleteOfflineDownload(download.id).catch(() => undefined)),
+      )
       offlineAutoResumeGuardRef.current.delete(busyKey)
     } catch (error) {
       const cancelled = error instanceof OfflineDownloadCancelledError || controller.signal.aborted
