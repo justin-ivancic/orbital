@@ -87,7 +87,9 @@ import {
   createOfflineDownloadRecord,
   deleteAllOfflineDownloadsForUser,
   deleteOfflineDownload,
+  getOfflineDownload,
   getLastOfflineProfile,
+  getOfflineResourceInventory,
   getOfflineReadingState,
   getOfflineResourceUrl,
   getOfflineStorageSummary,
@@ -97,6 +99,16 @@ import {
   putOfflineResource,
   requestOfflineStoragePersistence,
 } from './offlineStorage'
+import {
+  isOfflineResourceComplete,
+  isRetryableOfflineDownloadError,
+  mergeOfflineDownloadRecord,
+  mergeOfflineManifestWithStoredResources,
+  offlineRetryDelay,
+  OfflineDownloadCancelledError,
+  OfflineResourceIntegrityError,
+  waitForOfflineRetry,
+} from './offlineDownloads'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
 import { useAuthenticatedResourceUrl } from './authenticatedResource'
 import { clearImageCache } from './imageCache'
@@ -572,6 +584,8 @@ const ui = {
     downloadsReady: 'Available offline',
     downloadsPartial: 'Needs attention',
     downloadsActive: 'Downloading',
+    downloadsQueued: 'Queued to retry',
+    downloadsPaused: 'Paused',
     downloadsAll: 'All downloads',
     downloadForOffline: 'Download',
     downloadSeries: 'Download series',
@@ -595,6 +609,8 @@ const ui = {
     downloadFailed: 'Download failed',
     downloadStale: 'Server copy changed',
     repairDownload: 'Repair',
+    cancelDownload: 'Cancel download',
+    downloadCancelled: 'Download cancelled. Completed content was kept.',
     downloadsDeviceOnly: 'Server files, bookmarks, and accounts stay unchanged.',
     searchPlaceholder: 'Search every shelf, series, and file',
     scopes: {
@@ -851,6 +867,8 @@ const ui = {
     downloadsReady: 'Offline verfuegbar',
     downloadsPartial: 'Braucht Aufmerksamkeit',
     downloadsActive: 'Laedt herunter',
+    downloadsQueued: 'Wird erneut versucht',
+    downloadsPaused: 'Pausiert',
     downloadsAll: 'Alle Downloads',
     downloadForOffline: 'Herunterladen',
     downloadSeries: 'Serie herunterladen',
@@ -874,6 +892,8 @@ const ui = {
     downloadFailed: 'Download fehlgeschlagen',
     downloadStale: 'Server-Kopie geaendert',
     repairDownload: 'Reparieren',
+    cancelDownload: 'Download abbrechen',
+    downloadCancelled: 'Download abgebrochen. Fertige Inhalte bleiben erhalten.',
     downloadsDeviceOnly: 'Server-Dateien, Lesezeichen und Accounts bleiben unveraendert.',
     searchPlaceholder: 'Alle Regale, Serien und Dateien durchsuchen',
     scopes: {
@@ -1773,6 +1793,17 @@ function App() {
     useState<OfflineStorageSummary | null>(null)
   const [offlineFilter, setOfflineFilter] = useState<'active' | 'ready' | 'attention' | 'all'>('all')
   const [offlineBusyIds, setOfflineBusyIds] = useState<Record<string, string>>({})
+  const [offlineResumeTick, setOfflineResumeTick] = useState(0)
+  const offlineRunningTargetsRef = useRef(new Set<string>())
+  const offlineAbortControllersRef = useRef(new Map<string, AbortController>())
+  const offlineRunCompletionRef = useRef(new Map<string, Promise<void>>())
+  const offlineRetryTimersRef = useRef(new Map<string, number>())
+  const offlineAutoResumeGuardRef = useRef(new Set<string>())
+  const deletedOfflineDownloadIdsRef = useRef(new Set<string>())
+  const startOfflineDownloadRef = useRef<(
+    target: OfflineDownloadTarget,
+    options?: { autoResume?: boolean },
+  ) => Promise<void>>(async () => undefined)
   const [offlineReaderDownloadId, setOfflineReaderDownloadId] = useState<string | null>(
     currentRoute.name === 'offlineReader' ? currentRoute.downloadId : null,
   )
@@ -3584,6 +3615,10 @@ function App() {
   }
 
   const handleLogout = async () => {
+    offlineAbortControllersRef.current.forEach((controller) => controller.abort())
+    offlineRetryTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+    offlineRetryTimersRef.current.clear()
+
     if (cacheWriteTimerRef.current) {
       window.clearTimeout(cacheWriteTimerRef.current)
       cacheWriteTimerRef.current = null
@@ -3658,29 +3693,79 @@ function App() {
     })
   }
 
-  const startOfflineDownload = async (target: OfflineDownloadTarget) => {
+  const clearOfflineRetryTimer = (busyKey: string) => {
+    const timer = offlineRetryTimersRef.current.get(busyKey)
+
+    if (timer == null) {
+      return
+    }
+
+    window.clearTimeout(timer)
+    offlineRetryTimersRef.current.delete(busyKey)
+  }
+
+  const startOfflineDownload = async (
+    target: OfflineDownloadTarget,
+    options: { autoResume?: boolean } = {},
+  ) => {
     if (!sessionUser) {
-      setStateError(text.authErrorFallback)
+      if (!options.autoResume) {
+        setStateError(text.authErrorFallback)
+      }
       return
     }
 
     const busyKey = getOfflineTargetKey(target)
 
-    if (offlineBusyIds[busyKey]) {
+    if (offlineRunningTargetsRef.current.has(busyKey)) {
       return
     }
 
-    let record: OfflineDownloadRecord | null = null
+    if (options.autoResume) {
+      offlineAutoResumeGuardRef.current.add(busyKey)
+    } else {
+      offlineAutoResumeGuardRef.current.delete(busyKey)
+    }
+
+    clearOfflineRetryTimer(busyKey)
+    offlineRunningTargetsRef.current.add(busyKey)
+    const controller = new AbortController()
+    offlineAbortControllersRef.current.set(busyKey, controller)
+    let resolveRunCompletion: () => void = () => undefined
+    const runCompletion = new Promise<void>((resolve) => {
+      resolveRunCompletion = resolve
+    })
+    offlineRunCompletionRef.current.set(busyKey, runCompletion)
+    let record = offlineDownloads.find(
+      (download) => getOfflineTargetKey(download.manifest.target) === busyKey,
+    ) ?? null
+    let downloadStateStarted = record?.status !== 'ready'
     setOfflineBusy(busyKey, text.downloadForOffline)
 
     try {
       await requestOfflineStoragePersistence().catch(() => null)
-      const manifest = await api.createOfflineManifest(target)
-      record = createOfflineDownloadRecord(manifest)
-      await deleteOfflineDownload(record.id).catch(() => undefined)
-      record.status = 'downloading'
-      record.updatedAt = new Date().toISOString()
+      const manifest = await api.createOfflineManifest(target, controller.signal)
+      deletedOfflineDownloadIdsRef.current.delete(manifest.manifestId)
+
+      const storedRecord = await getOfflineDownload(manifest.manifestId)
+      const storedResources = await getOfflineResourceInventory(manifest.manifestId)
+      const merged = mergeOfflineManifestWithStoredResources(manifest, storedResources)
+      const existingRecord = storedRecord?.ownerUserId === sessionUser.id
+        ? storedRecord
+        : record?.ownerUserId === sessionUser.id
+          ? record
+          : null
+
+      record = mergeOfflineDownloadRecord(
+        manifest,
+        existingRecord,
+        merged.completedResources,
+        merged.manifest,
+        createOfflineDownloadRecord,
+      )
+      downloadStateStarted = true
       await updateOfflineRecord(record)
+      const storedByKey = new Map(storedResources.map((stored) => [stored.resource.key, stored]))
       setOfflineBusy(
         busyKey,
         manifest.target.type === 'series'
@@ -3689,20 +3774,52 @@ function App() {
       )
 
       for (const resource of manifest.resources) {
-        const response = await api.fetchResource(resource.url)
-
-        if (!response.ok) {
-          const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null
-          throw new Error(errorPayload?.error || `Download failed with ${response.status}`)
+        if (controller.signal.aborted) {
+          throw new OfflineDownloadCancelledError()
         }
 
-        const blob = await response.blob()
+        const stored = storedByKey.get(resource.key)
 
-        if (resource.size > 0 && blob.size !== resource.size) {
-          throw new Error(`Downloaded size mismatch for ${resource.label}.`)
+        if (isOfflineResourceComplete(resource, stored)) {
+          continue
+        }
+
+        let attempt = 0
+        let blob: Blob | null = null
+
+        while (!blob) {
+          try {
+            const response = await api.fetchResource(resource.url, controller.signal)
+            blob = await response.blob()
+
+            if (resource.size > 0 && blob.size !== resource.size) {
+              throw new OfflineResourceIntegrityError(resource.label)
+            }
+          } catch (error) {
+            if (controller.signal.aborted) {
+              throw new OfflineDownloadCancelledError()
+            }
+
+            if (!isRetryableOfflineDownloadError(error) || attempt >= 3) {
+              throw error
+            }
+
+            attempt += 1
+            setOfflineBusy(
+              busyKey,
+              manifest.target.type === 'series'
+                ? text.downloadProgress(record.downloadedResourceCount, record.resourceCount)
+                : text.downloadForOffline,
+            )
+            await waitForOfflineRetry(offlineRetryDelay(attempt), controller.signal)
+          }
         }
 
         const localResource = await putOfflineResource(record.id, record.ownerUserId, resource, blob)
+        storedByKey.set(resource.key, {
+          resource: localResource,
+          size: blob.size,
+        })
         record = {
           ...record,
           manifest: {
@@ -3712,6 +3829,7 @@ function App() {
             ),
           },
           status: 'downloading',
+          retryAt: null,
           downloadedBytes: record.downloadedBytes + blob.size,
           verifiedBytes: record.verifiedBytes + (resource.size || blob.size),
           downloadedResourceCount: record.downloadedResourceCount + 1,
@@ -3731,36 +3849,162 @@ function App() {
         status: 'ready',
         completedAt: new Date().toISOString(),
         failureReason: null,
+        retryAt: null,
         updatedAt: new Date().toISOString(),
       }
       await updateOfflineRecord(record)
+      offlineAutoResumeGuardRef.current.delete(busyKey)
     } catch (error) {
-      if (record) {
-        const message = error instanceof Error ? error.message : text.downloadFailed
+      const cancelled = error instanceof OfflineDownloadCancelledError || controller.signal.aborted
+      const retryable = isRetryableOfflineDownloadError(error)
+      const message = error instanceof Error ? error.message : text.downloadFailed
+      offlineAutoResumeGuardRef.current.add(busyKey)
+
+      if (
+        downloadStateStarted &&
+        record &&
+        !deletedOfflineDownloadIdsRef.current.has(record.id)
+      ) {
+        const nextRetryAt = retryable && !cancelled
+          ? new Date(Date.now() + 15000).toISOString()
+          : null
         record = {
           ...record,
-          status: message.toLowerCase().includes('stale')
-            ? 'stale'
-            : record.downloadedResourceCount > 0
-              ? 'partial'
-              : 'failed',
-          failureReason: message,
+          status: cancelled
+            ? 'paused'
+            : message.toLowerCase().includes('stale')
+              ? 'stale'
+              : retryable
+                ? 'queued'
+                : record.downloadedResourceCount > 0
+                  ? 'partial'
+                  : 'failed',
+          failureReason: cancelled ? text.downloadCancelled : message,
+          retryAt: nextRetryAt,
+          completedAt: null,
           updatedAt: new Date().toISOString(),
         }
         await updateOfflineRecord(record).catch(() => undefined)
       }
 
-      setStateError(error instanceof Error ? error.message : text.downloadFailed)
+      if (!options.autoResume && !cancelled) {
+        setStateError(message)
+      }
     } finally {
+      offlineRunningTargetsRef.current.delete(busyKey)
+      offlineAbortControllersRef.current.delete(busyKey)
+      offlineRunCompletionRef.current.delete(busyKey)
+      resolveRunCompletion()
       setOfflineBusy(busyKey, null)
       void refreshOfflineDownloads()
     }
   }
 
+  startOfflineDownloadRef.current = startOfflineDownload
+
+  useEffect(() => {
+    if (!authenticated || offlineMode || !sessionUser || !offlineDownloadsLoaded) {
+      return
+    }
+
+    const now = Date.now()
+
+    offlineDownloads.forEach((record) => {
+      const busyKey = getOfflineTargetKey(record.manifest.target)
+
+      if (
+        !['queued', 'downloading', 'partial'].includes(record.status) ||
+        offlineRunningTargetsRef.current.has(busyKey)
+      ) {
+        return
+      }
+
+      const retryAt = record.retryAt ? Date.parse(record.retryAt) : now
+
+      if (retryAt > now) {
+        if (!offlineRetryTimersRef.current.has(busyKey)) {
+          const timer = window.setTimeout(() => {
+            offlineRetryTimersRef.current.delete(busyKey)
+            setOfflineResumeTick((currentTick) => currentTick + 1)
+          }, retryAt - now)
+          offlineRetryTimersRef.current.set(busyKey, timer)
+        }
+        return
+      }
+
+      const guarded = offlineAutoResumeGuardRef.current.has(busyKey)
+      const isScheduledRetry = record.status === 'queued' && Boolean(record.retryAt)
+
+      if (guarded && !isScheduledRetry) {
+        return
+      }
+
+      void startOfflineDownloadRef.current(record.manifest.target, { autoResume: true })
+    })
+  }, [
+    authenticated,
+    offlineDownloads,
+    offlineDownloadsLoaded,
+    offlineMode,
+    offlineResumeTick,
+    sessionUser,
+  ])
+
+  useEffect(() => {
+    const nudgeOfflineResume = () => {
+      setOfflineResumeTick((currentTick) => currentTick + 1)
+    }
+
+    window.addEventListener('online', nudgeOfflineResume)
+    document.addEventListener('visibilitychange', nudgeOfflineResume)
+
+    return () => {
+      window.removeEventListener('online', nudgeOfflineResume)
+      document.removeEventListener('visibilitychange', nudgeOfflineResume)
+    }
+  }, [])
+
+  useEffect(() => () => {
+    offlineRetryTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+    offlineRetryTimersRef.current.clear()
+  }, [])
+
+  const handleCancelDownload = async (record: OfflineDownloadRecord) => {
+    const busyKey = getOfflineTargetKey(record.manifest.target)
+    offlineAutoResumeGuardRef.current.add(busyKey)
+    clearOfflineRetryTimer(busyKey)
+    offlineAbortControllersRef.current.get(busyKey)?.abort()
+
+    if (!offlineRunningTargetsRef.current.has(busyKey)) {
+      await updateOfflineRecord({
+        ...record,
+        status: 'paused',
+        failureReason: text.downloadCancelled,
+        retryAt: null,
+        completedAt: null,
+        updatedAt: new Date().toISOString(),
+      }).catch(() => undefined)
+      await refreshOfflineDownloads()
+    }
+  }
+
   const handleDeleteDownload = async (downloadId: string) => {
+    const download = offlineDownloads.find((record) => record.id === downloadId)
+    let runCompletion: Promise<void> | undefined
+
+    if (download) {
+      const busyKey = getOfflineTargetKey(download.manifest.target)
+      offlineAutoResumeGuardRef.current.add(busyKey)
+      clearOfflineRetryTimer(busyKey)
+      deletedOfflineDownloadIdsRef.current.add(downloadId)
+      offlineAbortControllersRef.current.get(busyKey)?.abort()
+      runCompletion = offlineRunCompletionRef.current.get(busyKey)
+    }
+
     setOfflineBusy(downloadId, text.deleteDownload)
 
     try {
+      await runCompletion
       await deleteOfflineDownload(downloadId)
       if (offlineReaderDownloadId === downloadId) {
         setOfflineReaderDownloadId(null)
@@ -3779,9 +4023,25 @@ function App() {
       return
     }
 
+    const runCompletions: Promise<void>[] = []
+
+    offlineDownloads.forEach((record) => {
+      const busyKey = getOfflineTargetKey(record.manifest.target)
+      offlineAutoResumeGuardRef.current.add(busyKey)
+      deletedOfflineDownloadIdsRef.current.add(record.id)
+      clearOfflineRetryTimer(busyKey)
+      offlineAbortControllersRef.current.get(busyKey)?.abort()
+      const runCompletion = offlineRunCompletionRef.current.get(busyKey)
+
+      if (runCompletion) {
+        runCompletions.push(runCompletion)
+      }
+    })
+
     setOfflineBusy('all-downloads', text.deleteAllDownloads)
 
     try {
+      await Promise.all(runCompletions)
       await deleteAllOfflineDownloadsForUser(sessionUser.id)
       setOfflineReaderDownloadId(null)
       await refreshOfflineDownloads()
@@ -5319,7 +5579,7 @@ function App() {
       }
 
       if (offlineFilter === 'attention') {
-        return ['failed', 'partial', 'stale'].includes(record.status)
+        return ['failed', 'partial', 'stale', 'paused'].includes(record.status)
       }
 
       return true
@@ -5426,6 +5686,10 @@ function App() {
                   ? text.downloadsReady
                   : record.status === 'downloading'
                     ? text.downloadsActive
+                    : record.status === 'queued'
+                      ? text.downloadsQueued
+                      : record.status === 'paused'
+                        ? text.downloadsPaused
                     : record.status === 'stale'
                       ? text.downloadStale
                       : record.status === 'failed'
@@ -5433,12 +5697,13 @@ function App() {
                         : record.status
               const targetBusy = offlineBusyIds[getOfflineTargetKey(record.manifest.target)]
               const rowBusy = offlineBusyIds[record.id] || targetBusy
+              const activeDownload = isOfflineDownloadActive(record)
 
               return (
                 <article className={`download-card download-card--${record.status}`} key={record.id}>
                   <div className="download-card__main">
                     <div className="download-card__icon">
-                      <AppIcon name={record.status === 'ready' ? 'download' : record.status === 'downloading' ? 'refresh' : 'offline'} />
+                      <AppIcon name={record.status === 'ready' ? 'download' : activeDownload ? 'refresh' : 'offline'} />
                     </div>
                     <div>
                       <div className="download-card__topline">
@@ -5483,6 +5748,17 @@ function App() {
                       <AppIcon name="refresh" />
                       {record.status === 'ready' ? text.downloadAgain : text.repairDownload}
                     </button>
+                    {activeDownload && (
+                      <button
+                        className="ghost-button"
+                        disabled={record.status !== 'queued' && !offlineRunningTargetsRef.current.has(getOfflineTargetKey(record.manifest.target)) && !targetBusy}
+                        onClick={() => void handleCancelDownload(record)}
+                        type="button"
+                      >
+                        <AppIcon name="pause" />
+                        {text.cancelDownload}
+                      </button>
+                    )}
                     <button
                       className="ghost-button"
                       disabled={Boolean(rowBusy)}

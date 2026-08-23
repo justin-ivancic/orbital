@@ -29,6 +29,11 @@ type OfflineResourceRecord = {
   storedAt: string
 }
 
+export type OfflineStoredResource = {
+  resource: OfflineDownloadResource
+  size: number
+}
+
 export type OfflineReadingState = {
   ownerUserId: string
   bookmarks: Bookmark[]
@@ -252,6 +257,7 @@ export const createOfflineDownloadRecord = (
   resourceCount: manifest.resourceCount,
   downloadedResourceCount: 0,
   failureReason: null,
+  retryAt: null,
 })
 
 export const putOfflineDownload = async (record: OfflineDownloadRecord) => {
@@ -292,6 +298,95 @@ export const getOfflineDownload = async (downloadId: string) => {
     )
     await done
     return record ?? null
+  } finally {
+    db.close()
+  }
+}
+
+export const getOfflineResourceInventory = async (
+  downloadId: string,
+): Promise<OfflineStoredResource[]> => {
+  if (nativeStorageEnabled) {
+    const record = await readNativeJson<OfflineDownloadRecord>(nativeRecordPath(downloadId))
+
+    if (!record) {
+      return []
+    }
+
+    const resourcesByFileName = new Map(
+      record.manifest.resources.map((resource) => [
+        `${encodeURIComponent(resource.key)}.bin`,
+        resource,
+      ]),
+    )
+
+    try {
+      const result = await Filesystem.readdir({
+        path: `${nativeDownloadPath(downloadId)}/resources`,
+        directory: Directory.Data,
+      })
+      const filesByName = new Map(result.files.map((file) => [file.name, file]))
+      const storedResources: OfflineStoredResource[] = []
+
+      for (const [fileName, resource] of resourcesByFileName) {
+        let file = filesByName.get(fileName)
+
+        if (!file || file.type !== 'file') {
+          const previousFileName = `${fileName}.previous`
+          const previousFile = filesByName.get(previousFileName)
+
+          if (previousFile?.type === 'file') {
+            try {
+              await Filesystem.rename({
+                from: `${nativeDownloadPath(downloadId)}/resources/${previousFileName}`,
+                to: `${nativeDownloadPath(downloadId)}/resources/${fileName}`,
+                directory: Directory.Data,
+              })
+              file = previousFile
+            } catch {
+              // A failed restore must be repaired as a fresh resource.
+            }
+          }
+        }
+
+        if (!file || file.type !== 'file') {
+          continue
+        }
+
+        try {
+          const uri = await Filesystem.getUri({
+            path: nativeResourcePath(downloadId, resource.key),
+            directory: Directory.Data,
+          })
+          storedResources.push({
+            resource: { ...resource, url: toNativeFileUrl(uri.uri) },
+            size: Number.isFinite(file.size) ? file.size : 0,
+          })
+        } catch {
+          // If the native URI cannot be resolved, let the downloader repair it.
+        }
+      }
+
+      return storedResources
+    } catch {
+      return []
+    }
+  }
+
+  const db = await openOfflineDb()
+
+  try {
+    const records = await readAllFromIndex<OfflineResourceRecord>(
+      db,
+      resourcesStoreName,
+      'downloadId',
+      downloadId,
+    )
+
+    return records.map((record) => ({
+      resource: record.resource,
+      size: record.size,
+    }))
   } finally {
     db.close()
   }
@@ -424,12 +519,60 @@ export const putOfflineResource = async (
 ) => {
   if (nativeStorageEnabled) {
     const path = nativeResourcePath(downloadId, resource.key)
+    const temporaryPath = `${path}.part`
+    const previousPath = `${path}.previous`
+
+    await Filesystem.deleteFile({
+      path: temporaryPath,
+      directory: Directory.Data,
+    }).catch(() => undefined)
+
     await Filesystem.writeFile({
-      path,
+      path: temporaryPath,
       directory: Directory.Data,
       data: await blobToBase64(blob),
       recursive: true,
     })
+
+    await Filesystem.deleteFile({
+      path: previousPath,
+      directory: Directory.Data,
+    }).catch(() => undefined)
+
+    let previousFileMoved = false
+
+    try {
+      await Filesystem.rename({
+        from: path,
+        to: previousPath,
+        directory: Directory.Data,
+      })
+      previousFileMoved = true
+    } catch {
+      // There may not be an existing resource on the first attempt.
+    }
+
+    try {
+      await Filesystem.rename({
+        from: temporaryPath,
+        to: path,
+        directory: Directory.Data,
+      })
+    } catch (error) {
+      if (previousFileMoved) {
+        await Filesystem.rename({
+          from: previousPath,
+          to: path,
+          directory: Directory.Data,
+        }).catch(() => undefined)
+      }
+      throw error
+    }
+
+    await Filesystem.deleteFile({
+      path: previousPath,
+      directory: Directory.Data,
+    }).catch(() => undefined)
 
     const uri = await Filesystem.getUri({
       path,
@@ -482,14 +625,19 @@ export const getOfflineResource = async (resourceKey: string) => {
           directory: Directory.Data,
         })
         const encoded = typeof result.data === 'string' ? result.data : ''
+        const uri = await Filesystem.getUri({
+          path,
+          directory: Directory.Data,
+        })
+        const blob = base64ToBlob(encoded, resource.contentType)
 
         return {
           key: resource.key,
           downloadId: download.id,
           ownerUserId: download.ownerUserId,
-          resource,
-          blob: base64ToBlob(encoded, resource.contentType),
-          size: resource.size,
+          resource: { ...resource, url: toNativeFileUrl(uri.uri) },
+          blob,
+          size: blob.size,
           storedAt: download.updatedAt,
         } satisfies OfflineResourceRecord
       } catch {
@@ -609,7 +757,7 @@ export const getOfflineStorageSummary = async (
       verifiedBytes: records.reduce((total, record) => total + record.verifiedBytes, 0),
       downloadCount: records.length,
       readyCount: records.filter((record) => record.status === 'ready').length,
-      partialCount: records.filter((record) => ['partial', 'failed', 'stale'].includes(record.status)).length,
+      partialCount: records.filter((record) => ['partial', 'failed', 'stale', 'paused'].includes(record.status)).length,
       browserUsageBytes: null,
       browserQuotaBytes: null,
       persistent: true,
@@ -633,7 +781,7 @@ export const getOfflineStorageSummary = async (
       verifiedBytes: records.reduce((total, record) => total + record.verifiedBytes, 0),
       downloadCount: records.length,
       readyCount: records.filter((record) => record.status === 'ready').length,
-      partialCount: records.filter((record) => ['partial', 'failed', 'stale'].includes(record.status)).length,
+      partialCount: records.filter((record) => ['partial', 'failed', 'stale', 'paused'].includes(record.status)).length,
       browserUsageBytes: estimate?.usage ?? null,
       browserQuotaBytes: estimate?.quota ?? null,
       persistent,

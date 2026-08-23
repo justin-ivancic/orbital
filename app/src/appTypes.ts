@@ -241,6 +241,7 @@ export type OfflineDownloadStatus =
   | 'partial'
   | 'failed'
   | 'stale'
+  | 'paused'
   | 'deleting'
 
 export type OfflineDownloadRecord = {
@@ -257,6 +258,7 @@ export type OfflineDownloadRecord = {
   resourceCount: number
   downloadedResourceCount: number
   failureReason: string | null
+  retryAt: string | null
 }
 
 export type OfflineStorageSummary = {

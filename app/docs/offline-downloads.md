@@ -9,8 +9,11 @@ Orbital offline downloads are explicit device-local packages. Normal browsing ca
 - CBZ downloads store extracted page image responses, not the raw archive.
 - PDF, EPUB, text, HTML, and other file downloads store the file response as one resource.
 - The browser stores package records and resource blobs in IndexedDB.
+- The Android app stores package records and resource files in app-private native storage.
 - The service worker serves local bytes through `/__orbital_offline/resources/:resourceKey`.
 - The Downloads tab is the source of truth for local package state, size, repair, and delete actions.
+- A download continues while Orbital stays open, even if you navigate to another tab or open another reader.
+- Download records are persisted after each verified resource, so reopening Orbital resumes queued, interrupted, or partial downloads.
 
 ## Privacy And Account Scope
 
@@ -34,8 +37,12 @@ Orbital offline downloads are explicit device-local packages. Normal browsing ca
 
 - `ready`: all manifest resources are downloaded and size-verified.
 - `downloading`: resources are being fetched one at a time.
+- `queued`: a transient failure is waiting for an automatic retry.
 - `partial`: at least one resource exists locally, but the package did not finish.
+- `paused`: the user cancelled the current attempt; completed resources remain available for repair.
 - `failed`: no usable resource completed.
 - `stale`: the server media version changed before the package could be repaired or redownloaded.
 
-Use the Downloads tab to repair, download again, delete one package, clear all packages for the active user, or request persistent browser storage.
+Each resource is accepted only after its complete response has been received and its expected size has been verified. Native writes use a temporary `.part` file and a recoverable replacement step, so a half-written chapter or page is never treated as complete and an already-complete resource is not needlessly downloaded again. Transient failures retry automatically, and returning to the app triggers recovery for unfinished records.
+
+Use the Downloads tab to cancel, retry or repair, download again, delete one package, clear all packages for the active user, or request persistent browser storage.

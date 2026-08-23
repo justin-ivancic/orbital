@@ -137,11 +137,12 @@ const request = async <T,>(input: string, init?: RequestInit) => {
   return (await response.json()) as T
 }
 
-const fetchResource = async (input: string) => {
+const fetchResource = async (input: string, signal?: AbortSignal) => {
   await ensureMobileSessionLoaded()
   const response = await fetch(resolveApiUrl(input), {
     credentials: isNativeApp ? 'omit' : 'same-origin',
     headers: getRequestHeaders(),
+    signal,
   })
 
   if (!response.ok) {
@@ -224,10 +225,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ target }),
     }),
-  createOfflineManifest: async (target: OfflineDownloadTarget) =>
+  createOfflineManifest: async (target: OfflineDownloadTarget, signal?: AbortSignal) =>
     normalizeOfflineManifest(await request<OfflineDownloadManifest>('/api/offline/manifests', {
       method: 'POST',
       body: JSON.stringify({ target }),
+      signal,
     })),
   search: async (query: string, scope: ScopeId) => {
     const response = await request<SearchResponse>(
