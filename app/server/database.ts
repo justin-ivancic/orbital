@@ -105,6 +105,7 @@ export const openDatabase = (dataDirectory: string) => {
       sort_order REAL NOT NULL,
       size INTEGER NOT NULL,
       mtime_ms INTEGER NOT NULL,
+      file_identity TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -178,6 +179,14 @@ export const openDatabase = (dataDirectory: string) => {
       finished_at TEXT,
       status TEXT NOT NULL,
       changed_files INTEGER NOT NULL DEFAULT 0,
+      discovered_files INTEGER NOT NULL DEFAULT 0,
+      parsed_files INTEGER NOT NULL DEFAULT 0,
+      reused_files INTEGER NOT NULL DEFAULT 0,
+      unchanged_files INTEGER NOT NULL DEFAULT 0,
+      new_files INTEGER NOT NULL DEFAULT 0,
+      deleted_files INTEGER NOT NULL DEFAULT 0,
+      moved_files INTEGER NOT NULL DEFAULT 0,
+      processed_series INTEGER NOT NULL DEFAULT 0,
       summary TEXT NOT NULL DEFAULT ''
     );
 
@@ -218,6 +227,7 @@ export const openDatabase = (dataDirectory: string) => {
   }
 
   ensureColumn('entries', 'chapter_number', 'REAL')
+  ensureColumn('entries', 'file_identity', 'TEXT')
   ensureColumn('sessions', 'csrf_token', 'TEXT')
   ensureColumn('entries', 'season_number', 'INTEGER')
   ensureColumn('entries', 'episode_number', 'INTEGER')
@@ -250,6 +260,14 @@ export const openDatabase = (dataDirectory: string) => {
   ensureColumn('metadata_overrides', 'base_source_name', 'TEXT')
   ensureColumn('metadata_overrides', 'base_source_role', 'TEXT')
   ensureColumn('metadata_overrides', 'base_metadata_source', 'TEXT')
+  ensureColumn('scan_runs', 'discovered_files', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'parsed_files', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'reused_files', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'unchanged_files', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'new_files', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'deleted_files', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'moved_files', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'processed_series', 'INTEGER NOT NULL DEFAULT 0')
 
   const needsCategoryConstraintMigration = ['source_folders', 'series', 'bookmarks'].some((tableName) => {
     const table = db

@@ -77,6 +77,14 @@ export type SessionUser = {
 export type ScanSummary = {
   lastScanAt: string | null
   changedFiles: number
+  discoveredFiles: number
+  parsedFiles: number
+  reusedFiles: number
+  unchangedFiles: number
+  newFiles: number
+  deletedFiles: number
+  movedFiles: number
+  processedSeries: number
   sourceRootCount: number
   sourceFolderCount: number
 }

@@ -202,6 +202,7 @@ const formatSourceRootNote = (sourceCount: number, managed: boolean) => {
 type SeriesRow = {
   id: string
   source_folder_id: string
+  series_key: string
   category: CategoryId
   title: string
   title_short: string
@@ -263,6 +264,7 @@ type EntryRow = {
   details: string
   size: number
   mtime_ms: number
+  file_identity?: string | null
   sort_order: number
   chapter_number: number | null
   season_number: number | null
@@ -283,6 +285,7 @@ type FileRecord = {
   extension: string
   size: number
   mtimeMs: number
+  identity: string | null
 }
 
 type ScanDirectoryWarning = {
@@ -293,6 +296,7 @@ type ScanDirectoryWarning = {
 type ScanDirectoryResult = {
   files: FileRecord[]
   warnings: ScanDirectoryWarning[]
+  complete: boolean
 }
 
 type ParsedEntry = {
@@ -341,6 +345,36 @@ type ScanResult = {
   scanRunId: string
   changedFiles: number
   scannedSourceIds: string[]
+  metrics: ScanMetrics
+}
+
+type ScanMetrics = {
+  discoveredFiles: number
+  parsedFiles: number
+  reusedFiles: number
+  unchangedFiles: number
+  newFiles: number
+  deletedFiles: number
+  movedFiles: number
+  processedSeries: number
+  skippedSources: number
+}
+
+type ExistingEntrySnapshot = {
+  id: string
+  series_id: string
+  file_path: string
+  label: string
+  title: string
+  details: string
+  chapter_number: number | null
+  season_number: number | null
+  episode_number: number | null
+  sort_order: number
+  size: number
+  mtime_ms: number
+  file_identity: string | null
+  format: EntryFormat
 }
 
 type ScanEventLevel = ScanLogEntry['level']
@@ -985,15 +1019,24 @@ const scanDirectory = (rootPath: string, allowedExtensions: Set<string>): ScanDi
         extension,
         size: stats.size,
         mtimeMs: Math.floor(stats.mtimeMs),
+        identity:
+          Number.isFinite(stats.dev) && Number.isFinite(stats.ino)
+            ? `${stats.dev}:${stats.ino}`
+            : null,
       })
     }
   }
 
   if (fs.existsSync(rootPath)) {
     visit(rootPath, '')
+  } else {
+    warnings.push({
+      path: rootPath,
+      message: 'Source folder is unavailable or no longer mounted.',
+    })
   }
 
-  return { files, warnings }
+  return { files, warnings, complete: warnings.length === 0 }
 }
 
 const parseAnimeEntry = (file: FileRecord, sourceFolder: SourceFolderRow): ParsedEntry => {
@@ -1352,17 +1395,68 @@ const parseFileForSource = (file: FileRecord, sourceFolder: SourceFolderRow) => 
   return parseBookEntry(file, sourceFolder)
 }
 
-const groupSeriesFromFiles = (sourceFolder: SourceFolderRow, files: FileRecord[]) => {
+const buildParsedEntryFromStored = (
+  file: FileRecord,
+  series: SeriesRow,
+  entry: ExistingEntrySnapshot,
+): ParsedEntry => ({
+  file,
+  groupKey: series.series_key,
+  groupFolder: series.folder_path,
+  seriesTitle: series.title,
+  titleShort: series.title_short,
+  year: series.year,
+  seriesFormat: series.format,
+  status: series.status,
+  description: series.description,
+  tags: parseStoredJsonArray(series.tags_json),
+  entryLabel: entry.label,
+  entryTitle: entry.title,
+  format: entry.format,
+  details: entry.details,
+  chapterNumber: entry.chapter_number,
+  seasonNumber: entry.season_number,
+  episodeNumber: entry.episode_number,
+  entryKind: 'entry',
+  sequenceNumber: entry.chapter_number ?? entry.episode_number ?? entry.season_number,
+  hasStructuredOrder: true,
+  sortOrder: entry.sort_order,
+})
+
+const groupSeriesFromFiles = (
+  sourceFolder: SourceFolderRow,
+  files: FileRecord[],
+  existingSeriesById?: Map<string, SeriesRow>,
+  existingEntriesByPath?: Map<string, ExistingEntrySnapshot>,
+) => {
   const groupedSeries = new Map<string, SeriesSpec>()
+  let parsedFiles = 0
+  let reusedFiles = 0
 
   for (const file of files) {
-    const parsedEntry = parseFileForSource(file, sourceFolder)
-    const existingSeries = groupedSeries.get(parsedEntry.groupKey)
+    const existingEntry = existingEntriesByPath?.get(file.path)
+    const storedSeries = existingEntry ? existingSeriesById?.get(existingEntry.series_id) : undefined
+    const canReuseStoredEntry =
+      sourceFolder.category !== 'anime' &&
+      Boolean(existingEntry && storedSeries) &&
+      existingEntry?.size === file.size &&
+      existingEntry?.mtime_ms === file.mtimeMs &&
+      existingEntry?.file_identity === file.identity
+    const parsedEntry = canReuseStoredEntry && existingEntry && storedSeries
+      ? buildParsedEntryFromStored(file, storedSeries, existingEntry)
+      : parseFileForSource(file, sourceFolder)
 
-    if (existingSeries) {
-      existingSeries.entries.push(parsedEntry)
-      if (!existingSeries.year && parsedEntry.year) {
-        existingSeries.year = parsedEntry.year
+    if (canReuseStoredEntry) {
+      reusedFiles += 1
+    } else {
+      parsedFiles += 1
+    }
+    const groupedSeriesEntry = groupedSeries.get(parsedEntry.groupKey)
+
+    if (groupedSeriesEntry) {
+      groupedSeriesEntry.entries.push(parsedEntry)
+      if (!groupedSeriesEntry.year && parsedEntry.year) {
+        groupedSeriesEntry.year = parsedEntry.year
       }
       continue
     }
@@ -1382,37 +1476,41 @@ const groupSeriesFromFiles = (sourceFolder: SourceFolderRow, files: FileRecord[]
     })
   }
 
-  return [...groupedSeries.values()].map((series) => {
-    const sortedEntries = [...series.entries].sort((left, right) => {
-      if (left.sortOrder !== right.sortOrder) {
-        return left.sortOrder - right.sortOrder
-      }
-
-      return naturalCompare(left.file.relativePath, right.file.relativePath)
-    })
-
-    if (series.category === 'anime') {
-      let fallbackIndex = 1
-
-      for (const entry of sortedEntries) {
-        if (entry.hasStructuredOrder || entry.entryKind !== 'entry') {
-          continue
+  return {
+    series: [...groupedSeries.values()].map((series) => {
+      const sortedEntries = [...series.entries].sort((left, right) => {
+        if (left.sortOrder !== right.sortOrder) {
+          return left.sortOrder - right.sortOrder
         }
 
-        entry.episodeNumber = fallbackIndex
-        entry.entryLabel = `Episode ${padNumber(fallbackIndex)}`
-        entry.details = `${upperExtension(entry.file.extension)} • local video file`
-        entry.sequenceNumber = fallbackIndex
-        entry.sortOrder = 1000 + fallbackIndex
-        fallbackIndex += 1
-      }
-    }
+        return naturalCompare(left.file.relativePath, right.file.relativePath)
+      })
 
-    return {
-      ...series,
-      entries: sortedEntries,
-    }
-  })
+      if (series.category === 'anime') {
+        let fallbackIndex = 1
+
+        for (const entry of sortedEntries) {
+          if (entry.hasStructuredOrder || entry.entryKind !== 'entry') {
+            continue
+          }
+
+          entry.episodeNumber = fallbackIndex
+          entry.entryLabel = `Episode ${padNumber(fallbackIndex)}`
+          entry.details = `${upperExtension(entry.file.extension)} • local video file`
+          entry.sequenceNumber = fallbackIndex
+          entry.sortOrder = 1000 + fallbackIndex
+          fallbackIndex += 1
+        }
+      }
+
+      return {
+        ...series,
+        entries: sortedEntries,
+      }
+    }),
+    parsedFiles,
+    reusedFiles,
+  }
 }
 
 const localCoverForDirectory = (directoryPath: string) => {
@@ -2034,7 +2132,7 @@ const buildSeriesSpecFromStoredSeries = (
       | 'season_number'
       | 'episode_number'
       | 'sort_order'
-    > & { size: number; mtime_ms: number }
+    > & { size: number; mtime_ms: number; file_identity?: string | null }
   >,
   preferredTitle?: string,
 ) : SeriesSpec => ({
@@ -2056,6 +2154,7 @@ const buildSeriesSpecFromStoredSeries = (
       extension: path.extname(entry.file_path || '').toLowerCase(),
       size: entry.size,
       mtimeMs: entry.mtime_ms,
+      identity: entry.file_identity ?? null,
     },
     groupKey: series.id,
     groupFolder: series.folder_path,
@@ -2746,14 +2845,26 @@ const getScanSummary = (db: Database): ScanSummary => {
   const lastRun = db
     .prepare(
       `
-        SELECT finished_at, changed_files
+        SELECT finished_at, changed_files, discovered_files, parsed_files, reused_files, unchanged_files,
+                 new_files, deleted_files, moved_files, processed_series
         FROM scan_runs
         WHERE status = 'success'
         ORDER BY started_at DESC
         LIMIT 1
       `,
     )
-    .get() as { finished_at: string | null; changed_files: number } | undefined
+    .get() as {
+    finished_at: string | null
+    changed_files: number
+    discovered_files: number
+    parsed_files: number
+    reused_files: number
+    unchanged_files: number
+    new_files: number
+    deleted_files: number
+    moved_files: number
+    processed_series: number
+  } | undefined
 
   const rootCount = db.prepare(`SELECT COUNT(*) AS count FROM source_roots`).get() as {
     count: number
@@ -2765,6 +2876,14 @@ const getScanSummary = (db: Database): ScanSummary => {
   return {
     lastScanAt: lastRun?.finished_at ?? null,
     changedFiles: lastRun?.changed_files ?? 0,
+    discoveredFiles: lastRun?.discovered_files ?? 0,
+    parsedFiles: lastRun?.parsed_files ?? 0,
+    reusedFiles: lastRun?.reused_files ?? 0,
+    unchangedFiles: lastRun?.unchanged_files ?? 0,
+    newFiles: lastRun?.new_files ?? 0,
+    deletedFiles: lastRun?.deleted_files ?? 0,
+    movedFiles: lastRun?.moved_files ?? 0,
+    processedSeries: lastRun?.processed_series ?? 0,
     sourceRootCount: rootCount.count,
     sourceFolderCount: folderCount.count,
   }
@@ -3906,12 +4025,20 @@ const deleteSeriesNotInSet = (db: Database, sourceFolderId: string, keepSeriesId
     .prepare(`SELECT id FROM series WHERE source_folder_id = ?`)
     .all(sourceFolderId) as Array<{ id: string }>
 
+  let deletedFiles = 0
+
   for (const series of existingSeries) {
     if (!keepSeriesIds.has(series.id)) {
+      const entryCount = db
+        .prepare(`SELECT COUNT(*) AS count FROM entries WHERE series_id = ?`)
+        .get(series.id) as { count: number }
       deleteSeriesSearchDocument(db, series.id)
       db.prepare(`DELETE FROM series WHERE id = ?`).run(series.id)
+      deletedFiles += entryCount.count
     }
   }
+
+  return { deletedFiles }
 }
 
 const upsertSeries = async (
@@ -3920,20 +4047,88 @@ const upsertSeries = async (
   sourceFolder: SourceFolderRow,
   series: SeriesSpec,
   existingSeriesByKey: Map<string, SeriesRow>,
-  existingEntriesByPath: Map<string, { id: string; size: number; mtime_ms: number }>,
+  existingSeriesById: Map<string, SeriesRow>,
+  existingEntriesByPath: Map<string, ExistingEntrySnapshot>,
+  existingEntriesBySeriesId: Map<string, ExistingEntrySnapshot[]>,
+  existingEntriesByIdentity: Map<string, ExistingEntrySnapshot[]>,
+  claimedSeriesIds: Set<string>,
+  claimedEntryIds: Set<string>,
   reporter?: ScanReporter,
   scanRunId?: string,
 ) => {
   const now = nowIso()
-  const existingSeries = existingSeriesByKey.get(series.key)
+  let existingSeries = existingSeriesByKey.get(series.key)
+
+  if (!existingSeries) {
+    const matchingSeriesIds = new Set<string>()
+
+    for (const entry of series.entries) {
+      if (!entry.file.identity) {
+        continue
+      }
+
+      for (const candidate of existingEntriesByIdentity.get(entry.file.identity) || []) {
+        if (
+          !claimedEntryIds.has(candidate.id) &&
+          !claimedSeriesIds.has(candidate.series_id) &&
+          candidate.size === entry.file.size &&
+          candidate.mtime_ms === entry.file.mtimeMs
+        ) {
+          matchingSeriesIds.add(candidate.series_id)
+        }
+      }
+    }
+
+    if (matchingSeriesIds.size === 1) {
+      existingSeries = existingSeriesById.get([...matchingSeriesIds][0])
+    }
+  }
+
   const seriesId =
     existingSeries?.id ?? `${slugify(series.title)}-${hashString(series.key).slice(0, 8)}`
+
+  if (existingSeries && existingSeries.series_key !== series.key) {
+    db.prepare(`UPDATE series SET series_key = ? WHERE id = ?`).run(series.key, existingSeries.id)
+  }
+
+  claimedSeriesIds.add(seriesId)
+
+  const existingSeriesEntries = existingEntriesBySeriesId.get(seriesId) || []
+  const allEntriesUnchanged = Boolean(existingSeries) &&
+    series.entries.length === existingSeriesEntries.length &&
+    series.entries.every((entry) => {
+      const existingEntry = existingEntriesByPath.get(entry.file.path)
+      return Boolean(
+        existingEntry &&
+          existingEntry.series_id === seriesId &&
+          existingEntry.size === entry.file.size &&
+          existingEntry.mtime_ms === entry.file.mtimeMs &&
+          existingEntry.file_identity === entry.file.identity,
+      )
+    })
+
+  if (allEntriesUnchanged) {
+    return {
+      seriesId,
+      changedFiles: 0,
+      unchangedFiles: series.entries.length,
+      newFiles: 0,
+      deletedFiles: 0,
+      movedFiles: 0,
+      processedSeries: 0,
+    }
+  }
+
   const metadataOverride = getMetadataOverride(db, seriesId)
   const effectiveSeries = applyMetadataOverrideToSeriesSpec(series, metadataOverride)
 
   let seriesChanged = !existingSeries
   const seenEntryPaths = new Set<string>()
   let changedFiles = 0
+  let unchangedFiles = 0
+  let newFiles = 0
+  let deletedFiles = 0
+  let movedFiles = 0
 
   db.prepare(
     `
@@ -4002,76 +4197,165 @@ const upsertSeries = async (
   )
 
   for (const entry of effectiveSeries.entries) {
-    const existingEntry = existingEntriesByPath.get(entry.file.path)
+    let existingEntry = existingEntriesByPath.get(entry.file.path)
+
+    if (existingEntry && claimedEntryIds.has(existingEntry.id)) {
+      existingEntry = undefined
+    }
+
+    if (!existingEntry && entry.file.identity) {
+      const identityMatches = (existingEntriesByIdentity.get(entry.file.identity) || []).filter(
+        (candidate) =>
+          !claimedEntryIds.has(candidate.id) &&
+          candidate.size === entry.file.size &&
+          candidate.mtime_ms === entry.file.mtimeMs,
+      )
+
+      if (identityMatches.length === 1) {
+        existingEntry = identityMatches[0]
+      }
+    }
+
+    if (!existingEntry && existingSeries) {
+      const fallbackMatches = existingSeriesEntries.filter(
+        (candidate) =>
+          !claimedEntryIds.has(candidate.id) &&
+          candidate.size === entry.file.size &&
+          candidate.mtime_ms === entry.file.mtimeMs &&
+          candidate.format === entry.format,
+      )
+
+      if (fallbackMatches.length === 1) {
+        existingEntry = fallbackMatches[0]
+      }
+    }
+
     const entryId = existingEntry?.id ?? `${slugify(effectiveSeries.title)}-${hashString(entry.file.path).slice(0, 10)}`
+    const moved = Boolean(existingEntry && existingEntry.file_path !== entry.file.path)
     const entryChanged =
       !existingEntry ||
       existingEntry.size !== entry.file.size ||
-      existingEntry.mtime_ms !== entry.file.mtimeMs
+      existingEntry.mtime_ms !== entry.file.mtimeMs ||
+      existingEntry.file_identity !== entry.file.identity ||
+      existingEntry.series_id !== seriesId ||
+      moved
 
     if (entryChanged) {
       seriesChanged = true
       changedFiles += 1
+    } else {
+      unchangedFiles += 1
     }
 
-    db.prepare(
-      `
-        INSERT INTO entries (
-          id, series_id, source_folder_id, file_path, storage_file, relative_path, label, title,
-          format, details, chapter_number, season_number, episode_number, sort_order, size,
-          mtime_ms, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(file_path) DO UPDATE SET
-          series_id = excluded.series_id,
-          source_folder_id = excluded.source_folder_id,
-          storage_file = excluded.storage_file,
-          relative_path = excluded.relative_path,
-          label = excluded.label,
-          title = excluded.title,
-          format = excluded.format,
-          details = excluded.details,
-          chapter_number = excluded.chapter_number,
-          season_number = excluded.season_number,
-          episode_number = excluded.episode_number,
-          sort_order = excluded.sort_order,
-          size = excluded.size,
-          mtime_ms = excluded.mtime_ms,
-          updated_at = excluded.updated_at
-      `,
-    ).run(
-      entryId,
-      seriesId,
-      sourceFolder.id,
-      entry.file.path,
-      entry.file.baseName,
-      entry.file.relativePath,
-      entry.entryLabel,
-      entry.entryTitle,
-      entry.format,
-      entry.details,
-      entry.chapterNumber,
-      entry.seasonNumber,
-      entry.episodeNumber,
-      entry.sortOrder,
-      entry.file.size,
-      entry.file.mtimeMs,
-      now,
-      now,
-    )
+    if (!existingEntry) {
+      newFiles += 1
+    }
+
+    if (moved) {
+      movedFiles += 1
+    }
+
+    if (existingEntry) {
+      claimedEntryIds.add(existingEntry.id)
+    }
+
+    if (!entryChanged && existingEntry) {
+      seenEntryPaths.add(entry.file.path)
+      continue
+    }
+
+    if (moved && existingEntry) {
+      db.prepare(
+        `
+          UPDATE entries
+          SET series_id = ?, source_folder_id = ?, file_path = ?, storage_file = ?, relative_path = ?,
+              label = ?, title = ?, format = ?, details = ?, chapter_number = ?, season_number = ?,
+              episode_number = ?, sort_order = ?, size = ?, mtime_ms = ?, file_identity = ?, updated_at = ?
+          WHERE id = ?
+        `,
+      ).run(
+        seriesId,
+        sourceFolder.id,
+        entry.file.path,
+        entry.file.baseName,
+        entry.file.relativePath,
+        entry.entryLabel,
+        entry.entryTitle,
+        entry.format,
+        entry.details,
+        entry.chapterNumber,
+        entry.seasonNumber,
+        entry.episodeNumber,
+        entry.sortOrder,
+        entry.file.size,
+        entry.file.mtimeMs,
+        entry.file.identity,
+        now,
+        entryId,
+      )
+    } else {
+      db.prepare(
+        `
+          INSERT INTO entries (
+            id, series_id, source_folder_id, file_path, storage_file, relative_path, label, title,
+            format, details, chapter_number, season_number, episode_number, sort_order, size,
+            mtime_ms, file_identity, created_at, updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(file_path) DO UPDATE SET
+            series_id = excluded.series_id,
+            source_folder_id = excluded.source_folder_id,
+            storage_file = excluded.storage_file,
+            relative_path = excluded.relative_path,
+            label = excluded.label,
+            title = excluded.title,
+            format = excluded.format,
+            details = excluded.details,
+            chapter_number = excluded.chapter_number,
+            season_number = excluded.season_number,
+            episode_number = excluded.episode_number,
+            sort_order = excluded.sort_order,
+            size = excluded.size,
+            mtime_ms = excluded.mtime_ms,
+            file_identity = excluded.file_identity,
+            updated_at = excluded.updated_at
+        `,
+      ).run(
+        entryId,
+        seriesId,
+        sourceFolder.id,
+        entry.file.path,
+        entry.file.baseName,
+        entry.file.relativePath,
+        entry.entryLabel,
+        entry.entryTitle,
+        entry.format,
+        entry.details,
+        entry.chapterNumber,
+        entry.seasonNumber,
+        entry.episodeNumber,
+        entry.sortOrder,
+        entry.file.size,
+        entry.file.mtimeMs,
+        entry.file.identity,
+        now,
+        now,
+      )
+    }
 
     seenEntryPaths.add(entry.file.path)
   }
 
-  const existingSeriesEntries = db
+  const storedSeriesEntries = db
     .prepare(`SELECT id, file_path FROM entries WHERE source_folder_id = ? AND series_id = ?`)
     .all(sourceFolder.id, seriesId) as Array<{ id: string; file_path: string }>
 
-  for (const existingEntry of existingSeriesEntries) {
+  for (const existingEntry of storedSeriesEntries) {
     if (!seenEntryPaths.has(existingEntry.file_path)) {
       db.prepare(`DELETE FROM entries WHERE id = ?`).run(existingEntry.id)
       seriesChanged = true
       changedFiles += 1
+      deletedFiles += 1
     }
   }
 
@@ -4162,6 +4446,11 @@ const upsertSeries = async (
   return {
     seriesId,
     changedFiles,
+    unchangedFiles,
+    newFiles,
+    deletedFiles,
+    movedFiles,
+    processedSeries: 1,
   }
 }
 
@@ -4174,7 +4463,12 @@ export const runScan = async (
   const scanRunId = createId('scan')
   const startedAt = nowIso()
   db.prepare(
-    `INSERT INTO scan_runs (id, started_at, status, changed_files, summary) VALUES (?, ?, 'running', 0, '')`,
+    `
+      INSERT INTO scan_runs (
+        id, started_at, status, changed_files, discovered_files, parsed_files, reused_files,
+        unchanged_files, new_files, deleted_files, moved_files, processed_series, summary
+      ) VALUES (?, ?, 'running', 0, 0, 0, 0, 0, 0, 0, 0, 0, '')
+    `,
   ).run(scanRunId, startedAt)
 
   try {
@@ -4210,6 +4504,17 @@ export const runScan = async (
     let changedFiles = 0
     const scannedSourceIds: string[] = []
     let completedSources = 0
+    const metrics: ScanMetrics = {
+      discoveredFiles: 0,
+      parsedFiles: 0,
+      reusedFiles: 0,
+      unchangedFiles: 0,
+      newFiles: 0,
+      deletedFiles: 0,
+      movedFiles: 0,
+      processedSeries: 0,
+      skippedSources: 0,
+    }
 
     for (const sourceFolder of sourceFolders) {
       const sourceLabel = formatSourceLabelFromPath(sourceFolder.path)
@@ -4248,6 +4553,7 @@ export const runScan = async (
       )
       const { files } = scanResult
       const warningCount = scanResult.warnings.length
+      metrics.discoveredFiles += files.length
 
       for (const warning of scanResult.warnings.slice(0, 25)) {
         appendScanEvent(
@@ -4269,7 +4575,103 @@ export const runScan = async (
         )
       }
 
-      const groupedSeries = groupSeriesFromFiles(sourceFolder, files)
+      if (!scanResult.complete) {
+        metrics.skippedSources += 1
+        db.prepare(
+          `
+            UPDATE source_folders
+            SET last_scan_status = ?, updated_at = ?
+            WHERE id = ?
+          `,
+        ).run('Unavailable', nowIso(), sourceFolder.id)
+        appendScanEvent(
+          db,
+          scanRunId,
+          'error',
+          `Skipped reconciliation for ${sourceLabel}; existing library records were preserved because the inventory was incomplete.`,
+          reporter,
+        )
+        completedSources += 1
+        reporter?.onProgress?.({
+          runId: scanRunId,
+          totalSources: sourceFolders.length,
+          completedSources,
+          currentSource: null,
+          currentSourceFilesDiscovered: files.length,
+          currentSourceSeriesTotal: null,
+          currentSourceSeriesCompleted: 0,
+          currentSeries: null,
+          summary: `Skipped unavailable source ${sourceLabel}`,
+        })
+        await yieldToEventLoop()
+        continue
+      }
+
+      const existingSeries = db
+        .prepare(
+          `
+            SELECT id, source_folder_id, category, title, title_short, year, format, status,
+                   description, folder_path, cover_source, metadata_source, cover_path, cover_mime,
+                   banner_path, banner_mime, remote_provider, remote_id, external_url,
+                   source_name, source_role, genres_json, file_count, last_scan_at, tags_json,
+                   metadata_refreshed_at, series_key
+            FROM series
+            WHERE source_folder_id = ?
+          `,
+        )
+        .all(sourceFolder.id) as Array<{
+          series_key: string
+        } & SeriesRow>
+      const existingEntries = db
+        .prepare(
+          `
+            SELECT id, series_id, file_path, label, title, details, format,
+                   chapter_number, season_number, episode_number, sort_order,
+                   size, mtime_ms, file_identity
+            FROM entries
+            WHERE source_folder_id = ?
+          `,
+        )
+        .all(sourceFolder.id) as ExistingEntrySnapshot[]
+
+      const existingSeriesByKey = new Map(
+        existingSeries.map((series) => [series.series_key, series]),
+      )
+      const existingSeriesById = new Map(
+        existingSeries.map((series) => [series.id, series]),
+      )
+      const existingEntriesByPath = new Map(
+        existingEntries.map((entry) => [entry.file_path, entry]),
+      )
+      const existingEntriesBySeriesId = new Map<string, ExistingEntrySnapshot[]>()
+      const existingEntriesByIdentity = new Map<string, ExistingEntrySnapshot[]>()
+
+      for (const entry of existingEntries) {
+        const seriesEntries = existingEntriesBySeriesId.get(entry.series_id) || []
+        seriesEntries.push(entry)
+        existingEntriesBySeriesId.set(entry.series_id, seriesEntries)
+
+        if (entry.file_identity) {
+          const identityEntries = existingEntriesByIdentity.get(entry.file_identity) || []
+          identityEntries.push(entry)
+          existingEntriesByIdentity.set(entry.file_identity, identityEntries)
+        }
+      }
+
+      const keptSeriesIds = new Set<string>()
+      const claimedSeriesIds = new Set<string>()
+      const claimedEntryIds = new Set<string>()
+      let sourceChangedFiles = 0
+      const groupedSeriesResult = groupSeriesFromFiles(
+        sourceFolder,
+        files,
+        existingSeriesById,
+        existingEntriesByPath,
+      )
+      const groupedSeries = groupedSeriesResult.series
+      metrics.parsedFiles += groupedSeriesResult.parsedFiles
+      metrics.reusedFiles += groupedSeriesResult.reusedFiles
+
       reporter?.onProgress?.({
         runId: scanRunId,
         totalSources: sourceFolders.length,
@@ -4288,33 +4690,6 @@ export const runScan = async (
         `Queued ${sourceLabel}: ${files.length} ${files.length === 1 ? 'file' : 'files'} across ${groupedSeries.length} ${groupedSeries.length === 1 ? 'series' : 'series'}${warningCount > 0 ? `, ${warningCount} skipped` : ''}`,
         reporter,
       )
-      const existingSeries = db
-        .prepare(
-          `
-            SELECT id, source_folder_id, category, title, title_short, year, format, status,
-                   description, folder_path, cover_source, metadata_source, cover_path, cover_mime,
-                   banner_path, banner_mime, remote_provider, remote_id, external_url,
-                   source_name, source_role, genres_json, file_count, last_scan_at, tags_json,
-                   metadata_refreshed_at, series_key
-            FROM series
-            WHERE source_folder_id = ?
-          `,
-        )
-        .all(sourceFolder.id) as Array<{
-          series_key: string
-        } & SeriesRow>
-      const existingEntries = db
-        .prepare(`SELECT id, file_path, size, mtime_ms FROM entries WHERE source_folder_id = ?`)
-        .all(sourceFolder.id) as Array<{ id: string; file_path: string; size: number; mtime_ms: number }>
-
-      const existingSeriesByKey = new Map(
-        existingSeries.map((series) => [series.series_key, series]),
-      )
-      const existingEntriesByPath = new Map(
-        existingEntries.map((entry) => [entry.file_path, entry]),
-      )
-      const keptSeriesIds = new Set<string>()
-      let sourceChangedFiles = 0
 
       for (const [seriesIndex, series] of groupedSeries.entries()) {
         const seriesCompletedBeforeCurrent = seriesIndex
@@ -4341,13 +4716,23 @@ export const runScan = async (
           sourceFolder,
           series,
           existingSeriesByKey,
+          existingSeriesById,
           existingEntriesByPath,
+          existingEntriesBySeriesId,
+          existingEntriesByIdentity,
+          claimedSeriesIds,
+          claimedEntryIds,
           reporter,
           scanRunId,
         )
         keptSeriesIds.add(upsertResult.seriesId)
         changedFiles += upsertResult.changedFiles
         sourceChangedFiles += upsertResult.changedFiles
+        metrics.unchangedFiles += upsertResult.unchangedFiles
+        metrics.newFiles += upsertResult.newFiles
+        metrics.deletedFiles += upsertResult.deletedFiles
+        metrics.movedFiles += upsertResult.movedFiles
+        metrics.processedSeries += upsertResult.processedSeries
         const completedSeries = seriesIndex + 1
         reporter?.onProgress?.({
           runId: scanRunId,
@@ -4378,7 +4763,10 @@ export const runScan = async (
         await yieldToEventLoop()
       }
 
-      deleteSeriesNotInSet(db, sourceFolder.id, keptSeriesIds)
+      const deletedSeriesResult = deleteSeriesNotInSet(db, sourceFolder.id, keptSeriesIds)
+      changedFiles += deletedSeriesResult.deletedFiles
+      sourceChangedFiles += deletedSeriesResult.deletedFiles
+      metrics.deletedFiles += deletedSeriesResult.deletedFiles
 
       db.prepare(
         `
@@ -4412,14 +4800,29 @@ export const runScan = async (
     }
 
     const finishedAt = nowIso()
-    const successSummary = `${scannedSourceIds.length} source folder${scannedSourceIds.length === 1 ? '' : 's'} scanned`
+    const successSummary = `${scannedSourceIds.length} source folder${scannedSourceIds.length === 1 ? '' : 's'} scanned; ${metrics.discoveredFiles} files checked, ${metrics.reusedFiles} reused, ${metrics.parsedFiles} parsed, ${metrics.unchangedFiles} unchanged, ${metrics.newFiles} new, ${metrics.movedFiles} moved, ${metrics.deletedFiles} deleted${metrics.skippedSources ? `; ${metrics.skippedSources} source${metrics.skippedSources === 1 ? '' : 's'} skipped` : ''}`
     db.prepare(
       `
         UPDATE scan_runs
-        SET finished_at = ?, status = 'success', changed_files = ?, summary = ?
+        SET finished_at = ?, status = 'success', changed_files = ?, discovered_files = ?,
+            parsed_files = ?, reused_files = ?, unchanged_files = ?, new_files = ?,
+            deleted_files = ?, moved_files = ?, processed_series = ?, summary = ?
         WHERE id = ?
       `,
-    ).run(finishedAt, changedFiles, successSummary, scanRunId)
+    ).run(
+      finishedAt,
+      changedFiles,
+      metrics.discoveredFiles,
+      metrics.parsedFiles,
+      metrics.reusedFiles,
+      metrics.unchangedFiles,
+      metrics.newFiles,
+      metrics.deletedFiles,
+      metrics.movedFiles,
+      metrics.processedSeries,
+      successSummary,
+      scanRunId,
+    )
     appendScanEvent(
       db,
       scanRunId,
@@ -4438,6 +4841,7 @@ export const runScan = async (
       scanRunId,
       changedFiles,
       scannedSourceIds,
+      metrics,
     }
   } catch (error) {
     const finishedAt = nowIso()
