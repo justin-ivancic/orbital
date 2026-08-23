@@ -1,4 +1,9 @@
+import { Capacitor } from '@capacitor/core'
+
 const imageCacheNamePrefix = 'orbital-images-v1'
+const imageDatabaseName = 'orbital-image-cache-v1'
+const imageDatabaseVersion = 1
+const imageStoreName = 'images'
 const imageCacheTtlMs = 30 * 24 * 60 * 60 * 1000
 const imageCacheMaxEntries = 128
 const imageCacheMaxBytes = 100 * 1024 * 1024
@@ -18,6 +23,16 @@ type ImageQueueItem = {
   reject: (error: unknown) => void
 }
 
+type IndexedDbImageRecord = {
+  key: string
+  ownerUserId: string
+  url: string
+  blob: Blob
+  cachedAt: number
+  accessedAt: number
+  size: number
+}
+
 const memoryImages = new Map<string, MemoryImage>()
 const inFlightImages = new Map<string, Promise<Blob>>()
 const imageQueue: ImageQueueItem[] = []
@@ -34,6 +49,164 @@ const cacheStorage = () => {
   }
 
   return window.caches
+}
+
+const canUseIndexedDb = () => typeof indexedDB !== 'undefined'
+
+const imageStorageKey = (ownerUserId: string, url: string) =>
+  `${encodeURIComponent(ownerUserId)}:${url}`
+
+const openImageDb = () =>
+  new Promise<IDBDatabase>((resolve, reject) => {
+    if (!canUseIndexedDb()) {
+      reject(new Error('IndexedDB is not available.'))
+      return
+    }
+
+    const request = indexedDB.open(imageDatabaseName, imageDatabaseVersion)
+
+    request.onupgradeneeded = () => {
+      const db = request.result
+      if (db.objectStoreNames.contains(imageStoreName)) {
+        return
+      }
+
+      const images = db.createObjectStore(imageStoreName, { keyPath: 'key' })
+      images.createIndex('ownerUserId', 'ownerUserId', { unique: false })
+      images.createIndex('accessedAt', 'accessedAt', { unique: false })
+    }
+
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error || new Error('Could not open image cache.'))
+  })
+
+const imageTransactionDone = (transaction: IDBTransaction) =>
+  new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve()
+    transaction.onabort = () => reject(transaction.error || new Error('Image cache transaction aborted.'))
+    transaction.onerror = () => reject(transaction.error || new Error('Image cache transaction failed.'))
+  })
+
+const readIndexedDbImage = async (ownerUserId: string, url: string) => {
+  if (!canUseIndexedDb()) {
+    return null
+  }
+
+  const db = await openImageDb()
+
+  try {
+    const transaction = db.transaction(imageStoreName, 'readwrite')
+    const done = imageTransactionDone(transaction)
+    const store = transaction.objectStore(imageStoreName)
+    const request = store.get(imageStorageKey(ownerUserId, url))
+
+    const record = await new Promise<IndexedDbImageRecord | null>((resolve, reject) => {
+      request.onsuccess = () => {
+        const result = request.result as IndexedDbImageRecord | undefined
+        if (!result || Date.now() - result.cachedAt >= imageCacheTtlMs) {
+          if (result) {
+            store.delete(result.key)
+          }
+          resolve(null)
+          return
+        }
+
+        store.put({ ...result, accessedAt: Date.now() })
+        resolve(result)
+      }
+      request.onerror = () => reject(request.error || new Error('Could not read image cache.'))
+    })
+
+    await done
+    return record?.blob || null
+  } finally {
+    db.close()
+  }
+}
+
+const pruneIndexedDbImages = async (db: IDBDatabase, ownerUserId: string) => {
+  const readTransaction = db.transaction(imageStoreName, 'readonly')
+  const readDone = imageTransactionDone(readTransaction)
+  const readRequest = readTransaction
+    .objectStore(imageStoreName)
+    .index('ownerUserId')
+    .getAll(IDBKeyRange.only(ownerUserId))
+  const records = await new Promise<IndexedDbImageRecord[]>((resolve, reject) => {
+    readRequest.onsuccess = () => resolve(readRequest.result as IndexedDbImageRecord[])
+    readRequest.onerror = () => reject(readRequest.error || new Error('Could not inspect image cache.'))
+  })
+  await readDone
+
+  records.sort((left, right) => left.accessedAt - right.accessedAt)
+  let totalBytes = records.reduce((total, record) => total + record.size, 0)
+  const toDelete: string[] = []
+
+  while (records.length - toDelete.length > imageCacheMaxEntries || totalBytes > imageCacheMaxBytes) {
+    const oldest = records[toDelete.length]
+    if (!oldest) {
+      break
+    }
+
+    toDelete.push(oldest.key)
+    totalBytes -= oldest.size
+  }
+
+  if (!toDelete.length) {
+    return
+  }
+
+  const deleteTransaction = db.transaction(imageStoreName, 'readwrite')
+  const deleteDone = imageTransactionDone(deleteTransaction)
+  const store = deleteTransaction.objectStore(imageStoreName)
+  toDelete.forEach((key) => store.delete(key))
+  await deleteDone
+}
+
+const readIndexedDbImagesForOwner = async (ownerUserId: string) => {
+  const db = await openImageDb()
+
+  try {
+    const transaction = db.transaction(imageStoreName, 'readwrite')
+    const done = imageTransactionDone(transaction)
+    const store = transaction.objectStore(imageStoreName)
+    const request = store.index('ownerUserId').getAll(IDBKeyRange.only(ownerUserId))
+
+    request.onsuccess = () => {
+      const records = request.result as IndexedDbImageRecord[]
+      records.forEach((record) => store.delete(record.key))
+    }
+
+    await done
+  } finally {
+    db.close()
+  }
+}
+
+const writeIndexedDbImage = async (ownerUserId: string, url: string, blob: Blob) => {
+  if (!canUseIndexedDb()) {
+    return
+  }
+
+  const db = await openImageDb()
+
+  try {
+    const now = Date.now()
+    const transaction = db.transaction(imageStoreName, 'readwrite')
+    const done = imageTransactionDone(transaction)
+    transaction.objectStore(imageStoreName).put({
+      key: imageStorageKey(ownerUserId, url),
+      ownerUserId,
+      url,
+      blob,
+      cachedAt: now,
+      accessedAt: now,
+      size: blob.size,
+    } satisfies IndexedDbImageRecord)
+    await done
+    await pruneIndexedDbImages(db, ownerUserId)
+  } finally {
+    db.close()
+  }
 }
 
 const memoryKey = (ownerUserId: string, url: string) => `${encodeURIComponent(ownerUserId)}:${url}`
@@ -76,7 +249,7 @@ const isFresh = (response: Response) => {
   return Number.isFinite(cachedAt) && Date.now() - cachedAt < imageCacheTtlMs
 }
 
-const readPersistentImage = async (ownerUserId: string, url: string) => {
+const readCacheStorageImage = async (ownerUserId: string, url: string) => {
   const storage = cacheStorage()
   if (!storage) {
     return null
@@ -102,6 +275,11 @@ const readPersistentImage = async (ownerUserId: string, url: string) => {
   } catch {
     return null
   }
+}
+
+const readPersistentImage = async (ownerUserId: string, url: string) => {
+  const cacheImage = await readCacheStorageImage(ownerUserId, url)
+  return cacheImage || await readIndexedDbImage(ownerUserId, url).catch(() => null)
 }
 
 const prunePersistentImages = async (cache: Cache) => {
@@ -144,14 +322,14 @@ const prunePersistentImages = async (cache: Cache) => {
   }
 }
 
-const writePersistentImage = async (
+const writeCacheStorageImage = async (
   ownerUserId: string,
   url: string,
   blob: Blob,
 ) => {
   const storage = cacheStorage()
   if (!storage) {
-    return
+    return false
   }
 
   try {
@@ -166,8 +344,25 @@ const writePersistentImage = async (
 
     await cache.put(url, new Response(blob, { headers }))
     await prunePersistentImages(cache)
+    return true
   } catch {
     // Image persistence is an optimization; a storage failure must not block rendering.
+    return false
+  }
+}
+
+const writePersistentImage = async (
+  ownerUserId: string,
+  url: string,
+  blob: Blob,
+) => {
+  const nativeImageCache = Capacitor.isNativePlatform()
+  const cacheStored = nativeImageCache
+    ? false
+    : await writeCacheStorageImage(ownerUserId, url, blob)
+
+  if (!cacheStored || nativeImageCache) {
+    await writeIndexedDbImage(ownerUserId, url, blob).catch(() => undefined)
   }
 }
 
@@ -266,23 +461,48 @@ export const clearImageCache = async (ownerUserId?: string) => {
     ownerGenerations.set(ownerUserId, (ownerGenerations.get(ownerUserId) || 0) + 1)
   }
 
-  if (!storage) {
+  await (async () => {
+    if (!storage) {
+      return
+    }
+
+    try {
+      if (ownerUserId) {
+        await storage.delete(cacheNameForOwner(ownerUserId))
+        return
+      }
+
+      const cacheNames = await storage.keys()
+      await Promise.all(
+        cacheNames
+          .filter((name) => name.startsWith(`${imageCacheNamePrefix}:`))
+          .map((name) => storage.delete(name)),
+      )
+    } catch {
+      // Cache cleanup is best-effort and never blocks authentication or reading.
+    }
+  })()
+
+  if (!canUseIndexedDb()) {
     return
   }
 
   try {
     if (ownerUserId) {
-      await storage.delete(cacheNameForOwner(ownerUserId))
+      await readIndexedDbImagesForOwner(ownerUserId)
       return
     }
 
-    const cacheNames = await storage.keys()
-    await Promise.all(
-      cacheNames
-        .filter((name) => name.startsWith(`${imageCacheNamePrefix}:`))
-        .map((name) => storage.delete(name)),
-    )
+    const db = await openImageDb()
+    try {
+      const transaction = db.transaction(imageStoreName, 'readwrite')
+      const done = imageTransactionDone(transaction)
+      transaction.objectStore(imageStoreName).clear()
+      await done
+    } finally {
+      db.close()
+    }
   } catch {
-    // Cache cleanup is best-effort and never blocks authentication or reading.
+    // IndexedDB cleanup is best-effort and never blocks authentication or reading.
   }
 }
