@@ -17,6 +17,7 @@ const nativeImageStorageEnabled = Capacitor.isNativePlatform()
 
 type MemoryImage = {
   blob: Blob
+  url: string
   accessedAt: number
 }
 
@@ -110,51 +111,68 @@ const base64ToBlob = (value: string, contentType: string) => {
   return new Blob([bytes], { type: contentType })
 }
 
-const readNativeImage = async (ownerUserId: string, url: string) => {
+const readNativeImage = async (
+  ownerUserId: string,
+  url: string,
+  cacheKey = url,
+  allowStaleUrl = false,
+) => {
   if (!nativeImageStorageEnabled) {
     return null
   }
 
-  try {
-    const metadataResult = await Filesystem.readFile({
-      path: nativeImageMetadataPath(ownerUserId, url),
-      directory: Directory.Data,
-      encoding: Encoding.UTF8,
-    })
-    const metadata = JSON.parse(String(metadataResult.data)) as NativeImageMetadata
+  const candidateKeys = [...new Set([cacheKey, url])]
+  for (const candidateKey of candidateKeys) {
+    try {
+      const metadataResult = await Filesystem.readFile({
+        path: nativeImageMetadataPath(ownerUserId, candidateKey),
+        directory: Directory.Data,
+        encoding: Encoding.UTF8,
+      })
+      const metadata = JSON.parse(String(metadataResult.data)) as NativeImageMetadata
 
-    if (
-      metadata.url !== url ||
-      !Number.isFinite(metadata.cachedAt) ||
-      Date.now() - metadata.cachedAt >= imageCacheTtlMs
-    ) {
-      throw new Error('Native image cache entry is stale.')
+      if (
+        (!allowStaleUrl && metadata.url !== url) ||
+        !Number.isFinite(metadata.cachedAt) ||
+        Date.now() - metadata.cachedAt >= imageCacheTtlMs
+      ) {
+        continue
+      }
+
+      const imageResult = await Filesystem.readFile({
+        path: nativeImagePath(ownerUserId, candidateKey),
+        directory: Directory.Data,
+      })
+      if (typeof imageResult.data !== 'string') {
+        continue
+      }
+
+      const blob = base64ToBlob(imageResult.data, metadata.contentType || 'application/octet-stream')
+      if (blob.size === metadata.size) {
+        return blob
+      }
+    } catch {
+      // Try the next key. Older builds stored covers under their full URL.
     }
-
-    const imageResult = await Filesystem.readFile({
-      path: nativeImagePath(ownerUserId, url),
-      directory: Directory.Data,
-    })
-    if (typeof imageResult.data !== 'string') {
-      return null
-    }
-
-    const blob = base64ToBlob(imageResult.data, metadata.contentType || 'application/octet-stream')
-    return blob.size === metadata.size ? blob : null
-  } catch {
-    return null
   }
+
+  return null
 }
 
-const writeNativeImage = async (ownerUserId: string, url: string, blob: Blob) => {
+const writeNativeImage = async (
+  ownerUserId: string,
+  url: string,
+  cacheKey: string,
+  blob: Blob,
+) => {
   if (!nativeImageStorageEnabled) {
     return false
   }
 
-  const path = nativeImagePath(ownerUserId, url)
+  const path = nativeImagePath(ownerUserId, cacheKey)
   const temporaryPath = `${path}.part`
   const previousPath = `${path}.previous`
-  const metadataPath = nativeImageMetadataPath(ownerUserId, url)
+  const metadataPath = nativeImageMetadataPath(ownerUserId, cacheKey)
   const temporaryMetadataPath = `${metadataPath}.part`
   const previousMetadataPath = `${metadataPath}.previous`
   const metadata: NativeImageMetadata = {
@@ -263,7 +281,12 @@ const imageTransactionDone = (transaction: IDBTransaction) =>
     transaction.onerror = () => reject(transaction.error || new Error('Image cache transaction failed.'))
   })
 
-const readIndexedDbImage = async (ownerUserId: string, url: string) => {
+const readIndexedDbImage = async (
+  ownerUserId: string,
+  url: string,
+  cacheKey = url,
+  allowStaleUrl = false,
+) => {
   if (!canUseIndexedDb()) {
     return null
   }
@@ -274,24 +297,42 @@ const readIndexedDbImage = async (ownerUserId: string, url: string) => {
     const transaction = db.transaction(imageStoreName, 'readwrite')
     const done = imageTransactionDone(transaction)
     const store = transaction.objectStore(imageStoreName)
-    const request = store.get(imageStorageKey(ownerUserId, url))
+    const candidateKeys = [...new Set([cacheKey, url])]
+    const record = await (async () => {
+      for (const candidateKey of candidateKeys) {
+        const request = store.get(imageStorageKey(ownerUserId, candidateKey))
+        const record = await new Promise<IndexedDbImageRecord | null>((resolve, reject) => {
+          request.onsuccess = () => {
+            const result = request.result as IndexedDbImageRecord | undefined
+            if (!result) {
+              resolve(null)
+              return
+            }
 
-    const record = await new Promise<IndexedDbImageRecord | null>((resolve, reject) => {
-      request.onsuccess = () => {
-        const result = request.result as IndexedDbImageRecord | undefined
-        if (!result || Date.now() - result.cachedAt >= imageCacheTtlMs) {
-          if (result) {
-            store.delete(result.key)
+            if (Date.now() - result.cachedAt >= imageCacheTtlMs) {
+              store.delete(result.key)
+              resolve(null)
+              return
+            }
+
+            if (!allowStaleUrl && result.url !== url) {
+              resolve(null)
+              return
+            }
+
+            store.put({ ...result, accessedAt: Date.now() })
+            resolve(result)
           }
-          resolve(null)
-          return
-        }
+          request.onerror = () => reject(request.error || new Error('Could not read image cache.'))
+        })
 
-        store.put({ ...result, accessedAt: Date.now() })
-        resolve(result)
+        if (record) {
+          return record
+        }
       }
-      request.onerror = () => reject(request.error || new Error('Could not read image cache.'))
-    })
+
+      return null
+    })()
 
     await done
     return record?.blob || null
@@ -358,7 +399,12 @@ const readIndexedDbImagesForOwner = async (ownerUserId: string) => {
   }
 }
 
-const writeIndexedDbImage = async (ownerUserId: string, url: string, blob: Blob) => {
+const writeIndexedDbImage = async (
+  ownerUserId: string,
+  url: string,
+  cacheKey: string,
+  blob: Blob,
+) => {
   if (!canUseIndexedDb()) {
     return
   }
@@ -370,7 +416,7 @@ const writeIndexedDbImage = async (ownerUserId: string, url: string, blob: Blob)
     const transaction = db.transaction(imageStoreName, 'readwrite')
     const done = imageTransactionDone(transaction)
     transaction.objectStore(imageStoreName).put({
-      key: imageStorageKey(ownerUserId, url),
+      key: imageStorageKey(ownerUserId, cacheKey),
       ownerUserId,
       url,
       blob,
@@ -387,13 +433,13 @@ const writeIndexedDbImage = async (ownerUserId: string, url: string, blob: Blob)
 
 const memoryKey = (ownerUserId: string, url: string) => `${encodeURIComponent(ownerUserId)}:${url}`
 
-const rememberImage = (key: string, blob: Blob) => {
+const rememberImage = (key: string, url: string, blob: Blob) => {
   const previous = memoryImages.get(key)
   if (previous) {
     memoryImageBytes -= previous.blob.size
   }
 
-  memoryImages.set(key, { blob, accessedAt: Date.now() })
+  memoryImages.set(key, { blob, url, accessedAt: Date.now() })
   memoryImageBytes += blob.size
 
   while (memoryImageBytes > imageCacheMaxBytes / 4 && memoryImages.size > 1) {
@@ -410,9 +456,9 @@ const rememberImage = (key: string, blob: Blob) => {
   }
 }
 
-const readMemoryImage = (key: string) => {
+const readMemoryImage = (key: string, url: string, allowStaleUrl: boolean) => {
   const image = memoryImages.get(key)
-  if (!image) {
+  if (!image || (!allowStaleUrl && image.url !== url)) {
     return null
   }
 
@@ -453,18 +499,28 @@ const readCacheStorageImage = async (ownerUserId: string, url: string) => {
   }
 }
 
-const readPersistentImage = async (ownerUserId: string, url: string) => {
+const readPersistentImage = async (
+  ownerUserId: string,
+  url: string,
+  cacheKey = url,
+  allowStaleUrl = false,
+) => {
   const cacheImage = await readCacheStorageImage(ownerUserId, url)
   if (cacheImage) {
     return cacheImage
   }
 
-  const nativeImage = await readNativeImage(ownerUserId, url)
+  const nativeImage = await readNativeImage(ownerUserId, url, cacheKey, allowStaleUrl)
   if (nativeImage) {
     return nativeImage
   }
 
-  const indexedDbImage = await readIndexedDbImage(ownerUserId, url).catch(() => null)
+  const indexedDbImage = await readIndexedDbImage(
+    ownerUserId,
+    url,
+    cacheKey,
+    allowStaleUrl,
+  ).catch(() => null)
   return indexedDbImage
 }
 
@@ -540,20 +596,24 @@ const writeCacheStorageImage = async (
 const writePersistentImage = async (
   ownerUserId: string,
   url: string,
+  cacheKey: string,
   blob: Blob,
 ) => {
   const nativeImageCache = Capacitor.isNativePlatform()
   if (nativeImageCache) {
-    const nativeStored = await writeNativeImage(ownerUserId, url, blob).catch(() => false)
-    if (!nativeStored) {
-      await writeIndexedDbImage(ownerUserId, url, blob).catch(() => undefined)
+    const nativeStored = await writeNativeImage(ownerUserId, url, cacheKey, blob).catch(() => false)
+    const nativeVerified = nativeStored
+      ? Boolean(await readNativeImage(ownerUserId, url, cacheKey).catch(() => null))
+      : false
+    if (!nativeVerified) {
+      await writeIndexedDbImage(ownerUserId, url, cacheKey, blob).catch(() => undefined)
     }
     return
   }
 
   const cacheStored = await writeCacheStorageImage(ownerUserId, url, blob)
   if (!cacheStored) {
-    await writeIndexedDbImage(ownerUserId, url, blob).catch(() => undefined)
+    await writeIndexedDbImage(ownerUserId, url, cacheKey, blob).catch(() => undefined)
   }
 }
 
@@ -604,19 +664,20 @@ export const loadCachedImage = (
   ownerUserId: string,
   url: string,
   fetcher?: () => Promise<Response>,
+  cacheKey = url,
 ) => {
-  const key = memoryKey(ownerUserId, url)
-  const memoryImage = readMemoryImage(key)
+  const key = memoryKey(ownerUserId, cacheKey)
+  const memoryImage = readMemoryImage(key, url, !fetcher)
   if (memoryImage) {
     return Promise.resolve(memoryImage)
   }
 
   return enqueueImageRequest(key, async () => {
     const generation = ownerGenerations.get(ownerUserId) || 0
-    const persistentImage = await readPersistentImage(ownerUserId, url)
+    const persistentImage = await readPersistentImage(ownerUserId, url, cacheKey, !fetcher)
     if (persistentImage) {
       if (ownerGenerations.get(ownerUserId) === generation) {
-        rememberImage(key, persistentImage)
+        rememberImage(key, url, persistentImage)
       }
       return persistentImage
     }
@@ -632,8 +693,8 @@ export const loadCachedImage = (
 
     const blob = await response.blob()
     if (ownerGenerations.get(ownerUserId) === generation) {
-      rememberImage(key, blob)
-      await writePersistentImage(ownerUserId, url, blob)
+      rememberImage(key, url, blob)
+      await writePersistentImage(ownerUserId, url, cacheKey, blob)
     }
     return blob
   })

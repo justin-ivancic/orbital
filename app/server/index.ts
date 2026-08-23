@@ -1102,6 +1102,7 @@ app.post('/api/bookmarks', requireAuth, (request, response) => {
         progress: String(request.body?.progress || ''),
         cue: String(request.body?.cue || ''),
         position: request.body?.position,
+        lastSeen: typeof request.body?.lastSeen === 'string' ? request.body.lastSeen : undefined,
       }),
     )
   } catch (error) {

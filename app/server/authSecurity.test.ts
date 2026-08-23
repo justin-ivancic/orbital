@@ -539,6 +539,7 @@ const saveFixtureBookmark = (
   user: SessionUser,
   fixture: ReturnType<MemoryDatabase['seedLibraryFixture']>,
   page: number,
+  lastSeen?: string,
 ) =>
   saveBookmark(db, user, {
     seriesId: fixture.seriesId,
@@ -555,6 +556,7 @@ const saveFixtureBookmark = (
       progressLabel: `Page ${page} of 10`,
       cueLabel: 'Chapter 001',
     },
+    lastSeen,
   })
 
 test('password checks and sessions bind to the intended account', async () => {
@@ -643,6 +645,22 @@ test('library state, bookmarks, and reading positions stay isolated per user', a
 
   assert.equal(getAppState(db, config, alice).bookmarks.length, 0)
   assert.equal(getAppState(db, config, bob).bookmarks[0]?.progress, 'Page 7 of 10')
+})
+
+test('bookmark writes can preserve offline recency timestamps during reconnect', async () => {
+  const { db, memoryDb, config } = createTestDatabase()
+  const fixture = memoryDb.seedLibraryFixture()
+  const user = await signupUser(db, 'Reader', 'reader-secret')
+  const offlineTimestamp = '2026-08-22T12:00:00.000Z'
+  const resumedTimestamp = '2026-08-23T12:00:00.000Z'
+
+  saveFixtureBookmark(db, user, fixture, 2, offlineTimestamp)
+  assert.equal(getAppState(db, config, user).bookmarks[0]?.lastSeen, offlineTimestamp)
+
+  saveFixtureBookmark(db, user, fixture, 3, resumedTimestamp)
+  const state = getAppState(db, config, user)
+  assert.equal(state.bookmarks[0]?.lastSeen, resumedTimestamp)
+  assert.equal(state.bookmarks[0]?.progress, 'Page 3 of 10')
 })
 
 test('admin-only state is hidden from member accounts', async () => {

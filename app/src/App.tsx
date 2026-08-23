@@ -78,6 +78,10 @@ import type {
 } from './appTypes'
 import { categoryOrder } from './appTypes'
 import {
+  selectNewerBookmarksForSync,
+  sortBookmarksByRecency,
+} from './bookmarkOrdering'
+import {
   defaultReaderSettings,
   migrateLegacyCbzSettings,
   normalizeReaderSettings,
@@ -2148,7 +2152,13 @@ function App() {
       cacheWriteTimerRef.current = null
     }
 
-    if (offlineMode || !authenticated || !appState?.user || appState.scanStatus.active) {
+    if (
+      offlineMode ||
+      cachedStateNeedsRefresh ||
+      !authenticated ||
+      !appState?.user ||
+      appState.scanStatus.active
+    ) {
       return
     }
 
@@ -2171,7 +2181,7 @@ function App() {
         cacheWriteTimerRef.current = null
       }
     }
-  }, [authenticated, appState, offlineMode, seriesCache])
+  }, [appState, authenticated, cachedStateNeedsRefresh, offlineMode, seriesCache])
 
   const visibleLibrary = useMemo(
     () => library.filter((series) => isReaderCategory(series.category)),
@@ -2892,7 +2902,12 @@ function App() {
       }
 
       try {
-        for (const bookmark of localState.bookmarks) {
+        const bookmarksToSync = selectNewerBookmarksForSync(
+          localState.bookmarks,
+          nextState.bookmarks,
+        )
+
+        for (const bookmark of bookmarksToSync) {
           await api.setBookmark({
             seriesId: bookmark.seriesId,
             entryId: bookmark.entryId,
@@ -2901,10 +2916,11 @@ function App() {
             progress: bookmark.progress,
             cue: bookmark.cue,
             position: localState.readingPositions[bookmark.entryId] || { page: 1 },
+            lastSeen: bookmark.lastSeen,
           })
         }
 
-        return await api.getState()
+        return bookmarksToSync.length ? await api.getState() : nextState
       } catch {
         return nextState
       }
@@ -4472,6 +4488,10 @@ function App() {
       if (manual) {
         setBookmarkJustSet(true)
       }
+
+      if (navigator.onLine && !offlineMode) {
+        setCachedStateNeedsRefresh(true)
+      }
       return
     }
 
@@ -4495,6 +4515,7 @@ function App() {
     currentEntry,
     currentReaderStartPosition,
     currentVariant,
+    offlineMode,
     offlineReaderDownloadId,
     readerProgress,
     selectedEntryIndex,
@@ -4552,7 +4573,6 @@ function App() {
   useEffect(() => {
     if (
       !isReaderRoute(currentRoute) ||
-      !readerProgress ||
       !selectedSeriesSummary ||
       !currentEntry ||
       !currentVariant ||
@@ -5135,6 +5155,7 @@ function App() {
         {hasCover && (
           <AuthenticatedResourceImage
             alt=""
+            cacheKey={`cover:${series.id}`}
             className="poster__image"
             decoding="async"
             loading={offlineMode ? 'eager' : 'lazy'}
@@ -5372,26 +5393,7 @@ function App() {
     bookmarkFilter === 'all'
       ? readerBookmarks
       : readerBookmarks.filter((bookmark) => bookmark.category === bookmarkFilter)
-  const sortedBookmarks = [...filteredBookmarks].sort((left, right) => {
-    const leftTime = Date.parse(left.lastSeen)
-    const rightTime = Date.parse(right.lastSeen)
-
-    if (Number.isFinite(leftTime) || Number.isFinite(rightTime)) {
-      if (!Number.isFinite(leftTime)) {
-        return 1
-      }
-
-      if (!Number.isFinite(rightTime)) {
-        return -1
-      }
-
-      if (rightTime !== leftTime) {
-        return rightTime - leftTime
-      }
-    }
-
-    return left.seriesId.localeCompare(right.seriesId) || left.entryId.localeCompare(right.entryId)
-  })
+  const sortedBookmarks = sortBookmarksByRecency(filteredBookmarks)
   const getBookmarkStats = (bookmark: Bookmark, series: SeriesSummary) => {
     const entryTotal = Math.max(series.stats.fileCount, bookmark.entryIndex + 1, 1)
     const entryCurrent = Math.min(entryTotal, Math.max(bookmark.entryIndex + 1, 1))

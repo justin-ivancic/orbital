@@ -249,6 +249,7 @@ export const api = {
       progress: string
       cue: string
       position: SavedReadingPosition
+      lastSeen?: string
     },
     options?: { keepalive?: boolean },
   ) =>

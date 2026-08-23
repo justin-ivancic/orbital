@@ -2779,7 +2779,7 @@ const getBookmarks = (db: Database, userId: string): Bookmark[] =>
         FROM bookmarks b
         INNER JOIN entries e ON e.id = b.entry_id
         WHERE b.user_id = ?
-        ORDER BY b.last_seen DESC
+        ORDER BY b.last_seen DESC, b.series_id ASC, b.entry_id ASC
       `,
     )
     .all(userId) as Array<{
@@ -3572,6 +3572,7 @@ export const saveBookmark = (
     progress: string
     cue: string
     position: SavedReadingPosition
+    lastSeen?: string
   },
 ) => {
   const entry = db
@@ -3588,7 +3589,10 @@ export const saveBookmark = (
     throw new Error('Bookmark target entry was not found.')
   }
 
-  const now = nowIso()
+  const requestedLastSeen = payload.lastSeen ? Date.parse(payload.lastSeen) : Number.NaN
+  const now = Number.isFinite(requestedLastSeen)
+    ? new Date(Math.min(requestedLastSeen, Date.now())).toISOString()
+    : nowIso()
   db.prepare(
     `
       INSERT INTO reading_positions (

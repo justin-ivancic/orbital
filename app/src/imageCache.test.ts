@@ -145,6 +145,34 @@ test('uses a fresh image from persistent cache before fetching the network', asy
   }
 })
 
+test('stable cover identities survive a media URL change in offline mode', async () => {
+  const ownerUserId = 'image-cache-stable-cover-user'
+  const firstUrl = 'https://example.test/api/media/cover/stable?v=1'
+  const refreshedUrl = 'https://example.test/api/media/cover/stable?v=2'
+  const cacheKey = 'cover:stable-series'
+
+  await clearImageCache(ownerUserId)
+  await loadCachedImage(ownerUserId, firstUrl, async () => responseFor('cached-cover'), cacheKey)
+
+  const offlineBlob = await loadCachedImage(ownerUserId, refreshedUrl, undefined, cacheKey)
+  assert.equal(await offlineBlob.text(), 'cached-cover')
+
+  let requestCount = 0
+  const refreshedBlob = await loadCachedImage(
+    ownerUserId,
+    refreshedUrl,
+    async () => {
+      requestCount += 1
+      return responseFor('refreshed-cover')
+    },
+    cacheKey,
+  )
+
+  assert.equal(requestCount, 1)
+  assert.equal(await refreshedBlob.text(), 'refreshed-cover')
+  await clearImageCache(ownerUserId)
+})
+
 test('offline image reads fail locally without attempting a network request', async () => {
   const ownerUserId = 'image-cache-offline-user'
   const url = 'https://example.test/api/media/cover/not-cached?v=1'
