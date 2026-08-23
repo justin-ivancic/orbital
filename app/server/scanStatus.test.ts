@@ -19,9 +19,16 @@ type MemoryScanEvent = {
   created_at: string
 }
 
+type MemorySourceFolder = {
+  id: string
+  last_scan_status: string
+  updated_at: string | null
+}
+
 class MemoryScanDatabase {
   scanRuns: MemoryScanRun[] = []
   scanEvents: MemoryScanEvent[] = []
+  sourceFolders: MemorySourceFolder[] = []
 
   prepare(sql: string) {
     const normalizedSql = sql.replace(/\s+/g, ' ').trim()
@@ -51,6 +58,21 @@ class MemoryScanDatabase {
             message,
             created_at: createdAt,
           })
+
+          return { changes: 1 }
+        },
+      }
+    }
+
+    if (normalizedSql.startsWith('UPDATE source_folders SET last_scan_status =')) {
+      return {
+        run: (updatedAt: string) => {
+          for (const sourceFolder of this.sourceFolders) {
+            if (sourceFolder.last_scan_status === 'Scanning') {
+              sourceFolder.last_scan_status = 'Error'
+              sourceFolder.updated_at = updatedAt
+            }
+          }
 
           return { changes: 1 }
         },
@@ -151,6 +173,11 @@ test('interrupted running scans are marked as errored on startup', () => {
     status: 'running',
     summary: '',
   })
+  memoryDb.sourceFolders.push({
+    id: 'source_1',
+    last_scan_status: 'Scanning',
+    updated_at: null,
+  })
 
   markInterruptedScans(db)
   const status = getLatestScanStatus(db)
@@ -160,4 +187,5 @@ test('interrupted running scans are marked as errored on startup', () => {
   assert.equal(status.summary, 'Scan was interrupted before completion.')
   assert.equal(status.events.at(-1)?.level, 'error')
   assert.equal(status.events.at(-1)?.message, 'Scan was interrupted before completion.')
+  assert.equal(memoryDb.sourceFolders[0]?.last_scan_status, 'Error')
 })

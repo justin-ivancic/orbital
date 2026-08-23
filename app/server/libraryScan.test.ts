@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { openDatabase } from './database'
-import { runScan, type AppConfig } from './library'
+import { runScan, updateSourceFolderCategory, type AppConfig } from './library'
 
 const createTempDirectory = async () =>
   fsPromises.mkdtemp(path.join(os.tmpdir(), 'orbital-library-scan-'))
@@ -20,7 +20,11 @@ const makeConfig = (directory: string): AppConfig => ({
   managedSourceRoot: null,
 })
 
-const createSource = (db: ReturnType<typeof openDatabase>['db'], sourcePath: string) => {
+const createSource = (
+  db: ReturnType<typeof openDatabase>['db'],
+  sourcePath: string,
+  relativePath = '',
+) => {
   const now = new Date().toISOString()
   db.prepare(`INSERT INTO source_roots (id, label, path, created_at) VALUES (?, ?, ?, ?)`).run(
     'root-1',
@@ -35,7 +39,7 @@ const createSource = (db: ReturnType<typeof openDatabase>['db'], sourcePath: str
         last_scan_at, last_scan_status, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, 1, 0, NULL, NULL, ?, ?)
     `,
-  ).run('source-1', 'root-1', 'novels', '', sourcePath, now, now)
+  ).run('source-1', 'root-1', 'novels', relativePath, sourcePath, now, now)
 }
 
 const writeNovel = async (sourcePath: string, fileName: string, content: string) => {
@@ -249,6 +253,186 @@ test('library scans preserve records when the source folder is unavailable', asy
     assert.equal(
       (database.db.prepare(`SELECT last_scan_status FROM source_folders WHERE id = ?`).get('source-1') as { last_scan_status: string }).last_scan_status,
       'Unavailable',
+    )
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('library scans do not merge a partially moved series into the old series identity', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath, 'novels')
+    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    await writeNovel(sourcePath, 'Chapter 2 - Return.txt', 'return')
+    await runScan(database.db, config, 'source-1')
+
+    const movedPath = path.join(sourcePath, 'Moved Test Series', 'Chapter 1 - Opening.txt')
+    await fsPromises.mkdir(path.dirname(movedPath), { recursive: true })
+    await fsPromises.rename(
+      path.join(sourcePath, 'The Test Series', 'Chapter 1 - Opening.txt'),
+      movedPath,
+    )
+
+    const scan = await runScan(database.db, config, 'source-1')
+    assert.equal(scan.metrics.deletedFiles, 1)
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM series WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      2,
+    )
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM entries WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      2,
+    )
+    assert.equal(
+      (database.db.prepare(`SELECT last_scan_status FROM source_folders WHERE id = ?`).get('source-1') as { last_scan_status: string }).last_scan_status,
+      'Ready',
+    )
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('library scans preserve records when a populated source is replaced by an empty mount', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    await runScan(database.db, config, 'source-1')
+
+    await fsPromises.rm(sourcePath, { recursive: true, force: true })
+    await fsPromises.mkdir(sourcePath, { recursive: true })
+    const scan = await runScan(database.db, config, 'source-1')
+
+    assert.equal(scan.metrics.skippedSources, 1)
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM series WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      1,
+    )
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM entries WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      1,
+    )
+    assert.equal(
+      (database.db.prepare(`SELECT last_scan_status FROM source_folders WHERE id = ?`).get('source-1') as { last_scan_status: string }).last_scan_status,
+      'Unavailable',
+    )
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('library scans reparse entries after a source category changes', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    await writeNovel(sourcePath, 'Chapter 2 - Return.txt', 'return')
+    await runScan(database.db, config, 'source-1')
+
+    updateSourceFolderCategory(database.db, config, 'source-1', { category: 'books' })
+    const scan = await runScan(database.db, config, 'source-1')
+
+    assert.equal(scan.metrics.parsedFiles, 2)
+    assert.equal(scan.metrics.reusedFiles, 0)
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM series WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      2,
+    )
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM entries WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      2,
+    )
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM series WHERE series_key LIKE 'novel:%'`).get() as { count: number }).count,
+      0,
+    )
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('library scans regenerate a missing derived cover for an unchanged series', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    await runScan(database.db, config, 'source-1')
+
+    const originalSeries = database.db
+      .prepare(`SELECT id, cover_path FROM series WHERE source_folder_id = ?`)
+      .get('source-1') as { id: string; cover_path: string }
+    await fsPromises.rm(originalSeries.cover_path, { force: true })
+
+    const scan = await runScan(database.db, config, 'source-1')
+    const repairedSeries = database.db
+      .prepare(`SELECT id, cover_path FROM series WHERE id = ?`)
+      .get(originalSeries.id) as { id: string; cover_path: string }
+
+    assert.equal(scan.metrics.processedSeries, 1)
+    assert.equal(repairedSeries.id, originalSeries.id)
+    assert.equal(await fsPromises.stat(repairedSeries.cover_path).then(() => true), true)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('library scan failures mark the source retryable without leaving it stuck in scanning', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+
+    const brokenConfig = {
+      ...config,
+      coversDirectory: path.join(directory, 'missing-covers'),
+    }
+    await assert.rejects(() => runScan(database.db, brokenConfig, 'source-1'))
+    assert.equal(
+      (database.db.prepare(`SELECT last_scan_status FROM source_folders WHERE id = ?`).get('source-1') as { last_scan_status: string }).last_scan_status,
+      'Error',
+    )
+    assert.equal(
+      (database.db.prepare(`SELECT status FROM scan_runs ORDER BY started_at DESC LIMIT 1`).get() as { status: string }).status,
+      'error',
+    )
+
+    await fsPromises.mkdir(brokenConfig.coversDirectory, { recursive: true })
+    const retry = await runScan(database.db, config, 'source-1')
+    assert.equal(retry.metrics.newFiles, 1)
+    assert.equal(
+      (database.db.prepare(`SELECT last_scan_status FROM source_folders WHERE id = ?`).get('source-1') as { last_scan_status: string }).last_scan_status,
+      'Ready',
     )
   } finally {
     database.db.close()

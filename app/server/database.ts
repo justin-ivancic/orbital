@@ -52,6 +52,8 @@ export const openDatabase = (dataDirectory: string) => {
       item_count INTEGER NOT NULL DEFAULT 0,
       last_scan_at TEXT,
       last_scan_status TEXT,
+      parser_version INTEGER NOT NULL DEFAULT 1,
+      root_identity TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -237,6 +239,8 @@ export const openDatabase = (dataDirectory: string) => {
   ensureColumn('source_folders', 'relative_path', "TEXT NOT NULL DEFAULT ''")
   ensureColumn('source_folders', 'item_count', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn('source_folders', 'enabled', 'INTEGER NOT NULL DEFAULT 1')
+  ensureColumn('source_folders', 'parser_version', 'INTEGER NOT NULL DEFAULT 1')
+  ensureColumn('source_folders', 'root_identity', 'TEXT')
   ensureColumn('series', 'cover_mime', 'TEXT')
   ensureColumn('series', 'banner_path', 'TEXT')
   ensureColumn('series', 'banner_mime', 'TEXT')
@@ -286,7 +290,8 @@ export const openDatabase = (dataDirectory: string) => {
 
         CREATE TEMP TABLE source_folders_category_backup AS
           SELECT id, root_id, category, relative_path, path, enabled, item_count,
-                 last_scan_at, last_scan_status, created_at, updated_at
+                 last_scan_at, last_scan_status, parser_version, root_identity,
+                 created_at, updated_at
           FROM source_folders;
 
         CREATE TEMP TABLE series_category_backup AS
@@ -315,6 +320,8 @@ export const openDatabase = (dataDirectory: string) => {
           item_count INTEGER NOT NULL DEFAULT 0,
           last_scan_at TEXT,
           last_scan_status TEXT,
+          parser_version INTEGER NOT NULL DEFAULT 1,
+          root_identity TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -365,10 +372,12 @@ export const openDatabase = (dataDirectory: string) => {
 
         INSERT INTO source_folders (
           id, root_id, category, relative_path, path, enabled, item_count,
-          last_scan_at, last_scan_status, created_at, updated_at
+          last_scan_at, last_scan_status, parser_version, root_identity,
+          created_at, updated_at
         )
         SELECT id, root_id, category, relative_path, path, enabled, item_count,
-               last_scan_at, last_scan_status, created_at, updated_at
+               last_scan_at, last_scan_status, parser_version, root_identity,
+               created_at, updated_at
         FROM source_folders_category_backup;
 
         INSERT INTO series (

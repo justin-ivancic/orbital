@@ -88,7 +88,11 @@ type SourceFolderRow = {
   item_count: number
   last_scan_at: string | null
   last_scan_status: string | null
+  parser_version: number
+  root_identity: string | null
 }
+
+const LIBRARY_SCANNER_VERSION = 2
 
 const parseCategoryId = (value: unknown): CategoryId => {
   if (typeof value !== 'string' || !categoryOrder.includes(value as CategoryId)) {
@@ -297,6 +301,7 @@ type ScanDirectoryResult = {
   files: FileRecord[]
   warnings: ScanDirectoryWarning[]
   complete: boolean
+  rootIdentity: string | null
 }
 
 type ParsedEntry = {
@@ -960,9 +965,13 @@ const padNumber = (value: number) => String(value).padStart(2, '0')
 const formatFileSystemError = (error: unknown) =>
   error instanceof Error ? error.message : 'Unknown filesystem error'
 
+const fileSystemIdentity = (stats: fs.Stats) =>
+  Number.isFinite(stats.dev) && Number.isFinite(stats.ino) ? `${stats.dev}:${stats.ino}` : null
+
 const scanDirectory = (rootPath: string, allowedExtensions: Set<string>): ScanDirectoryResult => {
   const files: FileRecord[] = []
   const warnings: ScanDirectoryWarning[] = []
+  let rootIdentity: string | null = null
 
   const visit = (absolutePath: string, relativeDirectory: string) => {
     let directoryEntries: fs.Dirent[]
@@ -1019,24 +1028,31 @@ const scanDirectory = (rootPath: string, allowedExtensions: Set<string>): ScanDi
         extension,
         size: stats.size,
         mtimeMs: Math.floor(stats.mtimeMs),
-        identity:
-          Number.isFinite(stats.dev) && Number.isFinite(stats.ino)
-            ? `${stats.dev}:${stats.ino}`
-            : null,
+        identity: fileSystemIdentity(stats),
       })
     }
   }
 
-  if (fs.existsSync(rootPath)) {
-    visit(rootPath, '')
-  } else {
+  try {
+    const rootStats = fs.statSync(rootPath)
+
+    if (!rootStats.isDirectory()) {
+      warnings.push({
+        path: rootPath,
+        message: 'Source path is not a directory.',
+      })
+    } else {
+      rootIdentity = fileSystemIdentity(rootStats)
+      visit(rootPath, '')
+    }
+  } catch (error) {
     warnings.push({
       path: rootPath,
-      message: 'Source folder is unavailable or no longer mounted.',
+      message: `Source folder is unavailable or no longer mounted: ${formatFileSystemError(error)}`,
     })
   }
 
-  return { files, warnings, complete: warnings.length === 0 }
+  return { files, warnings, complete: warnings.length === 0, rootIdentity }
 }
 
 const parseAnimeEntry = (file: FileRecord, sourceFolder: SourceFolderRow): ParsedEntry => {
@@ -1428,6 +1444,7 @@ const groupSeriesFromFiles = (
   files: FileRecord[],
   existingSeriesById?: Map<string, SeriesRow>,
   existingEntriesByPath?: Map<string, ExistingEntrySnapshot>,
+  forceReparse = false,
 ) => {
   const groupedSeries = new Map<string, SeriesSpec>()
   let parsedFiles = 0
@@ -1437,6 +1454,7 @@ const groupSeriesFromFiles = (
     const existingEntry = existingEntriesByPath?.get(file.path)
     const storedSeries = existingEntry ? existingSeriesById?.get(existingEntry.series_id) : undefined
     const canReuseStoredEntry =
+      !forceReparse &&
       sourceFolder.category !== 'anime' &&
       Boolean(existingEntry && storedSeries) &&
       existingEntry?.size === file.size &&
@@ -1521,20 +1539,22 @@ const localCoverForDirectory = (directoryPath: string) => {
     }
   }
 
-  if (!fs.existsSync(directoryPath)) {
+  let candidateFile: string | undefined
+
+  try {
+    candidateFile = fs
+      .readdirSync(directoryPath, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .filter(
+        (fileName) =>
+          imageExtensions.has(path.extname(fileName).toLowerCase()) &&
+          /^(cover|poster|folder)(?:$|[ ._-])/i.test(stripExtension(fileName)),
+      )
+      .sort(naturalCompare)[0]
+  } catch {
     return null
   }
-
-  const candidateFile = fs
-    .readdirSync(directoryPath, { withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .map((entry) => entry.name)
-    .filter(
-      (fileName) =>
-        imageExtensions.has(path.extname(fileName).toLowerCase()) &&
-        /^(cover|poster|folder)(?:$|[ ._-])/i.test(stripExtension(fileName)),
-    )
-    .sort(naturalCompare)[0]
 
   if (candidateFile) {
     return path.join(directoryPath, candidateFile)
@@ -1837,6 +1857,14 @@ export const markInterruptedScans = (db: Database) => {
 
   const finishedAt = nowIso()
   const summary = 'Scan was interrupted before completion.'
+
+  db.prepare(
+    `
+      UPDATE source_folders
+      SET last_scan_status = 'Error', updated_at = ?
+      WHERE last_scan_status = 'Scanning'
+    `,
+  ).run(finishedAt)
 
   for (const run of interruptedRuns) {
     appendScanEvent(db, run.id, 'error', summary)
@@ -2519,7 +2547,7 @@ const resolveSeriesPresentation = async (
     }, metadataOverride)
   }
 
-  if (!seriesChanged && existingCoverIsUsable) {
+  if (existingCoverIsUsable) {
     return applyMetadataOverrideToPresentation({
       year: resolvedYear,
       description: resolvedDescription,
@@ -4053,11 +4081,16 @@ const upsertSeries = async (
   existingEntriesByIdentity: Map<string, ExistingEntrySnapshot[]>,
   claimedSeriesIds: Set<string>,
   claimedEntryIds: Set<string>,
+  forceReparse = false,
   reporter?: ScanReporter,
   scanRunId?: string,
 ) => {
   const now = nowIso()
   let existingSeries = existingSeriesByKey.get(series.key)
+
+  if (existingSeries && claimedSeriesIds.has(existingSeries.id)) {
+    existingSeries = undefined
+  }
 
   if (!existingSeries) {
     const matchingSeriesIds = new Set<string>()
@@ -4079,22 +4112,54 @@ const upsertSeries = async (
       }
     }
 
-    if (matchingSeriesIds.size === 1) {
-      existingSeries = existingSeriesById.get([...matchingSeriesIds][0])
+    const completeSeriesMatches = [...matchingSeriesIds].filter((candidateSeriesId) => {
+      const candidateEntries = existingEntriesBySeriesId.get(candidateSeriesId) || []
+
+      if (candidateEntries.length !== series.entries.length) {
+        return false
+      }
+
+      const unmatchedEntries = [...candidateEntries]
+
+      return series.entries.every((entry) => {
+        const matchIndex = unmatchedEntries.findIndex(
+          (candidate) =>
+            candidate.size === entry.file.size &&
+            candidate.mtime_ms === entry.file.mtimeMs &&
+            Boolean(entry.file.identity) &&
+            candidate.file_identity === entry.file.identity,
+        )
+
+        if (matchIndex < 0) {
+          return false
+        }
+
+        unmatchedEntries.splice(matchIndex, 1)
+        return true
+      })
+    })
+
+    if (completeSeriesMatches.length === 1) {
+      existingSeries = existingSeriesById.get(completeSeriesMatches[0])
     }
   }
 
   const seriesId =
     existingSeries?.id ?? `${slugify(series.title)}-${hashString(series.key).slice(0, 8)}`
 
-  if (existingSeries && existingSeries.series_key !== series.key) {
-    db.prepare(`UPDATE series SET series_key = ? WHERE id = ?`).run(series.key, existingSeries.id)
-  }
-
   claimedSeriesIds.add(seriesId)
 
   const existingSeriesEntries = existingEntriesBySeriesId.get(seriesId) || []
-  const allEntriesUnchanged = Boolean(existingSeries) &&
+  const existingCoverIsUsable = Boolean(existingSeries?.cover_path) && fileExists(existingSeries?.cover_path)
+  const localDirectoryCover = localCoverForDirectory(series.folderPath)
+  const needsCoverRepair = Boolean(
+    existingSeries &&
+      (!existingCoverIsUsable ||
+        (localDirectoryCover && localDirectoryCover !== existingSeries.cover_path)),
+  )
+  const allEntriesUnchanged = !forceReparse &&
+    !needsCoverRepair &&
+    Boolean(existingSeries) &&
     series.entries.length === existingSeriesEntries.length &&
     series.entries.every((entry) => {
       const existingEntry = existingEntriesByPath.get(entry.file.path)
@@ -4122,13 +4187,29 @@ const upsertSeries = async (
   const metadataOverride = getMetadataOverride(db, seriesId)
   const effectiveSeries = applyMetadataOverrideToSeriesSpec(series, metadataOverride)
 
-  let seriesChanged = !existingSeries
   const seenEntryPaths = new Set<string>()
   let changedFiles = 0
   let unchangedFiles = 0
   let newFiles = 0
   let deletedFiles = 0
   let movedFiles = 0
+
+  const presentation = await resolveSeriesPresentation(
+    seriesId,
+    effectiveSeries,
+    existingSeries,
+    true,
+    config.coversDirectory,
+    reporter,
+    scanRunId,
+    db,
+    metadataOverride,
+  )
+
+  db.transaction(() => {
+    if (existingSeries && existingSeries.series_key !== series.key) {
+      db.prepare(`UPDATE series SET series_key = ? WHERE id = ?`).run(series.key, existingSeries.id)
+    }
 
   db.prepare(
     `
@@ -4199,13 +4280,18 @@ const upsertSeries = async (
   for (const entry of effectiveSeries.entries) {
     let existingEntry = existingEntriesByPath.get(entry.file.path)
 
+    if (existingEntry && (!existingSeries || existingEntry.series_id !== seriesId)) {
+      existingEntry = undefined
+    }
+
     if (existingEntry && claimedEntryIds.has(existingEntry.id)) {
       existingEntry = undefined
     }
 
-    if (!existingEntry && entry.file.identity) {
+    if (!existingEntry && existingSeries && entry.file.identity) {
       const identityMatches = (existingEntriesByIdentity.get(entry.file.identity) || []).filter(
         (candidate) =>
+          candidate.series_id === seriesId &&
           !claimedEntryIds.has(candidate.id) &&
           candidate.size === entry.file.size &&
           candidate.mtime_ms === entry.file.mtimeMs,
@@ -4234,6 +4320,7 @@ const upsertSeries = async (
     const moved = Boolean(existingEntry && existingEntry.file_path !== entry.file.path)
     const entryChanged =
       !existingEntry ||
+      forceReparse ||
       existingEntry.size !== entry.file.size ||
       existingEntry.mtime_ms !== entry.file.mtimeMs ||
       existingEntry.file_identity !== entry.file.identity ||
@@ -4241,7 +4328,6 @@ const upsertSeries = async (
       moved
 
     if (entryChanged) {
-      seriesChanged = true
       changedFiles += 1
     } else {
       unchangedFiles += 1
@@ -4353,23 +4439,10 @@ const upsertSeries = async (
   for (const existingEntry of storedSeriesEntries) {
     if (!seenEntryPaths.has(existingEntry.file_path)) {
       db.prepare(`DELETE FROM entries WHERE id = ?`).run(existingEntry.id)
-      seriesChanged = true
       changedFiles += 1
       deletedFiles += 1
     }
   }
-
-  const presentation = await resolveSeriesPresentation(
-    seriesId,
-    effectiveSeries,
-    existingSeries,
-    seriesChanged,
-    config.coversDirectory,
-    reporter,
-    scanRunId,
-    db,
-    metadataOverride,
-  )
 
   db.prepare(
     `
@@ -4443,6 +4516,8 @@ const upsertSeries = async (
 
   refreshSeriesSearchDocument(db, seriesId)
 
+  })()
+
   return {
     seriesId,
     changedFiles,
@@ -4471,11 +4546,14 @@ export const runScan = async (
     `,
   ).run(scanRunId, startedAt)
 
+  let activeSourceId: string | null = null
+
   try {
     const sourceFolders = db
       .prepare(
         `
-          SELECT id, root_id, category, relative_path, path, item_count, last_scan_at, last_scan_status
+          SELECT id, root_id, category, relative_path, path, item_count, last_scan_at, last_scan_status,
+                 parser_version, root_identity
           FROM source_folders
           WHERE enabled = 1
             ${sourceId ? 'AND id = ?' : ''}
@@ -4517,6 +4595,7 @@ export const runScan = async (
     }
 
     for (const sourceFolder of sourceFolders) {
+      activeSourceId = sourceFolder.id
       const sourceLabel = formatSourceLabelFromPath(sourceFolder.path)
       const sourceStartedAt = nowIso()
 
@@ -4575,7 +4654,13 @@ export const runScan = async (
         )
       }
 
-      if (!scanResult.complete) {
+      const suspiciousEmptySource =
+        scanResult.complete &&
+        files.length === 0 &&
+        sourceFolder.item_count > 0 &&
+        (!sourceFolder.root_identity || !scanResult.rootIdentity || sourceFolder.root_identity !== scanResult.rootIdentity)
+
+      if (!scanResult.complete || suspiciousEmptySource) {
         metrics.skippedSources += 1
         db.prepare(
           `
@@ -4588,7 +4673,9 @@ export const runScan = async (
           db,
           scanRunId,
           'error',
-          `Skipped reconciliation for ${sourceLabel}; existing library records were preserved because the inventory was incomplete.`,
+          suspiciousEmptySource
+            ? `Skipped reconciliation for ${sourceLabel}; the source appeared empty under a new or unknown mount identity, so existing library records were preserved.`
+            : `Skipped reconciliation for ${sourceLabel}; existing library records were preserved because the inventory was incomplete.`,
           reporter,
         )
         completedSources += 1
@@ -4662,11 +4749,15 @@ export const runScan = async (
       const claimedSeriesIds = new Set<string>()
       const claimedEntryIds = new Set<string>()
       let sourceChangedFiles = 0
+      const forceReparse =
+        sourceFolder.last_scan_status === 'Needs rescan' ||
+        sourceFolder.parser_version !== LIBRARY_SCANNER_VERSION
       const groupedSeriesResult = groupSeriesFromFiles(
         sourceFolder,
         files,
         existingSeriesById,
         existingEntriesByPath,
+        forceReparse,
       )
       const groupedSeries = groupedSeriesResult.series
       metrics.parsedFiles += groupedSeriesResult.parsedFiles
@@ -4722,6 +4813,7 @@ export const runScan = async (
           existingEntriesByIdentity,
           claimedSeriesIds,
           claimedEntryIds,
+          forceReparse,
           reporter,
           scanRunId,
         )
@@ -4771,10 +4863,19 @@ export const runScan = async (
       db.prepare(
         `
           UPDATE source_folders
-          SET item_count = ?, last_scan_at = ?, last_scan_status = ?, updated_at = ?
+          SET item_count = ?, last_scan_at = ?, last_scan_status = ?, updated_at = ?,
+              parser_version = ?, root_identity = ?
           WHERE id = ?
         `,
-      ).run(groupedSeries.length, nowIso(), 'Ready', nowIso(), sourceFolder.id)
+      ).run(
+        groupedSeries.length,
+        nowIso(),
+        'Ready',
+        nowIso(),
+        LIBRARY_SCANNER_VERSION,
+        scanResult.rootIdentity,
+        sourceFolder.id,
+      )
 
       scannedSourceIds.push(sourceFolder.id)
       completedSources += 1
@@ -4846,6 +4947,11 @@ export const runScan = async (
   } catch (error) {
     const finishedAt = nowIso()
     const errorMessage = error instanceof Error ? error.message : 'Unknown scan error'
+    if (activeSourceId) {
+      db.prepare(
+        `UPDATE source_folders SET last_scan_status = ?, updated_at = ? WHERE id = ?`,
+      ).run('Error', nowIso(), activeSourceId)
+    }
     appendScanEvent(
       db,
       scanRunId,
