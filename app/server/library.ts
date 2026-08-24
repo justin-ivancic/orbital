@@ -302,6 +302,7 @@ type ScanDirectoryResult = {
   warnings: ScanDirectoryWarning[]
   complete: boolean
   rootIdentity: string | null
+  localCoversByDirectory: Map<string, string>
 }
 
 type ParsedEntry = {
@@ -450,6 +451,9 @@ const localCoverNames = [
   'folder.png',
   'folder.webp',
 ] as const
+
+const SCAN_FILESYSTEM_CONCURRENCY = 16
+const SCAN_SERIES_CHECKPOINT_INTERVAL = 25
 
 const emptyMediaTracks = (): MediaTrackCollection => ({
   audio: [],
@@ -942,15 +946,9 @@ const resolveMediaTrackForEntry = (
   kind: MediaTrackKind,
   trackId: string,
 ) => {
-  const entry = db
-    .prepare(`SELECT id, file_path, format FROM entries WHERE id = ? LIMIT 1`)
-    .get(entryId) as { id: string; file_path: string; format: EntryFormat } | undefined
+  const entry = resolveEntryMediaFile(db, entryId)
 
-  if (!entry) {
-    throw new Error('Requested media file was not found.')
-  }
-
-  const tracks = buildResolvedMediaTracks(entry.id, entry.file_path)
+  const tracks = buildResolvedMediaTracks(entry.entryId, entry.filePath)
   const matchingTrack = tracks.find((track) => track.kind === kind && track.id === trackId)
 
   if (!matchingTrack || !fileExists(matchingTrack.filePath)) {
@@ -968,19 +966,69 @@ const formatFileSystemError = (error: unknown) =>
 const fileSystemIdentity = (stats: fs.Stats) =>
   Number.isFinite(stats.dev) && Number.isFinite(stats.ino) ? `${stats.dev}:${stats.ino}` : null
 
+const createAsyncLimiter = (limit: number) => {
+  let activeOperations = 0
+  const waitingOperations: Array<() => void> = []
+
+  const acquire = async () => {
+    if (activeOperations >= limit) {
+      await new Promise<void>((resolve) => waitingOperations.push(resolve))
+    }
+    activeOperations += 1
+  }
+
+  const release = () => {
+    activeOperations -= 1
+    waitingOperations.shift()?.()
+  }
+
+  return async <Result>(operation: () => Promise<Result>) => {
+    await acquire()
+    try {
+      return await operation()
+    } finally {
+      release()
+    }
+  }
+}
+
+const findLocalCoverFileName = (directoryEntries: fs.Dirent[]) => {
+  const regularFileNames = directoryEntries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+
+  for (const coverName of localCoverNames) {
+    if (regularFileNames.includes(coverName)) {
+      return coverName
+    }
+  }
+
+  return regularFileNames
+    .filter(
+      (fileName) =>
+        imageExtensions.has(path.extname(fileName).toLowerCase()) &&
+        /^(cover|poster|folder)(?:$|[ ._-])/i.test(stripExtension(fileName)),
+    )
+    .sort(naturalCompare)[0] ?? null
+}
+
 const scanDirectory = async (
   rootPath: string,
   allowedExtensions: Set<string>,
 ): Promise<ScanDirectoryResult> => {
   const files: FileRecord[] = []
   const warnings: ScanDirectoryWarning[] = []
+  const localCoversByDirectory = new Map<string, string>()
+  const runFilesystemOperation = createAsyncLimiter(SCAN_FILESYSTEM_CONCURRENCY)
   let rootIdentity: string | null = null
 
   const visit = async (absolutePath: string, relativeDirectory: string): Promise<void> => {
     let directoryEntries: fs.Dirent[]
 
     try {
-      directoryEntries = await fsPromises.readdir(absolutePath, { withFileTypes: true })
+      directoryEntries = await runFilesystemOperation(() =>
+        fsPromises.readdir(absolutePath, { withFileTypes: true }),
+      )
     } catch (error) {
       warnings.push({
         path: absolutePath,
@@ -991,9 +1039,14 @@ const scanDirectory = async (
 
     directoryEntries.sort((left, right) => naturalCompare(left.name, right.name))
 
-    for (const directoryEntry of directoryEntries) {
+    const localCoverFileName = findLocalCoverFileName(directoryEntries)
+    if (localCoverFileName) {
+      localCoversByDirectory.set(absolutePath, path.join(absolutePath, localCoverFileName))
+    }
+
+    await Promise.all(directoryEntries.map(async (directoryEntry) => {
       if (directoryEntry.name.startsWith('.')) {
-        continue
+        return
       }
 
       const entryAbsolutePath = path.join(absolutePath, directoryEntry.name)
@@ -1003,25 +1056,34 @@ const scanDirectory = async (
 
       if (directoryEntry.isDirectory()) {
         await visit(entryAbsolutePath, entryRelativePath)
-        continue
+        return
+      }
+
+      // Never follow file symlinks outside a linked library source.
+      if (!directoryEntry.isFile()) {
+        return
       }
 
       const extension = path.extname(directoryEntry.name).toLowerCase()
 
       if (!allowedExtensions.has(extension)) {
-        continue
+        return
       }
 
       let stats: fs.Stats
 
       try {
-        stats = await fsPromises.stat(entryAbsolutePath)
+        stats = await runFilesystemOperation(() => fsPromises.lstat(entryAbsolutePath))
       } catch (error) {
         warnings.push({
           path: entryAbsolutePath,
           message: `Skipped file: ${formatFileSystemError(error)}`,
         })
-        continue
+        return
+      }
+
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        return
       }
 
       files.push({
@@ -1034,10 +1096,7 @@ const scanDirectory = async (
         identity: fileSystemIdentity(stats),
       })
 
-      if (files.length % 100 === 0) {
-        await yieldToEventLoop()
-      }
-    }
+    }))
   }
 
   try {
@@ -1059,7 +1118,16 @@ const scanDirectory = async (
     })
   }
 
-  return { files, warnings, complete: warnings.length === 0, rootIdentity }
+  files.sort((left, right) => naturalCompare(left.relativePath, right.relativePath))
+  warnings.sort((left, right) => naturalCompare(left.path, right.path))
+
+  return {
+    files,
+    warnings,
+    complete: warnings.length === 0,
+    rootIdentity,
+    localCoversByDirectory,
+  }
 }
 
 const parseAnimeEntry = (file: FileRecord, sourceFolder: SourceFolderRow): ParsedEntry => {
@@ -1539,35 +1607,27 @@ const groupSeriesFromFiles = (
 }
 
 const localCoverForDirectory = (directoryPath: string) => {
-  for (const coverName of localCoverNames) {
-    const coverPath = path.join(directoryPath, coverName)
-    if (fileExists(coverPath)) {
-      return coverPath
-    }
-  }
-
-  let candidateFile: string | undefined
-
   try {
-    candidateFile = fs
-      .readdirSync(directoryPath, { withFileTypes: true })
-      .filter((entry) => entry.isFile())
-      .map((entry) => entry.name)
-      .filter(
-        (fileName) =>
-          imageExtensions.has(path.extname(fileName).toLowerCase()) &&
-          /^(cover|poster|folder)(?:$|[ ._-])/i.test(stripExtension(fileName)),
-      )
-      .sort(naturalCompare)[0]
+    const candidateFile = findLocalCoverFileName(
+      fs.readdirSync(directoryPath, { withFileTypes: true }),
+    )
+    return candidateFile ? path.join(directoryPath, candidateFile) : null
   } catch {
     return null
   }
+}
 
-  if (candidateFile) {
-    return path.join(directoryPath, candidateFile)
+const inventoryManagedCoverPaths = async (coversDirectory: string) => {
+  try {
+    const directoryEntries = await fsPromises.readdir(coversDirectory, { withFileTypes: true })
+    return new Set(
+      directoryEntries
+        .filter((entry) => entry.isFile())
+        .map((entry) => path.resolve(coversDirectory, entry.name)),
+    )
+  } catch {
+    return new Set<string>()
   }
-
-  return null
 }
 
 const normalizeGroupKeyPart = (value: string) => compactWhitespace(value).toLowerCase()
@@ -1740,7 +1800,9 @@ const buildScanProgressSummary = (
 }
 
 const shouldEmitSeriesCheckpoint = (completedSeries: number, totalSeries: number) =>
-  completedSeries === 1 || completedSeries === totalSeries || completedSeries % 5 === 0
+  completedSeries === 1 ||
+  completedSeries === totalSeries ||
+  completedSeries % SCAN_SERIES_CHECKPOINT_INTERVAL === 0
 
 const buildScanSummary = (scannedSourceCount: number, metrics: ScanMetrics) =>
   `${scannedSourceCount} source folder${scannedSourceCount === 1 ? '' : 's'} scanned; ${metrics.discoveredFiles} files checked, ${metrics.reusedFiles} reused, ${metrics.parsedFiles} parsed, ${metrics.unchangedFiles} unchanged, ${metrics.newFiles} new, ${metrics.movedFiles} moved, ${metrics.deletedFiles} deleted${metrics.skippedSources ? `; ${metrics.skippedSources} source${metrics.skippedSources === 1 ? '' : 's'} skipped` : ''}`
@@ -2481,8 +2543,11 @@ const resolveSeriesPresentation = async (
   db?: Database,
   metadataOverride?: MetadataOverrideRow,
   forceRemoteRefresh = false,
+  knownLocalDirectoryCover?: string | null,
 ): Promise<SeriesPresentation> => {
-  const localDirectoryCover = localCoverForDirectory(series.folderPath)
+  const localDirectoryCover = knownLocalDirectoryCover === undefined
+    ? localCoverForDirectory(series.folderPath)
+    : knownLocalDirectoryCover
   const existingGenres = parseStoredJsonArray(existingSeries?.genres_json)
   const existingTags = parseStoredJsonArray(existingSeries?.tags_json)
   const existingBannerIsUsable =
@@ -4151,6 +4216,8 @@ const upsertSeries = async (
   claimedSeriesIds: Set<string>,
   claimedEntryIds: Set<string>,
   forceReparse = false,
+  knownManagedCoverPaths?: ReadonlySet<string>,
+  knownLocalDirectoryCover?: string | null,
   reporter?: ScanReporter,
   scanRunId?: string,
 ) => {
@@ -4219,8 +4286,18 @@ const upsertSeries = async (
   claimedSeriesIds.add(seriesId)
 
   const existingSeriesEntries = existingEntriesBySeriesId.get(seriesId) || []
-  const existingCoverIsUsable = Boolean(existingSeries?.cover_path) && fileExists(existingSeries?.cover_path)
-  const localDirectoryCover = localCoverForDirectory(series.folderPath)
+  const localDirectoryCover = knownLocalDirectoryCover === undefined
+    ? localCoverForDirectory(series.folderPath)
+    : knownLocalDirectoryCover
+  const existingCoverPath = existingSeries?.cover_path
+  const existingCoverIsUsable = Boolean(
+    existingCoverPath &&
+      (
+        existingCoverPath === localDirectoryCover ||
+        knownManagedCoverPaths?.has(path.resolve(existingCoverPath)) ||
+        fileExists(existingCoverPath)
+      ),
+  )
   const needsCoverRepair = Boolean(
     existingSeries &&
       (!existingCoverIsUsable ||
@@ -4273,6 +4350,8 @@ const upsertSeries = async (
     scanRunId,
     db,
     metadataOverride,
+    false,
+    localDirectoryCover,
   )
 
   db.transaction(() => {
@@ -4651,6 +4730,8 @@ export const runScan = async (
       throw new Error('Linked folder was not found for scanning.')
     }
 
+    const knownManagedCoverPaths = await inventoryManagedCoverPaths(config.coversDirectory)
+
     reporter?.onRunStarted?.({
       runId: scanRunId,
       startedAt,
@@ -4861,23 +4942,28 @@ export const runScan = async (
 
       for (const [seriesIndex, series] of groupedSeries.entries()) {
         const seriesCompletedBeforeCurrent = seriesIndex
-        reporter?.onProgress?.({
-          runId: scanRunId,
-          totalSources: sourceFolders.length,
-          completedSources,
-          currentSource: sourceLabel,
-          currentSourceFilesDiscovered: files.length,
-          currentSourceSeriesTotal: groupedSeries.length,
-          currentSourceSeriesCompleted: seriesCompletedBeforeCurrent,
-          currentSeries: series.title,
-          summary: buildScanProgressSummary(
-            sourceLabel,
-            seriesCompletedBeforeCurrent,
-            groupedSeries.length,
-            files.length,
-            series.title,
-          ),
-        })
+        if (
+          seriesIndex === 0 ||
+          seriesIndex % SCAN_SERIES_CHECKPOINT_INTERVAL === 0
+        ) {
+          reporter?.onProgress?.({
+            runId: scanRunId,
+            totalSources: sourceFolders.length,
+            completedSources,
+            currentSource: sourceLabel,
+            currentSourceFilesDiscovered: files.length,
+            currentSourceSeriesTotal: groupedSeries.length,
+            currentSourceSeriesCompleted: seriesCompletedBeforeCurrent,
+            currentSeries: series.title,
+            summary: buildScanProgressSummary(
+              sourceLabel,
+              seriesCompletedBeforeCurrent,
+              groupedSeries.length,
+              files.length,
+              series.title,
+            ),
+          })
+        }
         const upsertResult = await upsertSeries(
           db,
           config,
@@ -4891,6 +4977,8 @@ export const runScan = async (
           claimedSeriesIds,
           claimedEntryIds,
           forceReparse,
+          knownManagedCoverPaths,
+          scanResult.localCoversByDirectory.get(series.folderPath) ?? null,
           reporter,
           scanRunId,
         )
@@ -4903,24 +4991,25 @@ export const runScan = async (
         metrics.movedFiles += upsertResult.movedFiles
         metrics.processedSeries += upsertResult.processedSeries
         const completedSeries = seriesIndex + 1
-        reporter?.onProgress?.({
-          runId: scanRunId,
-          totalSources: sourceFolders.length,
-          completedSources,
-          currentSource: sourceLabel,
-          currentSourceFilesDiscovered: files.length,
-          currentSourceSeriesTotal: groupedSeries.length,
-          currentSourceSeriesCompleted: completedSeries,
-          currentSeries: completedSeries < groupedSeries.length ? series.title : null,
-          summary: buildScanProgressSummary(
-            sourceLabel,
-            completedSeries,
-            groupedSeries.length,
-            files.length,
-            completedSeries < groupedSeries.length ? series.title : null,
-          ),
-        })
         if (shouldEmitSeriesCheckpoint(completedSeries, groupedSeries.length)) {
+          const nextSeries = groupedSeries[completedSeries]?.title ?? null
+          reporter?.onProgress?.({
+            runId: scanRunId,
+            totalSources: sourceFolders.length,
+            completedSources,
+            currentSource: sourceLabel,
+            currentSourceFilesDiscovered: files.length,
+            currentSourceSeriesTotal: groupedSeries.length,
+            currentSourceSeriesCompleted: completedSeries,
+            currentSeries: nextSeries,
+            summary: buildScanProgressSummary(
+              sourceLabel,
+              completedSeries,
+              groupedSeries.length,
+              files.length,
+              nextSeries,
+            ),
+          })
           appendScanEvent(
             db,
             scanRunId,
@@ -4928,15 +5017,15 @@ export const runScan = async (
             `Indexed ${sourceLabel}: ${completedSeries}/${groupedSeries.length} series${series.title ? ` • ${series.title}` : ''}`,
             reporter,
           )
+          persistScanCheckpoint(
+            db,
+            scanRunId,
+            changedFiles,
+            metrics,
+            buildScanSummary(scannedSourceIds.length, metrics),
+          )
+          await yieldToEventLoop()
         }
-        persistScanCheckpoint(
-          db,
-          scanRunId,
-          changedFiles,
-          metrics,
-          buildScanSummary(scannedSourceIds.length, metrics),
-        )
-        await yieldToEventLoop()
       }
 
       const deletedSeriesResult = deleteSeriesNotInSet(db, sourceFolder.id, keptSeriesIds)
@@ -5318,7 +5407,15 @@ export const resolveEntryFilePath = (db: Database, entryId: string) => {
 
 export const resolveEntryMediaFile = (db: Database, entryId: string) => {
   const entry = db
-    .prepare(`SELECT id, file_path, format, size, mtime_ms FROM entries WHERE id = ? LIMIT 1`)
+    .prepare(
+      `
+        SELECT e.id, e.file_path, e.format, e.size, e.mtime_ms, sf.path AS source_path
+        FROM entries e
+        JOIN source_folders sf ON sf.id = e.source_folder_id
+        WHERE e.id = ?
+        LIMIT 1
+      `,
+    )
     .get(entryId) as
     | {
         id: string
@@ -5326,10 +5423,29 @@ export const resolveEntryMediaFile = (db: Database, entryId: string) => {
         format: EntryFormat
         size: number
         mtime_ms: number
+        source_path: string
       }
     | undefined
 
-  if (!entry || !fileExists(entry.file_path)) {
+  if (!entry) {
+    throw new Error('Requested media file was not found.')
+  }
+
+  try {
+    const sourceRealPath = fs.realpathSync(entry.source_path)
+    const fileStats = fs.lstatSync(entry.file_path)
+    const fileRealPath = fs.realpathSync(entry.file_path)
+    const relativeFilePath = path.relative(sourceRealPath, fileRealPath)
+    const isInsideSource =
+      relativeFilePath.length > 0 &&
+      !relativeFilePath.startsWith(`..${path.sep}`) &&
+      relativeFilePath !== '..' &&
+      !path.isAbsolute(relativeFilePath)
+
+    if (!fileStats.isFile() || fileStats.isSymbolicLink() || !isInsideSource) {
+      throw new Error('Unsafe media path.')
+    }
+  } catch {
     throw new Error('Requested media file was not found.')
   }
 

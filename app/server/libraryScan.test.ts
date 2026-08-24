@@ -4,7 +4,12 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { openDatabase } from './database'
-import { runScan, updateSourceFolderCategory, type AppConfig } from './library'
+import {
+  resolveEntryMediaFile,
+  runScan,
+  updateSourceFolderCategory,
+  type AppConfig,
+} from './library'
 
 const createTempDirectory = async () =>
   fsPromises.mkdtemp(path.join(os.tmpdir(), 'orbital-library-scan-'))
@@ -120,6 +125,130 @@ test('library scans skip unchanged series and expose reconciliation metrics', as
     assert.equal(incrementalScan.metrics.reusedFiles, 2)
     assert.equal(incrementalScan.metrics.unchangedFiles, 2)
     assert.equal(incrementalScan.metrics.processedSeries, 1)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('large unchanged libraries reuse inventory without flooding durable progress updates', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    await Promise.all(
+      Array.from({ length: 120 }, async (_, index) => {
+        const seriesPath = path.join(sourcePath, `Series ${String(index + 1).padStart(3, '0')}`)
+        await fsPromises.mkdir(seriesPath, { recursive: true })
+        await fsPromises.writeFile(path.join(seriesPath, 'Chapter 1.txt'), `chapter ${index + 1}`)
+      }),
+    )
+
+    await runScan(database.db, config, 'source-1')
+    let progressUpdates = 0
+    const incrementalScan = await runScan(database.db, config, 'source-1', {
+      onProgress: () => {
+        progressUpdates += 1
+      },
+    })
+
+    assert.equal(incrementalScan.metrics.discoveredFiles, 120)
+    assert.equal(incrementalScan.metrics.reusedFiles, 120)
+    assert.equal(incrementalScan.metrics.parsedFiles, 0)
+    assert.equal(incrementalScan.metrics.unchangedFiles, 120)
+    assert.equal(incrementalScan.metrics.processedSeries, 0)
+    assert.ok(progressUpdates < 25, `expected throttled progress updates, received ${progressUpdates}`)
+
+    const durableEventCount = database.db
+      .prepare(`SELECT COUNT(*) AS count FROM scan_events WHERE scan_run_id = ?`)
+      .get(incrementalScan.scanRunId) as { count: number }
+    assert.ok(durableEventCount.count < 15)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('library scans discover local covers during inventory without reparsing unchanged entries', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    await runScan(database.db, config, 'source-1')
+
+    const localCoverPath = path.join(sourcePath, 'cover.jpg')
+    await fsPromises.writeFile(localCoverPath, 'local-cover')
+    const incrementalScan = await runScan(database.db, config, 'source-1')
+    const series = database.db
+      .prepare(`SELECT cover_path FROM series WHERE source_folder_id = ?`)
+      .get('source-1') as { cover_path: string }
+
+    assert.equal(incrementalScan.metrics.parsedFiles, 0)
+    assert.equal(incrementalScan.metrics.reusedFiles, 1)
+    assert.equal(incrementalScan.metrics.processedSeries, 1)
+    assert.equal(series.cover_path, localCoverPath)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('library scans ignore file symlinks that escape the linked source', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    const outsideFilePath = path.join(directory, 'outside.txt')
+    await fsPromises.writeFile(outsideFilePath, 'outside the linked source')
+    await fsPromises.symlink(outsideFilePath, path.join(sourcePath, 'Linked book.txt'))
+
+    const scan = await runScan(database.db, config, 'source-1')
+    const entryCount = database.db
+      .prepare(`SELECT COUNT(*) AS count FROM entries WHERE source_folder_id = ?`)
+      .get('source-1') as { count: number }
+
+    assert.equal(scan.metrics.discoveredFiles, 0)
+    assert.equal(entryCount.count, 0)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('media access rejects a scanned file replaced by an escaping symlink', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    const scannedFilePath = await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    await runScan(database.db, config, 'source-1')
+    const entry = database.db
+      .prepare(`SELECT id FROM entries WHERE file_path = ?`)
+      .get(scannedFilePath) as { id: string }
+
+    const outsideFilePath = path.join(directory, 'outside.txt')
+    await fsPromises.writeFile(outsideFilePath, 'outside the linked source')
+    await fsPromises.unlink(scannedFilePath)
+    await fsPromises.symlink(outsideFilePath, scannedFilePath)
+
+    assert.throws(() => resolveEntryMediaFile(database.db, entry.id), /not found/i)
   } finally {
     database.db.close()
     await fsPromises.rm(directory, { recursive: true, force: true })
