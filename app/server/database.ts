@@ -180,6 +180,9 @@ export const openDatabase = (dataDirectory: string) => {
       started_at TEXT NOT NULL,
       finished_at TEXT,
       status TEXT NOT NULL,
+      requested_source_id TEXT,
+      resume_attempt INTEGER NOT NULL DEFAULT 0,
+      heartbeat_at TEXT,
       changed_files INTEGER NOT NULL DEFAULT 0,
       discovered_files INTEGER NOT NULL DEFAULT 0,
       parsed_files INTEGER NOT NULL DEFAULT 0,
@@ -272,6 +275,9 @@ export const openDatabase = (dataDirectory: string) => {
   ensureColumn('scan_runs', 'deleted_files', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn('scan_runs', 'moved_files', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn('scan_runs', 'processed_series', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'requested_source_id', 'TEXT')
+  ensureColumn('scan_runs', 'resume_attempt', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'heartbeat_at', 'TEXT')
 
   const needsCategoryConstraintMigration = ['source_folders', 'series', 'bookmarks'].some((tableName) => {
     const table = db

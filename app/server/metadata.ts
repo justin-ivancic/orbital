@@ -1,6 +1,8 @@
 import type { CategoryId } from '../src/appTypes.ts'
 import { compactWhitespace } from './utils'
 
+const METADATA_REQUEST_TIMEOUT_MS = 15_000
+
 type MetadataLookupInput = {
   category: CategoryId
   title: string
@@ -221,6 +223,7 @@ const fetchAniListMetadata = async (
 
   const response = await fetch('https://graphql.anilist.co', {
     method: 'POST',
+    signal: AbortSignal.timeout(METADATA_REQUEST_TIMEOUT_MS),
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
@@ -329,6 +332,7 @@ const fetchGoogleBooksMetadata = async (
   const response = await fetch(
     `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(queryParts.join(' '))}&printType=books&maxResults=8`,
     {
+      signal: AbortSignal.timeout(METADATA_REQUEST_TIMEOUT_MS),
       headers: {
         Accept: 'application/json',
         'User-Agent': 'Orbital Library metadata cache',

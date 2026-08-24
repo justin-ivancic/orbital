@@ -968,16 +968,19 @@ const formatFileSystemError = (error: unknown) =>
 const fileSystemIdentity = (stats: fs.Stats) =>
   Number.isFinite(stats.dev) && Number.isFinite(stats.ino) ? `${stats.dev}:${stats.ino}` : null
 
-const scanDirectory = (rootPath: string, allowedExtensions: Set<string>): ScanDirectoryResult => {
+const scanDirectory = async (
+  rootPath: string,
+  allowedExtensions: Set<string>,
+): Promise<ScanDirectoryResult> => {
   const files: FileRecord[] = []
   const warnings: ScanDirectoryWarning[] = []
   let rootIdentity: string | null = null
 
-  const visit = (absolutePath: string, relativeDirectory: string) => {
+  const visit = async (absolutePath: string, relativeDirectory: string): Promise<void> => {
     let directoryEntries: fs.Dirent[]
 
     try {
-      directoryEntries = fs.readdirSync(absolutePath, { withFileTypes: true })
+      directoryEntries = await fsPromises.readdir(absolutePath, { withFileTypes: true })
     } catch (error) {
       warnings.push({
         path: absolutePath,
@@ -999,7 +1002,7 @@ const scanDirectory = (rootPath: string, allowedExtensions: Set<string>): ScanDi
         : directoryEntry.name
 
       if (directoryEntry.isDirectory()) {
-        visit(entryAbsolutePath, entryRelativePath)
+        await visit(entryAbsolutePath, entryRelativePath)
         continue
       }
 
@@ -1012,7 +1015,7 @@ const scanDirectory = (rootPath: string, allowedExtensions: Set<string>): ScanDi
       let stats: fs.Stats
 
       try {
-        stats = fs.statSync(entryAbsolutePath)
+        stats = await fsPromises.stat(entryAbsolutePath)
       } catch (error) {
         warnings.push({
           path: entryAbsolutePath,
@@ -1030,11 +1033,15 @@ const scanDirectory = (rootPath: string, allowedExtensions: Set<string>): ScanDi
         mtimeMs: Math.floor(stats.mtimeMs),
         identity: fileSystemIdentity(stats),
       })
+
+      if (files.length % 100 === 0) {
+        await yieldToEventLoop()
+      }
     }
   }
 
   try {
-    const rootStats = fs.statSync(rootPath)
+    const rootStats = await fsPromises.stat(rootPath)
 
     if (!rootStats.isDirectory()) {
       warnings.push({
@@ -1043,7 +1050,7 @@ const scanDirectory = (rootPath: string, allowedExtensions: Set<string>): ScanDi
       })
     } else {
       rootIdentity = fileSystemIdentity(rootStats)
-      visit(rootPath, '')
+      await visit(rootPath, '')
     }
   } catch (error) {
     warnings.push({
@@ -1735,6 +1742,40 @@ const buildScanProgressSummary = (
 const shouldEmitSeriesCheckpoint = (completedSeries: number, totalSeries: number) =>
   completedSeries === 1 || completedSeries === totalSeries || completedSeries % 5 === 0
 
+const buildScanSummary = (scannedSourceCount: number, metrics: ScanMetrics) =>
+  `${scannedSourceCount} source folder${scannedSourceCount === 1 ? '' : 's'} scanned; ${metrics.discoveredFiles} files checked, ${metrics.reusedFiles} reused, ${metrics.parsedFiles} parsed, ${metrics.unchangedFiles} unchanged, ${metrics.newFiles} new, ${metrics.movedFiles} moved, ${metrics.deletedFiles} deleted${metrics.skippedSources ? `; ${metrics.skippedSources} source${metrics.skippedSources === 1 ? '' : 's'} skipped` : ''}`
+
+const persistScanCheckpoint = (
+  db: Database,
+  scanRunId: string,
+  changedFiles: number,
+  metrics: ScanMetrics,
+  summary: string,
+) => {
+  db.prepare(
+    `
+      UPDATE scan_runs
+      SET heartbeat_at = ?, changed_files = ?, discovered_files = ?, parsed_files = ?,
+          reused_files = ?, unchanged_files = ?, new_files = ?, deleted_files = ?,
+          moved_files = ?, processed_series = ?, summary = ?
+      WHERE id = ? AND status = 'running'
+    `,
+  ).run(
+    nowIso(),
+    changedFiles,
+    metrics.discoveredFiles,
+    metrics.parsedFiles,
+    metrics.reusedFiles,
+    metrics.unchangedFiles,
+    metrics.newFiles,
+    metrics.deletedFiles,
+    metrics.movedFiles,
+    metrics.processedSeries,
+    summary,
+    scanRunId,
+  )
+}
+
 const appendScanEvent = (
   db: Database,
   scanRunId: string,
@@ -1840,23 +1881,35 @@ const getStoredScanStatus = (db: Database): ScanStatus => {
 
 export const getLatestScanStatus = (db: Database) => getStoredScanStatus(db)
 
-export const markInterruptedScans = (db: Database) => {
+export const MAX_AUTOMATIC_SCAN_RESUMES = 2
+
+export type InterruptedScanResumption = {
+  sourceId: string | null
+  resumeAttempt: number
+  shouldResume: boolean
+}
+
+export const markInterruptedScans = (db: Database): InterruptedScanResumption[] => {
   const interruptedRuns = db
     .prepare(
       `
-        SELECT id
+        SELECT id, requested_source_id, resume_attempt
         FROM scan_runs
         WHERE status = 'running'
+        ORDER BY started_at DESC
       `,
     )
-    .all() as Array<{ id: string }>
+    .all() as Array<{
+    id: string
+    requested_source_id: string | null
+    resume_attempt: number
+  }>
 
   if (!interruptedRuns.length) {
-    return
+    return []
   }
 
   const finishedAt = nowIso()
-  const summary = 'Scan was interrupted before completion.'
 
   db.prepare(
     `
@@ -1866,16 +1919,29 @@ export const markInterruptedScans = (db: Database) => {
     `,
   ).run(finishedAt)
 
+  const resumptions: InterruptedScanResumption[] = []
+
   for (const run of interruptedRuns) {
+    const shouldResume = run.resume_attempt < MAX_AUTOMATIC_SCAN_RESUMES
+    const summary = shouldResume
+      ? 'Scan was interrupted before completion; completed records were retained. It will resume automatically.'
+      : 'Scan was interrupted before completion; completed records were retained. Automatic resume stopped after repeated interruptions.'
     appendScanEvent(db, run.id, 'error', summary)
     db.prepare(
       `
         UPDATE scan_runs
-        SET finished_at = ?, status = 'error', summary = ?
+        SET finished_at = ?, status = 'error', summary = ?, heartbeat_at = ?
         WHERE id = ?
       `,
-    ).run(finishedAt, summary, run.id)
+    ).run(finishedAt, summary, finishedAt, run.id)
+    resumptions.push({
+      sourceId: run.requested_source_id,
+      resumeAttempt: run.resume_attempt,
+      shouldResume,
+    })
   }
+
+  return resumptions
 }
 
 const getMetadataOverride = (db: Database, seriesId: string) =>
@@ -2218,11 +2284,14 @@ const extractBookAuthorHint = (series: SeriesSpec) => {
 const sanitizeRemoteDescription = (value: string | null | undefined) =>
   compactWhitespace(String(value || ''))
 
+const REMOTE_ASSET_TIMEOUT_MS = 20_000
+
 const downloadRemoteAsset = async (
   assetUrl: string,
   outputBasePath: string,
 ): Promise<{ filePath: string; mimeType: string }> => {
   const response = await fetch(assetUrl, {
+    signal: AbortSignal.timeout(REMOTE_ASSET_TIMEOUT_MS),
     headers: {
       Accept: 'image/*',
       'User-Agent': 'Orbital Library metadata cache',
@@ -4534,19 +4603,35 @@ export const runScan = async (
   config: AppConfig,
   sourceId?: string,
   reporter?: ScanReporter,
+  resumeAttempt = 0,
 ): Promise<ScanResult> => {
   const scanRunId = createId('scan')
   const startedAt = nowIso()
   db.prepare(
     `
       INSERT INTO scan_runs (
-        id, started_at, status, changed_files, discovered_files, parsed_files, reused_files,
-        unchanged_files, new_files, deleted_files, moved_files, processed_series, summary
-      ) VALUES (?, ?, 'running', 0, 0, 0, 0, 0, 0, 0, 0, 0, '')
+        id, started_at, status, requested_source_id, resume_attempt, heartbeat_at,
+        changed_files, discovered_files, parsed_files, reused_files, unchanged_files,
+        new_files, deleted_files, moved_files, processed_series, summary
+      ) VALUES (?, ?, 'running', ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, '')
     `,
-  ).run(scanRunId, startedAt)
+  ).run(scanRunId, startedAt, sourceId ?? null, resumeAttempt, startedAt)
 
   let activeSourceId: string | null = null
+  let changedFiles = 0
+  const scannedSourceIds: string[] = []
+  let completedSources = 0
+  const metrics: ScanMetrics = {
+    discoveredFiles: 0,
+    parsedFiles: 0,
+    reusedFiles: 0,
+    unchangedFiles: 0,
+    newFiles: 0,
+    deletedFiles: 0,
+    movedFiles: 0,
+    processedSeries: 0,
+    skippedSources: 0,
+  }
 
   try {
     const sourceFolders = db
@@ -4578,21 +4663,6 @@ export const runScan = async (
       `Starting scan of ${sourceFolders.length} linked ${sourceFolders.length === 1 ? 'folder' : 'folders'}`,
       reporter,
     )
-
-    let changedFiles = 0
-    const scannedSourceIds: string[] = []
-    let completedSources = 0
-    const metrics: ScanMetrics = {
-      discoveredFiles: 0,
-      parsedFiles: 0,
-      reusedFiles: 0,
-      unchangedFiles: 0,
-      newFiles: 0,
-      deletedFiles: 0,
-      movedFiles: 0,
-      processedSeries: 0,
-      skippedSources: 0,
-    }
 
     for (const sourceFolder of sourceFolders) {
       activeSourceId = sourceFolder.id
@@ -4626,7 +4696,7 @@ export const runScan = async (
         reporter,
       )
 
-      const scanResult = scanDirectory(
+      const scanResult = await scanDirectory(
         sourceFolder.path,
         supportedExtensionsByCategory[sourceFolder.category],
       )
@@ -4690,6 +4760,13 @@ export const runScan = async (
           currentSeries: null,
           summary: `Skipped unavailable source ${sourceLabel}`,
         })
+        persistScanCheckpoint(
+          db,
+          scanRunId,
+          changedFiles,
+          metrics,
+          `Skipped unavailable source ${sourceLabel}; ${buildScanSummary(scannedSourceIds.length, metrics)}`,
+        )
         await yieldToEventLoop()
         continue
       }
@@ -4852,6 +4929,13 @@ export const runScan = async (
             reporter,
           )
         }
+        persistScanCheckpoint(
+          db,
+          scanRunId,
+          changedFiles,
+          metrics,
+          buildScanSummary(scannedSourceIds.length, metrics),
+        )
         await yieldToEventLoop()
       }
 
@@ -4897,17 +4981,24 @@ export const runScan = async (
         `Finished ${sourceLabel}: ${groupedSeries.length} series, ${files.length} files, ${sourceChangedFiles} changes`,
         reporter,
       )
+      persistScanCheckpoint(
+        db,
+        scanRunId,
+        changedFiles,
+        metrics,
+        buildScanSummary(scannedSourceIds.length, metrics),
+      )
       await yieldToEventLoop()
     }
 
     const finishedAt = nowIso()
-    const successSummary = `${scannedSourceIds.length} source folder${scannedSourceIds.length === 1 ? '' : 's'} scanned; ${metrics.discoveredFiles} files checked, ${metrics.reusedFiles} reused, ${metrics.parsedFiles} parsed, ${metrics.unchangedFiles} unchanged, ${metrics.newFiles} new, ${metrics.movedFiles} moved, ${metrics.deletedFiles} deleted${metrics.skippedSources ? `; ${metrics.skippedSources} source${metrics.skippedSources === 1 ? '' : 's'} skipped` : ''}`
+    const successSummary = buildScanSummary(scannedSourceIds.length, metrics)
     db.prepare(
       `
         UPDATE scan_runs
         SET finished_at = ?, status = 'success', changed_files = ?, discovered_files = ?,
             parsed_files = ?, reused_files = ?, unchanged_files = ?, new_files = ?,
-            deleted_files = ?, moved_files = ?, processed_series = ?, summary = ?
+            deleted_files = ?, moved_files = ?, processed_series = ?, summary = ?, heartbeat_at = ?
         WHERE id = ?
       `,
     ).run(
@@ -4922,6 +5013,7 @@ export const runScan = async (
       metrics.movedFiles,
       metrics.processedSeries,
       successSummary,
+      finishedAt,
       scanRunId,
     )
     appendScanEvent(
@@ -4962,10 +5054,26 @@ export const runScan = async (
     db.prepare(
       `
         UPDATE scan_runs
-        SET finished_at = ?, status = 'error', summary = ?
+        SET finished_at = ?, status = 'error', changed_files = ?, discovered_files = ?,
+            parsed_files = ?, reused_files = ?, unchanged_files = ?, new_files = ?,
+            deleted_files = ?, moved_files = ?, processed_series = ?, summary = ?, heartbeat_at = ?
         WHERE id = ?
       `,
-    ).run(finishedAt, errorMessage, scanRunId)
+    ).run(
+      finishedAt,
+      changedFiles,
+      metrics.discoveredFiles,
+      metrics.parsedFiles,
+      metrics.reusedFiles,
+      metrics.unchangedFiles,
+      metrics.newFiles,
+      metrics.deletedFiles,
+      metrics.movedFiles,
+      metrics.processedSeries,
+      errorMessage,
+      finishedAt,
+      scanRunId,
+    )
     reporter?.onRunFinished?.({
       runId: scanRunId,
       finishedAt,

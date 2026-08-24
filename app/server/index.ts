@@ -96,7 +96,7 @@ const {
   coversDirectory,
 } = openDatabase(dataDirectory)
 pruneRateLimitBuckets(db)
-markInterruptedScans(db)
+const interruptedScanResumptions = markInterruptedScans(db)
 
 const minutes = (value: number) => value * 60 * 1000
 const hours = (value: number) => value * 60 * 60 * 1000
@@ -287,7 +287,7 @@ const getBootstrapPayload = (user: RequestWithUser['sessionUser'], csrfToken?: s
   csrfToken: user ? csrfToken ?? null : null,
 })
 
-const startBackgroundScan = (sourceId?: string) => {
+const startBackgroundScan = (sourceId?: string, resumeAttempt = 0) => {
   if (activeScanPromise) {
     return activeScanPromise
   }
@@ -432,7 +432,7 @@ const startBackgroundScan = (sourceId?: string) => {
 
   activeScanPromise = new Promise<void>((resolve, reject) => {
     setImmediate(() => {
-      runScan(db, config, sourceId, scanReporter).then(resolve, reject)
+      runScan(db, config, sourceId, scanReporter, resumeAttempt).then(resolve, reject)
     })
   })
     .then(() => undefined)
@@ -1645,6 +1645,17 @@ await maybeSeedDemoContent(db, config)
 const httpServer = app.listen(port, () => {
   console.log(`Orbital Library server listening on http://127.0.0.1:${port}`)
 })
+
+const interruptedScanToResume = interruptedScanResumptions.find((run) => run.shouldResume)
+
+if (interruptedScanToResume) {
+  setTimeout(() => {
+    void startBackgroundScan(
+      interruptedScanToResume.sourceId ?? undefined,
+      interruptedScanToResume.resumeAttempt + 1,
+    )
+  }, 1_000)
+}
 
 const stopServer = () => {
   httpServer.close(() => {

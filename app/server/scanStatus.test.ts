@@ -8,6 +8,9 @@ type MemoryScanRun = {
   started_at: string
   finished_at: string | null
   status: string
+  requested_source_id: string | null
+  resume_attempt: number
+  heartbeat_at: string | null
   summary: string
 }
 
@@ -33,12 +36,16 @@ class MemoryScanDatabase {
   prepare(sql: string) {
     const normalizedSql = sql.replace(/\s+/g, ' ').trim()
 
-    if (normalizedSql.startsWith('SELECT id FROM scan_runs WHERE status =')) {
+    if (normalizedSql.startsWith('SELECT id, requested_source_id, resume_attempt FROM scan_runs WHERE status =')) {
       return {
         all: () =>
           this.scanRuns
             .filter((run) => run.status === 'running')
-            .map((run) => ({ id: run.id })),
+            .map((run) => ({
+              id: run.id,
+              requested_source_id: run.requested_source_id,
+              resume_attempt: run.resume_attempt,
+            })),
       }
     }
 
@@ -81,7 +88,7 @@ class MemoryScanDatabase {
 
     if (normalizedSql.startsWith('UPDATE scan_runs SET finished_at = ?, status =')) {
       return {
-        run: (finishedAt: string, summary: string, scanRunId: string) => {
+        run: (finishedAt: string, summary: string, heartbeatAt: string, scanRunId: string) => {
           const run = this.scanRuns.find((item) => item.id === scanRunId)
 
           if (!run) {
@@ -90,6 +97,7 @@ class MemoryScanDatabase {
 
           run.finished_at = finishedAt
           run.status = 'error'
+          run.heartbeat_at = heartbeatAt
           run.summary = summary
           return { changes: 1 }
         },
@@ -136,6 +144,9 @@ test('latest scan status includes durable events in display order', () => {
     started_at: '2026-06-14T10:00:00.000Z',
     finished_at: '2026-06-14T10:01:00.000Z',
     status: 'success',
+    requested_source_id: null,
+    resume_attempt: 0,
+    heartbeat_at: '2026-06-14T10:01:00.000Z',
     summary: '1 source folder scanned',
   })
   memoryDb.scanEvents.push(
@@ -171,6 +182,9 @@ test('interrupted running scans are marked as errored on startup', () => {
     started_at: '2026-06-14T10:00:00.000Z',
     finished_at: null,
     status: 'running',
+    requested_source_id: 'source_1',
+    resume_attempt: 0,
+    heartbeat_at: '2026-06-14T10:00:30.000Z',
     summary: '',
   })
   memoryDb.sourceFolders.push({
@@ -179,13 +193,14 @@ test('interrupted running scans are marked as errored on startup', () => {
     updated_at: null,
   })
 
-  markInterruptedScans(db)
+  const resumptions = markInterruptedScans(db)
   const status = getLatestScanStatus(db)
 
   assert.equal(status.active, false)
   assert.equal(status.runId, 'scan_running')
-  assert.equal(status.summary, 'Scan was interrupted before completion.')
+  assert.match(status.summary || '', /^Scan was interrupted before completion;/)
   assert.equal(status.events.at(-1)?.level, 'error')
-  assert.equal(status.events.at(-1)?.message, 'Scan was interrupted before completion.')
+  assert.match(status.events.at(-1)?.message || '', /^Scan was interrupted before completion;/)
+  assert.deepEqual(resumptions, [{ sourceId: 'source_1', resumeAttempt: 0, shouldResume: true }])
   assert.equal(memoryDb.sourceFolders[0]?.last_scan_status, 'Error')
 })

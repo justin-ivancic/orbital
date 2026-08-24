@@ -126,6 +126,65 @@ test('library scans skip unchanged series and expose reconciliation metrics', as
   }
 })
 
+test('interrupted scans retain committed series and retry incrementally', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    await writeNovel(sourcePath, 'Chapter 2 - Return.txt', 'return')
+    await runScan(database.db, config, 'source-1')
+    await writeNovel(sourcePath, 'Chapter 3 - Addition.txt', 'addition')
+
+    await assert.rejects(
+      () =>
+        runScan(database.db, config, 'source-1', {
+          onProgress: ({ currentSourceSeriesCompleted }) => {
+            if (currentSourceSeriesCompleted === 1) {
+              throw new Error('simulated process interruption')
+            }
+          },
+        }),
+      /simulated process interruption/,
+    )
+
+    const interruptedRun = database.db
+      .prepare(
+        `
+          SELECT status, changed_files, processed_series, heartbeat_at
+          FROM scan_runs
+          ORDER BY started_at DESC
+          LIMIT 1
+        `,
+      )
+      .get() as { status: string; changed_files: number; processed_series: number; heartbeat_at: string | null }
+    assert.equal(interruptedRun.status, 'error')
+    assert.equal(interruptedRun.changed_files, 1)
+    assert.equal(interruptedRun.processed_series, 1)
+    assert.ok(interruptedRun.heartbeat_at)
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM entries WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      3,
+    )
+
+    const retry = await runScan(database.db, config, 'source-1')
+    assert.equal(retry.metrics.newFiles, 0)
+    assert.equal(retry.metrics.unchangedFiles, 3)
+    assert.equal(retry.metrics.reusedFiles, 3)
+    assert.equal(
+      (database.db.prepare(`SELECT last_scan_status FROM source_folders WHERE id = ?`).get('source-1') as { last_scan_status: string }).last_scan_status,
+      'Ready',
+    )
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('library scans preserve entry bookmarks when a file is renamed', async () => {
   const directory = await createTempDirectory()
   const sourcePath = path.join(directory, 'library')
