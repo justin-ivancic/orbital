@@ -252,6 +252,39 @@ test('incremental series updates plan matching resources for local reuse', () =>
   )
 })
 
+test('a 250-chapter series update reuses 200 verified chapters and leaves only 50 to download', () => {
+  const existing = Array.from({ length: 200 }, (_, index) => (
+    makeResource(`entry-${index + 1}`, 'v1', 100 + index)
+  ))
+  const added = Array.from({ length: 50 }, (_, index) => (
+    makeResource(`entry-${index + 201}`, 'v1', 300 + index)
+  ))
+  const manifest = makeManifest([...existing, ...added])
+  const transfers = planReusableOfflineResources(manifest, [{
+    downloadId: 'pkg_previous',
+    resources: existing.map((resource) => ({
+      resource: { ...resource, url: `file:///${resource.key}.bin` },
+      size: resource.size,
+    })),
+  }])
+
+  assert.equal(transfers.length, 200)
+
+  const merged = mergeOfflineManifestWithStoredResources(
+    manifest,
+    transfers.map((transfer) => ({
+      resource: { ...transfer.resource, url: `file:///replacement/${transfer.resource.key}.bin` },
+      size: transfer.resource.size,
+    })),
+  )
+
+  assert.equal(merged.completedResources.length, 200)
+  assert.equal(
+    merged.manifest.resources.filter((resource) => resource.url.startsWith('/api/')).length,
+    50,
+  )
+})
+
 test('incremental series updates do not copy resources already present in the replacement package', () => {
   const existing = makeResource('entry-1', 'v1', 100)
   const newEntry = makeResource('entry-2', 'v1', 200)

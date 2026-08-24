@@ -55,6 +55,50 @@ const nativeResourcePath = (downloadId: string, resourceKey: string) =>
 const nativeReadingStatePath = (ownerUserId: string) =>
   `orbital/reading/${encodeURIComponent(ownerUserId)}.json`
 
+const commitNativeResourceFile = async (path: string, temporaryPath: string) => {
+  const previousPath = `${path}.previous`
+
+  await Filesystem.deleteFile({
+    path: previousPath,
+    directory: Directory.Data,
+  }).catch(() => undefined)
+
+  let previousFileMoved = false
+
+  try {
+    await Filesystem.rename({
+      from: path,
+      to: previousPath,
+      directory: Directory.Data,
+    })
+    previousFileMoved = true
+  } catch {
+    // There may not be an existing resource on the first attempt.
+  }
+
+  try {
+    await Filesystem.rename({
+      from: temporaryPath,
+      to: path,
+      directory: Directory.Data,
+    })
+  } catch (error) {
+    if (previousFileMoved) {
+      await Filesystem.rename({
+        from: previousPath,
+        to: path,
+        directory: Directory.Data,
+      }).catch(() => undefined)
+    }
+    throw error
+  }
+
+  await Filesystem.deleteFile({
+    path: previousPath,
+    directory: Directory.Data,
+  }).catch(() => undefined)
+}
+
 const readNativeJson = async <T,>(path: string): Promise<T | null> => {
   try {
     const result = await Filesystem.readFile({
@@ -545,7 +589,6 @@ export const putOfflineResource = async (
   if (nativeStorageEnabled) {
     const path = nativeResourcePath(downloadId, resource.key)
     const temporaryPath = `${path}.part`
-    const previousPath = `${path}.previous`
 
     await Filesystem.deleteFile({
       path: temporaryPath,
@@ -558,46 +601,7 @@ export const putOfflineResource = async (
       data: await blobToBase64(blob),
       recursive: true,
     })
-
-    await Filesystem.deleteFile({
-      path: previousPath,
-      directory: Directory.Data,
-    }).catch(() => undefined)
-
-    let previousFileMoved = false
-
-    try {
-      await Filesystem.rename({
-        from: path,
-        to: previousPath,
-        directory: Directory.Data,
-      })
-      previousFileMoved = true
-    } catch {
-      // There may not be an existing resource on the first attempt.
-    }
-
-    try {
-      await Filesystem.rename({
-        from: temporaryPath,
-        to: path,
-        directory: Directory.Data,
-      })
-    } catch (error) {
-      if (previousFileMoved) {
-        await Filesystem.rename({
-          from: previousPath,
-          to: path,
-          directory: Directory.Data,
-        }).catch(() => undefined)
-      }
-      throw error
-    }
-
-    await Filesystem.deleteFile({
-      path: previousPath,
-      directory: Directory.Data,
-    }).catch(() => undefined)
+    await commitNativeResourceFile(path, temporaryPath)
 
     const uri = await Filesystem.getUri({
       path,
@@ -634,87 +638,6 @@ export const putOfflineResource = async (
   return resource
 }
 
-const readOfflineResourceForDownload = async (
-  downloadId: string,
-  resourceKey: string,
-): Promise<OfflineResourceRecord | null> => {
-  if (nativeStorageEnabled) {
-    const download = await readNativeJson<OfflineDownloadRecord>(nativeRecordPath(downloadId))
-    const resource = download?.manifest.resources.find((item) => item.key === resourceKey)
-
-    if (!download || !resource) {
-      return null
-    }
-
-    const path = nativeResourcePath(downloadId, resource.key)
-    let encoded = ''
-
-    try {
-      const result = await Filesystem.readFile({
-        path,
-        directory: Directory.Data,
-      })
-      encoded = typeof result.data === 'string' ? result.data : ''
-    } catch {
-      try {
-        await Filesystem.rename({
-          from: `${path}.previous`,
-          to: path,
-          directory: Directory.Data,
-        })
-        const result = await Filesystem.readFile({
-          path,
-          directory: Directory.Data,
-        })
-        encoded = typeof result.data === 'string' ? result.data : ''
-      } catch {
-        return null
-      }
-    }
-
-    if (!encoded) {
-      return null
-    }
-
-    try {
-      const uri = await Filesystem.getUri({
-        path,
-        directory: Directory.Data,
-      })
-      const blob = base64ToBlob(encoded, resource.contentType)
-
-      return {
-        storageKey: getOfflineResourceStorageKey(downloadId, resource.key),
-        key: resource.key,
-        downloadId,
-        ownerUserId: download.ownerUserId,
-        resource: { ...resource, url: toNativeFileUrl(uri.uri) },
-        blob,
-        size: blob.size,
-        storedAt: download.updatedAt,
-      }
-    } catch {
-      return null
-    }
-  }
-
-  const db = await openOfflineDb()
-
-  try {
-    const transaction = db.transaction(resourcesStoreName, 'readonly')
-    const done = transactionDone(transaction)
-    const record = await toPromise<OfflineResourceRecord | undefined>(
-      transaction.objectStore(resourcesStoreName).get(
-        getOfflineResourceStorageKey(downloadId, resourceKey),
-      ),
-    )
-    await done
-    return record ?? null
-  } finally {
-    db.close()
-  }
-}
-
 const isReusableOfflineResource = (
   source: OfflineResourceRecord | null,
   ownerUserId: string,
@@ -729,6 +652,61 @@ const isReusableOfflineResource = (
   (resource.size <= 0 || source.size === resource.size),
 )
 
+const copyNativeOfflineResource = async (
+  sourceDownloadId: string,
+  sourceResource: OfflineDownloadResource,
+  targetDownloadId: string,
+  resource: OfflineDownloadResource,
+): Promise<OfflineStoredResource | null> => {
+  if (
+    sourceResource.kind !== resource.kind ||
+    sourceResource.version !== resource.version
+  ) {
+    return null
+  }
+
+  const sourcePath = nativeResourcePath(sourceDownloadId, resource.key)
+  const targetPath = nativeResourcePath(targetDownloadId, resource.key)
+  const temporaryPath = `${targetPath}.part`
+  const sourceStats = await Filesystem.stat({ path: sourcePath, directory: Directory.Data })
+
+  if (
+    sourceStats.type !== 'file' ||
+    sourceStats.size <= 0 ||
+    (resource.size > 0 && sourceStats.size !== resource.size)
+  ) {
+    return null
+  }
+
+  await Filesystem.mkdir({
+    path: `${nativeDownloadPath(targetDownloadId)}/resources`,
+    directory: Directory.Data,
+    recursive: true,
+  })
+  await Filesystem.deleteFile({ path: temporaryPath, directory: Directory.Data })
+    .catch(() => undefined)
+  await Filesystem.copy({
+    from: sourcePath,
+    to: temporaryPath,
+    directory: Directory.Data,
+  })
+
+  const copiedStats = await Filesystem.stat({ path: temporaryPath, directory: Directory.Data })
+  if (copiedStats.type !== 'file' || copiedStats.size !== sourceStats.size) {
+    await Filesystem.deleteFile({ path: temporaryPath, directory: Directory.Data })
+      .catch(() => undefined)
+    return null
+  }
+
+  await commitNativeResourceFile(targetPath, temporaryPath)
+  const uri = await Filesystem.getUri({ path: targetPath, directory: Directory.Data })
+
+  return {
+    resource: { ...resource, url: toNativeFileUrl(uri.uri) },
+    size: copiedStats.size,
+  }
+}
+
 export const copyOfflineResources = async (
   sourceDownloadId: string,
   targetDownloadId: string,
@@ -736,7 +714,18 @@ export const copyOfflineResources = async (
   resources: OfflineDownloadResource[],
 ): Promise<OfflineStoredResource[]> => {
   if (sourceDownloadId === targetDownloadId) {
-    return resources.map((resource) => ({ resource, size: resource.size }))
+    const inventory = await getOfflineResourceInventory(sourceDownloadId)
+    const storedByKey = new Map(inventory.map((stored) => [stored.resource.key, stored]))
+
+    return resources.flatMap((resource) => {
+      const stored = storedByKey.get(resource.key)
+      return stored &&
+        stored.resource.kind === resource.kind &&
+        stored.resource.version === resource.version &&
+        (resource.size <= 0 || stored.size === resource.size)
+        ? [{ resource: { ...resource, url: stored.resource.url }, size: stored.size }]
+        : []
+    })
   }
 
   if (!resources.length) {
@@ -744,25 +733,37 @@ export const copyOfflineResources = async (
   }
 
   if (nativeStorageEnabled) {
+    const sourceDownload = await readNativeJson<OfflineDownloadRecord>(
+      nativeRecordPath(sourceDownloadId),
+    )
+    if (!sourceDownload || sourceDownload.ownerUserId !== ownerUserId) {
+      return []
+    }
+
+    const sourceResourcesByKey = new Map(
+      sourceDownload.manifest.resources.map((resource) => [resource.key, resource]),
+    )
     const copiedResources: OfflineStoredResource[] = []
 
     for (const resource of resources) {
-      const source = await readOfflineResourceForDownload(sourceDownloadId, resource.key)
-
-      if (!source || !isReusableOfflineResource(source, ownerUserId, resource)) {
+      const sourceResource = sourceResourcesByKey.get(resource.key)
+      if (!sourceResource) {
         continue
       }
 
-      const localResource = await putOfflineResource(
-        targetDownloadId,
-        ownerUserId,
-        resource,
-        source.blob,
-      )
-      copiedResources.push({
-        resource: localResource,
-        size: source.size,
-      })
+      try {
+        const copied = await copyNativeOfflineResource(
+          sourceDownload.id,
+          sourceResource,
+          targetDownloadId,
+          resource,
+        )
+        if (copied) {
+          copiedResources.push(copied)
+        }
+      } catch {
+        // A missing or interrupted source file is repaired by the download path.
+      }
     }
 
     return copiedResources

@@ -82,6 +82,12 @@ The server also creates bounded card thumbnails on first use, and the Downloads
 page reports recent cover-loading and page-switching timings for device-level
 performance checks.
 
+The header and Profile page include a manual refresh action for reconnecting
+after offline use. Series downloads are incremental: verified unchanged files
+are copied locally with the native filesystem, interrupted replacements remain
+resumable, and the previous complete package is kept until its replacement is
+fully ready.
+
 To rebuild and publish the APK that the hosted Profile page serves, run:
 
 ```bash

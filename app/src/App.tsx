@@ -632,6 +632,7 @@ const ui = {
     preparingOfflineDownload: 'Preparing update...',
     preparingOfflineUpdate: (current: number, total: number) => `Preparing update ${current} / ${total}`,
     downloadSeries: 'Download series',
+    updateSeriesDownload: 'Update offline series',
     downloadProgress: (current: number, total: number) => `Downloading ${current} / ${total}`,
     downloadEntry: 'Download chapter',
     downloadBook: 'Download book',
@@ -644,6 +645,12 @@ const ui = {
     persistentStorageHelp: 'Ask the browser not to evict downloaded media when space is low.',
     offlineMode: 'Offline mode',
     offlineModeHelp: 'The server is unreachable. Your cached catalogue and bookmarks remain visible; only downloaded items can be read offline.',
+    refreshConnection: 'Refresh',
+    reconnect: 'Reconnect',
+    refreshingConnection: 'Refreshing...',
+    refreshConnectionHelp: 'Check the server and synchronize newer offline reading progress.',
+    connectionRestored: 'Orbital is online and up to date.',
+    connectionRefreshFailed: 'The server is still unreachable. Your offline library remains available.',
     offlineOnly: 'Online only',
     offlineOnlyTitle: 'Not downloaded for offline reading',
     offlineOnlyBody: 'This item is still visible from your cached catalogue, but its content is not stored on this device. Reconnect and download it first.',
@@ -940,6 +947,7 @@ const ui = {
     preparingOfflineDownload: 'Update wird vorbereitet...',
     preparingOfflineUpdate: (current: number, total: number) => `Update wird vorbereitet ${current} / ${total}`,
     downloadSeries: 'Serie herunterladen',
+    updateSeriesDownload: 'Offline-Serie aktualisieren',
     downloadProgress: (current: number, total: number) => `Wird geladen ${current} / ${total}`,
     downloadEntry: 'Kapitel herunterladen',
     downloadBook: 'Buch herunterladen',
@@ -952,6 +960,12 @@ const ui = {
     persistentStorageHelp: 'Bitte den Browser, heruntergeladene Medien bei wenig Speicher nicht automatisch zu entfernen.',
     offlineMode: 'Offline-Modus',
     offlineModeHelp: 'Der Server ist nicht erreichbar. Dein zwischengespeicherter Katalog und deine Lesezeichen bleiben sichtbar; nur heruntergeladene Inhalte können offline gelesen werden.',
+    refreshConnection: 'Aktualisieren',
+    reconnect: 'Neu verbinden',
+    refreshingConnection: 'Wird aktualisiert...',
+    refreshConnectionHelp: 'Server prüfen und neueren Offline-Lesefortschritt synchronisieren.',
+    connectionRestored: 'Orbital ist online und auf dem neuesten Stand.',
+    connectionRefreshFailed: 'Der Server ist weiterhin nicht erreichbar. Deine Offline-Bibliothek bleibt verfügbar.',
     offlineOnly: 'Nur online',
     offlineOnlyTitle: 'Nicht für Offline-Lesen heruntergeladen',
     offlineOnlyBody: 'Dieser Eintrag ist aus deinem zwischengespeicherten Katalog sichtbar, aber sein Inhalt liegt nicht auf diesem Gerät. Verbinde dich erneut und lade ihn zuerst herunter.',
@@ -1990,6 +2004,8 @@ function App() {
   const [passwordChangeError, setPasswordChangeError] = useState<string | null>(null)
   const [passwordChangeSuccess, setPasswordChangeSuccess] = useState<string | null>(null)
   const [offlineMode, setOfflineMode] = useState(false)
+  const [connectionRefreshBusy, setConnectionRefreshBusy] = useState(false)
+  const [connectionRefreshNotice, setConnectionRefreshNotice] = useState<string | null>(null)
   const [offlineDownloads, setOfflineDownloads] = useState<OfflineDownloadRecord[]>([])
   const [offlineDownloadsLoaded, setOfflineDownloadsLoaded] = useState(false)
   const [offlineStorageSummary, setOfflineStorageSummary] =
@@ -2900,9 +2916,64 @@ function App() {
     csrfToken: nextState.csrfToken,
   })
 
+  const syncOfflineReadingState = useCallback(async (
+    nextState: AppState,
+    failOnSyncError = false,
+  ) => {
+    if (!isNativeApp || !nextState.user) {
+      return nextState
+    }
+
+    const localState = await getOfflineReadingState(nextState.user.id)
+    if (!localState.bookmarks.length) {
+      return nextState
+    }
+
+    try {
+      const bookmarksToSync = selectNewerBookmarksForSync(
+        localState.bookmarks,
+        nextState.bookmarks,
+      )
+
+      for (const bookmark of bookmarksToSync) {
+        await api.setBookmark({
+          seriesId: bookmark.seriesId,
+          entryId: bookmark.entryId,
+          entryIndex: bookmark.entryIndex,
+          category: bookmark.category,
+          progress: bookmark.progress,
+          cue: bookmark.cue,
+          position: localState.readingPositions[bookmark.entryId] || { page: 1 },
+          lastSeen: bookmark.lastSeen,
+        })
+      }
+
+      return bookmarksToSync.length ? await api.getState() : nextState
+    } catch (error) {
+      if (failOnSyncError) {
+        throw error
+      }
+      return nextState
+    }
+  }, [])
+
+  const applyRemoteState = useCallback((nextState: AppState) => {
+    api.setCsrfToken(nextState.csrfToken)
+    setBootstrapState({
+      appName: nextState.appName,
+      bootstrapAdmin: nextState.bootstrapAdmin,
+      openSignup: nextState.openSignup,
+      user: nextState.user,
+      csrfToken: nextState.csrfToken,
+    })
+    setAppState(nextState)
+    setCachedStateNeedsRefresh(false)
+    setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, nextState.library))
+  }, [])
+
   useEffect(() => {
     let active = true
-    let remoteLoadStarted = false
+    let remoteLoadInFlight = false
 
     const applyOfflineProfile = async (offlineProfile: SessionUser) => {
       const localState = offlineStateForProfile(offlineProfile)
@@ -2957,11 +3028,11 @@ function App() {
     }
 
     const loadRemoteBootstrap = async () => {
-      if (remoteLoadStarted) {
+      if (remoteLoadInFlight) {
         return
       }
 
-      remoteLoadStarted = true
+      remoteLoadInFlight = true
 
       try {
         const nextState = await api.getBootstrap()
@@ -2992,6 +3063,8 @@ function App() {
               : text.offlineModeHelp,
           )
         }
+      } finally {
+        remoteLoadInFlight = false
       }
     }
 
@@ -3078,41 +3151,6 @@ function App() {
 
     let active = true
 
-    const syncLocalReadingState = async (nextState: AppState) => {
-      if (!isNativeApp || !nextState.user) {
-        return nextState
-      }
-
-      const localState = await getOfflineReadingState(nextState.user.id)
-      if (!localState.bookmarks.length) {
-        return nextState
-      }
-
-      try {
-        const bookmarksToSync = selectNewerBookmarksForSync(
-          localState.bookmarks,
-          nextState.bookmarks,
-        )
-
-        for (const bookmark of bookmarksToSync) {
-          await api.setBookmark({
-            seriesId: bookmark.seriesId,
-            entryId: bookmark.entryId,
-            entryIndex: bookmark.entryIndex,
-            category: bookmark.category,
-            progress: bookmark.progress,
-            cue: bookmark.cue,
-            position: localState.readingPositions[bookmark.entryId] || { page: 1 },
-            lastSeen: bookmark.lastSeen,
-          })
-        }
-
-        return bookmarksToSync.length ? await api.getState() : nextState
-      } catch {
-        return nextState
-      }
-    }
-
     const loadState = async () => {
       try {
         const nextState = await api.getState()
@@ -3122,16 +3160,12 @@ function App() {
         }
 
         api.setCsrfToken(nextState.csrfToken)
-        const syncedState = await syncLocalReadingState(nextState)
+        const syncedState = await syncOfflineReadingState(nextState)
         if (!active) {
           return
         }
 
-        api.setCsrfToken(syncedState.csrfToken)
-        setBootstrapState(toBootstrapState(syncedState))
-        setAppState(syncedState)
-        setCachedStateNeedsRefresh(false)
-        setSeriesCache((previousCache) => pruneSeriesCacheForLibrary(previousCache, syncedState.library))
+        applyRemoteState(syncedState)
         setStateError(null)
       } catch (error) {
         if (!active) {
@@ -3147,7 +3181,50 @@ function App() {
     return () => {
       active = false
     }
-  }, [appState, bootstrapState, cachedStateNeedsRefresh, offlineMode, text.authErrorFallback])
+  }, [
+    appState,
+    applyRemoteState,
+    bootstrapState,
+    cachedStateNeedsRefresh,
+    offlineMode,
+    syncOfflineReadingState,
+    text.authErrorFallback,
+  ])
+
+  const handleRefreshConnection = async () => {
+    if (connectionRefreshBusy) {
+      return
+    }
+
+    setConnectionRefreshBusy(true)
+    setConnectionRefreshNotice(null)
+
+    try {
+      const nextBootstrap = await api.getBootstrap()
+      api.setCsrfToken(nextBootstrap.csrfToken)
+      setBootstrapState(nextBootstrap)
+
+      if (!nextBootstrap.user) {
+        setAppState(null)
+        setOfflineMode(false)
+        setCachedStateNeedsRefresh(false)
+        setStateError(null)
+        setConnectionRefreshNotice(text.connectionRestored)
+        return
+      }
+
+      const syncedState = await syncOfflineReadingState(await api.getState(), true)
+      applyRemoteState(syncedState)
+      setOfflineMode(false)
+      setStateError(null)
+      setConnectionRefreshNotice(text.connectionRestored)
+    } catch {
+      setConnectionRefreshNotice(text.connectionRefreshFailed)
+      setStateError(offlineMode ? text.offlineModeHelp : text.connectionRefreshFailed)
+    } finally {
+      setConnectionRefreshBusy(false)
+    }
+  }
 
   useEffect(() => {
     if (bootLoading || !bootstrapState) {
@@ -4069,6 +4146,14 @@ function App() {
         (download) => download.id !== manifest.manifestId,
       )
 
+      if (existingRecord) {
+        record = existingRecord
+      } else {
+        record = createOfflineDownloadRecord(manifest)
+        downloadStateStarted = true
+        await updateOfflineRecord(record)
+      }
+
       if (replacementRecords.length) {
         setOfflineBusy(busyKey, text.preparingOfflineDownload)
       }
@@ -4136,7 +4221,7 @@ function App() {
 
       record = mergeOfflineDownloadRecord(
         manifest,
-        existingRecord,
+        existingRecord ?? (record?.id === manifest.manifestId ? record : null),
         merged.completedResources,
         merged.manifest,
         createOfflineDownloadRecord,
@@ -5867,6 +5952,23 @@ function App() {
               const bookmarkStats = getBookmarkStats(bookmark, series)
               const bookmarkMenuKey = `${bookmark.seriesId}-${bookmark.entryId}`
               const bookmarkMenuOpen = openBookmarkMenuKey === bookmarkMenuKey
+              const bookmarkSeriesTarget = {
+                type: 'series',
+                seriesId: series.id,
+              } satisfies OfflineDownloadTarget
+              const bookmarkSeriesBusy = offlineBusyIds[getOfflineTargetKey(bookmarkSeriesTarget)]
+              const bookmarkSeriesDownload = offlineDownloads.find((download) => (
+                download.manifest.target.type === 'series' &&
+                download.manifest.target.seriesId === series.id
+              )) ?? null
+              const bookmarkSeriesReady = bookmarkSeriesDownload?.status === 'ready'
+              const bookmarkDownloadLabel = bookmarkSeriesBusy || (
+                bookmarkSeriesReady
+                  ? text.updateSeriesDownload
+                  : series.category === 'books' && series.stats.fileCount <= 1
+                    ? text.downloadBook
+                    : text.downloadSeries
+              )
 
               return (
                 <article
@@ -5966,6 +6068,17 @@ function App() {
                   </button>
                   {bookmarkMenuOpen && (
                     <div className="bookmark-card__menu-panel">
+                      <button
+                        disabled={offlineMode || Boolean(bookmarkSeriesBusy)}
+                        onClick={() => {
+                          setOpenBookmarkMenuKey(null)
+                          void startOfflineDownload(bookmarkSeriesTarget)
+                        }}
+                        type="button"
+                      >
+                        <AppIcon name={bookmarkSeriesReady ? 'refresh' : 'download'} />
+                        {bookmarkDownloadLabel}
+                      </button>
                       <RouteLink
                         navigate={navigateRoute}
                         onNavigate={() => {
@@ -6350,6 +6463,30 @@ function App() {
               </button>
             </div>
           </div>
+
+          <button
+            className="settings-row settings-row--button"
+            disabled={connectionRefreshBusy}
+            onClick={() => void handleRefreshConnection()}
+            type="button"
+          >
+            <span className="settings-row__icon">
+              <AppIcon name="refresh" />
+            </span>
+            <div>
+              <strong>
+                {connectionRefreshBusy
+                  ? text.refreshingConnection
+                  : offlineMode
+                    ? text.reconnect
+                    : text.refreshConnection}
+              </strong>
+              <p>{connectionRefreshNotice || text.refreshConnectionHelp}</p>
+            </div>
+            <span className="settings-row__chevron">
+              <AppIcon name="chevronRight" />
+            </span>
+          </button>
 
           {appState?.user?.role === 'admin' && (
             <RouteLink
@@ -8550,6 +8687,21 @@ function App() {
             </button>
           </div>
 
+          <button
+            aria-label={offlineMode ? text.reconnect : text.refreshConnection}
+            className="ghost-button connection-refresh-button"
+            disabled={connectionRefreshBusy}
+            onClick={() => void handleRefreshConnection()}
+            type="button"
+          >
+            <AppIcon name="refresh" />
+            {connectionRefreshBusy
+              ? text.refreshingConnection
+              : offlineMode
+                ? text.reconnect
+                : text.refreshConnection}
+          </button>
+
           <RouteLink
             ariaCurrent={currentView === 'profile' ? 'page' : undefined}
             className="profile-pill"
@@ -8588,6 +8740,9 @@ function App() {
       )}
 
       <main className="main-shell" id="main-content" ref={mainShellRef} tabIndex={-1}>
+        <p aria-live="polite" className="visually-hidden">
+          {connectionRefreshNotice}
+        </p>
         {!routeProblem && currentView === 'admin' && (
           <section className="page-heading">
             <div>
