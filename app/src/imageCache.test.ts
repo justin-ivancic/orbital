@@ -53,6 +53,38 @@ const responseFor = (value: string) =>
     status: 200,
   })
 
+test('persists the first cover loaded for a fresh user', async () => {
+  const ownerUserId = 'image-cache-fresh-user'
+  const url = 'https://example.test/api/media/cover/first?v=1'
+  const storage = new TestCacheStorage()
+  const previousWindow = (globalThis as { window?: unknown }).window
+
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { caches: storage },
+  })
+
+  try {
+    // Deliberately do not initialize this owner with clearImageCache. A fresh
+    // installation has no generation entry, which used to skip the write.
+    await loadCachedImage(ownerUserId, url, async () => responseFor('first-cover'))
+
+    const summary = await getImageCacheSummary(ownerUserId)
+    assert.equal(summary.imageCount, 1)
+    assert.equal(summary.storedBytes, 11)
+  } finally {
+    await clearImageCache(ownerUserId)
+    if (previousWindow === undefined) {
+      Reflect.deleteProperty(globalThis, 'window')
+    } else {
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        value: previousWindow,
+      })
+    }
+  }
+})
+
 test('deduplicates concurrent requests for the same image', async () => {
   const ownerUserId = 'image-cache-dedupe-user'
   const url = 'https://example.test/api/media/cover/one?v=1'

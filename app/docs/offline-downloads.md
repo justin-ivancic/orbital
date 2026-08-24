@@ -47,6 +47,6 @@ Each resource is accepted only after its complete response has been received and
 
 If the server copy changes, Orbital creates a replacement package beside the old one. Resource keys are stable for unchanged chapters and pages, so completed matching resources are copied locally into the replacement package and only new or changed resources are downloaded from the server. The old package remains available until the replacement is ready, then is removed. A replacement can temporarily use additional local space while both packages exist.
 
-On Android, cover images that have been viewed online are also retained in a durable per-user device cache for up to 30 days, subject to a 128-image and 100 MB limit. Covers are cached on demand rather than prefetched in bulk.
+On Android, cover images that have been viewed online are also retained in a durable per-user device cache for up to 90 days, subject to a 1,024-image and 256 MB limit. Covers are cached on demand rather than prefetched in bulk.
 
 Use the Downloads tab to cancel, retry or repair, download again, delete one package, clear all packages for the active user, or request persistent browser storage.

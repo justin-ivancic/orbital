@@ -74,6 +74,8 @@ const imageCacheBackends = new Map<string, ImageCacheSummary['backend']>()
 let memoryImageBytes = 0
 let activeImageRequests = 0
 
+const ownerGeneration = (ownerUserId: string) => ownerGenerations.get(ownerUserId) ?? 0
+
 const errorMessage = (error: unknown, fallback: string) => {
   if (error instanceof Error && error.message) {
     return error.message
@@ -1160,10 +1162,10 @@ export const loadCachedImage = (
   }
 
   return enqueueImageRequest(key, async () => {
-    const generation = ownerGenerations.get(ownerUserId) || 0
+    const generation = ownerGeneration(ownerUserId)
     const persistentImage = await readPersistentImage(ownerUserId, url, cacheKey, !fetcher)
     if (persistentImage) {
-      if (ownerGenerations.get(ownerUserId) === generation) {
+      if (ownerGeneration(ownerUserId) === generation) {
         rememberImage(key, url, persistentImage)
       }
       return persistentImage
@@ -1179,7 +1181,7 @@ export const loadCachedImage = (
     }
 
     const blob = await response.blob()
-    if (ownerGenerations.get(ownerUserId) === generation) {
+    if (ownerGeneration(ownerUserId) === generation) {
       rememberImage(key, url, blob)
       await writePersistentImage(ownerUserId, url, cacheKey, blob)
     }

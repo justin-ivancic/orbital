@@ -652,7 +652,7 @@ const ui = {
     testCoverStorage: 'Test cover storage',
     testCoverStorageBusy: 'Testing cover storage...',
     testCoverStoragePassed: (backend: string, bytes: number) =>
-      `Cover storage test passed: ${backend}, ${bytes} bytes verified.`,
+      `Temporary cover-storage test passed: ${backend}, ${bytes} bytes verified and removed.`,
     testCoverStorageFailed: (error: string) => `Cover storage test failed: ${error}`,
     clearCoverStorage: 'Free cover space',
     clearCoverStorageBusy: 'Freeing cover space...',
@@ -955,7 +955,7 @@ const ui = {
     testCoverStorage: 'Titelbildspeicher testen',
     testCoverStorageBusy: 'Titelbildspeicher wird getestet...',
     testCoverStoragePassed: (backend: string, bytes: number) =>
-      `Titelbildspeicher-Test erfolgreich: ${backend}, ${bytes} Bytes geprüft.`,
+      `Temporärer Titelbildspeicher-Test erfolgreich: ${backend}, ${bytes} Bytes geprüft und entfernt.`,
     testCoverStorageFailed: (error: string) => `Titelbildspeicher-Test fehlgeschlagen: ${error}`,
     clearCoverStorage: 'Titelbildspeicher freigeben',
     clearCoverStorageBusy: 'Titelbildspeicher wird freigegeben...',
@@ -3118,22 +3118,34 @@ function App() {
   }, [currentView, sessionUser])
 
   useEffect(() => {
-    if (!sessionUser) {
+    if (!sessionUser || currentView !== 'downloads') {
       return
     }
 
+    let refreshTimer: number | null = null
     const handleImageCacheChanged = (event: Event) => {
       const ownerUserId = (event as CustomEvent<{ ownerUserId?: string }>).detail?.ownerUserId
       if (ownerUserId !== sessionUser.id) {
         return
       }
 
-      void getImageCacheSummary(sessionUser.id).then(setImageCacheSummary).catch(() => undefined)
+      if (refreshTimer != null) {
+        window.clearTimeout(refreshTimer)
+      }
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null
+        void getImageCacheSummary(sessionUser.id).then(setImageCacheSummary).catch(() => undefined)
+      }, 150)
     }
 
     window.addEventListener(imageCacheChangedEvent, handleImageCacheChanged)
-    return () => window.removeEventListener(imageCacheChangedEvent, handleImageCacheChanged)
-  }, [sessionUser])
+    return () => {
+      window.removeEventListener(imageCacheChangedEvent, handleImageCacheChanged)
+      if (refreshTimer != null) {
+        window.clearTimeout(refreshTimer)
+      }
+    }
+  }, [currentView, sessionUser])
 
   useEffect(() => {
     const shouldPollForTransportRecovery =
