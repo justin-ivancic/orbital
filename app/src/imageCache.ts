@@ -22,9 +22,46 @@ type MemoryImage = {
 }
 
 type ImageQueueItem = {
+  key: string
+  priority: number
+  sequence: number
+  queuedAt: number
+  started: boolean
   task: () => Promise<Blob>
   resolve: (blob: Blob) => void
   reject: (error: unknown) => void
+}
+
+type ImageRequestRecord = {
+  item: ImageQueueItem
+  managedConsumers: number
+  promise: Promise<Blob>
+  unmanagedConsumer: boolean
+}
+
+export type ImageLoadPriority = 'background' | 'nearby' | 'visible'
+
+export type ImageLoadPerformance = {
+  activeRequests: number
+  averageLoadMs: number
+  averageQueueWaitMs: number
+  cacheHits: number
+  completedLoads: number
+  lastLoadMs: number
+  networkLoads: number
+  queuedRequests: number
+}
+
+export type CachedImageRequest = {
+  promise: Promise<Blob>
+  release: () => void
+  setPriority: (priority: ImageLoadPriority) => void
+}
+
+type NativeImageSource = {
+  displayUrl: string
+  size: number
+  url: string
 }
 
 type IndexedDbImageRecord = {
@@ -66,13 +103,27 @@ export type ImageCacheSelfTestResult = {
 export const imageCacheChangedEvent = 'orbital:image-cache-changed'
 
 const memoryImages = new Map<string, MemoryImage>()
-const inFlightImages = new Map<string, Promise<Blob>>()
+const nativeImageSources = new Map<string, NativeImageSource>()
+const inFlightImages = new Map<string, ImageRequestRecord>()
 const imageQueue: ImageQueueItem[] = []
 const ownerGenerations = new Map<string, number>()
 const imageCacheWriteErrors = new Map<string, string>()
 const imageCacheBackends = new Map<string, ImageCacheSummary['backend']>()
 let memoryImageBytes = 0
 let activeImageRequests = 0
+let imageRequestSequence = 0
+let completedImageLoads = 0
+let totalImageLoadMs = 0
+let totalImageQueueWaitMs = 0
+let lastImageLoadMs = 0
+let persistentImageHits = 0
+let networkImageLoads = 0
+
+const imagePriorityValue: Record<ImageLoadPriority, number> = {
+  background: 0,
+  nearby: 1,
+  visible: 2,
+}
 
 const ownerGeneration = (ownerUserId: string) => ownerGenerations.get(ownerUserId) ?? 0
 
@@ -141,6 +192,83 @@ const nativeImagePath = (ownerUserId: string, url: string) =>
 
 const nativeImageMetadataPath = (ownerUserId: string, url: string) =>
   `${nativeImageOwnerPath(ownerUserId)}/${nativeImageHash(url)}.json`
+
+const forgetNativeImageSource = (ownerUserId: string, cacheKey: string) => {
+  nativeImageSources.delete(memoryKey(ownerUserId, cacheKey))
+}
+
+const readNativeImageSourceRecord = async (
+  ownerUserId: string,
+  url: string,
+  cacheKey: string,
+  allowStaleUrl: boolean,
+): Promise<NativeImageSource | null> => {
+  const metadataResult = await Filesystem.readFile({
+    path: nativeImageMetadataPath(ownerUserId, cacheKey),
+    directory: Directory.Data,
+    encoding: Encoding.UTF8,
+  })
+  const metadata = JSON.parse(String(metadataResult.data)) as NativeImageMetadata
+
+  if (
+    (!allowStaleUrl && metadata.url !== url) ||
+    !Number.isFinite(metadata.cachedAt) ||
+    Date.now() - metadata.cachedAt >= imageCacheTtlMs ||
+    !Number.isFinite(metadata.size) ||
+    metadata.size <= 0
+  ) {
+    return null
+  }
+
+  const imagePath = nativeImagePath(ownerUserId, cacheKey)
+  const fileStats = await Filesystem.stat({ path: imagePath, directory: Directory.Data })
+  if (Number(fileStats.size) !== metadata.size) {
+    return null
+  }
+
+  const file = await Filesystem.getUri({ path: imagePath, directory: Directory.Data })
+  return {
+    displayUrl: Capacitor.convertFileSrc(file.uri),
+    size: metadata.size,
+    url: metadata.url,
+  }
+}
+
+export const getCachedImageSource = async (
+  ownerUserId: string,
+  url: string,
+  cacheKey = url,
+  allowStaleUrl = false,
+) => {
+  if (!nativeImageStorageEnabled) {
+    return null
+  }
+
+  const key = memoryKey(ownerUserId, cacheKey)
+  const remembered = nativeImageSources.get(key)
+  if (remembered && (allowStaleUrl || remembered.url === url)) {
+    return remembered.displayUrl
+  }
+
+  for (const candidateKey of [...new Set([cacheKey, url])]) {
+    try {
+      const source = await readNativeImageSourceRecord(
+        ownerUserId,
+        url,
+        candidateKey,
+        allowStaleUrl,
+      )
+      if (source) {
+        nativeImageSources.set(key, source)
+        return source.displayUrl
+      }
+    } catch {
+      // Older or interrupted records fall through to the verified Blob path.
+    }
+  }
+
+  return null
+}
 
 const blobToBase64 = async (blob: Blob) => {
   const bytes = new Uint8Array(await blob.arrayBuffer())
@@ -277,6 +405,8 @@ const writeNativeImage = async (
   if (!nativeImageStorageEnabled) {
     return false
   }
+
+  forgetNativeImageSource(ownerUserId, cacheKey)
 
   const path = nativeImagePath(ownerUserId, cacheKey)
   const temporaryPath = `${path}.part`
@@ -769,8 +899,8 @@ const writePersistentImage = async (
     try {
       stored = await writeNativeImage(ownerUserId, url, cacheKey, blob)
       if (stored) {
-        const verified = await readNativeImage(ownerUserId, url, cacheKey)
-        stored = Boolean(verified && verified.size === blob.size)
+        const verified = await getCachedImageSource(ownerUserId, url, cacheKey)
+        stored = Boolean(verified)
         if (stored) {
           imageCacheBackends.set(ownerUserId, 'native-filesystem')
         }
@@ -1108,19 +1238,33 @@ export const runImageCacheSelfTest = async (
 
 const pumpImageQueue = () => {
   while (activeImageRequests < imageRequestConcurrency && imageQueue.length > 0) {
+    imageQueue.sort((left, right) => (
+      right.priority - left.priority || left.sequence - right.sequence
+    ))
     const item = imageQueue.shift()
     if (!item) {
       return
     }
 
     activeImageRequests += 1
+    item.started = true
+    const startedAt = performance.now()
+    totalImageQueueWaitMs += Math.max(0, startedAt - item.queuedAt)
     void item.task().then(
       (blob) => {
+        const loadMs = Math.max(0, performance.now() - startedAt)
+        completedImageLoads += 1
+        totalImageLoadMs += loadMs
+        lastImageLoadMs = loadMs
         item.resolve(blob)
         activeImageRequests -= 1
         pumpImageQueue()
       },
       (error: unknown) => {
+        const loadMs = Math.max(0, performance.now() - startedAt)
+        completedImageLoads += 1
+        totalImageLoadMs += loadMs
+        lastImageLoadMs = loadMs
         item.reject(error)
         activeImageRequests -= 1
         pumpImageQueue()
@@ -1129,42 +1273,86 @@ const pumpImageQueue = () => {
   }
 }
 
-const enqueueImageRequest = (key: string, task: () => Promise<Blob>) => {
+const updateQueuedImagePriority = (key: string, priority: ImageLoadPriority) => {
+  const existing = inFlightImages.get(key)
+  if (!existing || existing.item.started) {
+    return
+  }
+
+  existing.item.priority = Math.max(existing.item.priority, imagePriorityValue[priority])
+}
+
+const cancelUnobservedImageRequest = (record: ImageRequestRecord) => {
+  if (record.item.started || record.managedConsumers > 0 || record.unmanagedConsumer) {
+    return
+  }
+
+  const queueIndex = imageQueue.indexOf(record.item)
+  if (queueIndex >= 0) {
+    imageQueue.splice(queueIndex, 1)
+  }
+  record.item.reject(new DOMException('Image request was cancelled.', 'AbortError'))
+}
+
+const enqueueImageRequest = (
+  key: string,
+  task: () => Promise<Blob>,
+  priority: ImageLoadPriority,
+  managed: boolean,
+) => {
   const existing = inFlightImages.get(key)
   if (existing) {
+    existing.managedConsumers += managed ? 1 : 0
+    existing.unmanagedConsumer ||= !managed
+    updateQueuedImagePriority(key, priority)
     return existing
   }
 
+  let item: ImageQueueItem
+
   const promise = new Promise<Blob>((resolve, reject) => {
-    imageQueue.push({ reject, resolve, task })
+    item = {
+      key,
+      priority: imagePriorityValue[priority],
+      sequence: imageRequestSequence,
+      queuedAt: performance.now(),
+      started: false,
+      reject,
+      resolve,
+      task,
+    }
+    imageRequestSequence += 1
+    imageQueue.push(item)
     pumpImageQueue()
   })
 
-  inFlightImages.set(key, promise)
+  const record: ImageRequestRecord = {
+    item: item!,
+    managedConsumers: managed ? 1 : 0,
+    promise,
+    unmanagedConsumer: !managed,
+  }
+  inFlightImages.set(key, record)
   void promise.then(
     () => inFlightImages.delete(key),
     () => inFlightImages.delete(key),
   )
 
-  return promise
+  return record
 }
 
-export const loadCachedImage = (
+const createCachedImageTask = (
   ownerUserId: string,
   url: string,
   fetcher?: () => Promise<Response>,
   cacheKey = url,
 ) => {
-  const key = memoryKey(ownerUserId, cacheKey)
-  const memoryImage = readMemoryImage(key, url, !fetcher)
-  if (memoryImage) {
-    return Promise.resolve(memoryImage)
-  }
-
-  return enqueueImageRequest(key, async () => {
+  return async () => {
+    const key = memoryKey(ownerUserId, cacheKey)
     const generation = ownerGeneration(ownerUserId)
     const persistentImage = await readPersistentImage(ownerUserId, url, cacheKey, !fetcher)
     if (persistentImage) {
+      persistentImageHits += 1
       if (ownerGeneration(ownerUserId) === generation) {
         rememberImage(key, url, persistentImage)
       }
@@ -1175,6 +1363,7 @@ export const loadCachedImage = (
       throw new Error('Image is not cached on this device.')
     }
 
+    networkImageLoads += 1
     const response = await fetcher()
     if (!response.ok) {
       throw new Error(`Failed to load image (${response.status})`)
@@ -1186,8 +1375,80 @@ export const loadCachedImage = (
       await writePersistentImage(ownerUserId, url, cacheKey, blob)
     }
     return blob
-  })
+  }
 }
+
+export const loadCachedImage = (
+  ownerUserId: string,
+  url: string,
+  fetcher?: () => Promise<Response>,
+  cacheKey = url,
+) => {
+  const key = memoryKey(ownerUserId, cacheKey)
+  const memoryImage = readMemoryImage(key, url, !fetcher)
+  if (memoryImage) {
+    persistentImageHits += 1
+    return Promise.resolve(memoryImage)
+  }
+
+  return enqueueImageRequest(
+    key,
+    createCachedImageTask(ownerUserId, url, fetcher, cacheKey),
+    'background',
+    false,
+  ).promise
+}
+
+export const acquireCachedImage = (
+  ownerUserId: string,
+  url: string,
+  fetcher: (() => Promise<Response>) | undefined,
+  cacheKey = url,
+  priority: ImageLoadPriority = 'nearby',
+): CachedImageRequest => {
+  const key = memoryKey(ownerUserId, cacheKey)
+  const memoryImage = readMemoryImage(key, url, !fetcher)
+  if (memoryImage) {
+    persistentImageHits += 1
+    return {
+      promise: Promise.resolve(memoryImage),
+      release: () => undefined,
+      setPriority: () => undefined,
+    }
+  }
+
+  const record = enqueueImageRequest(
+    key,
+    createCachedImageTask(ownerUserId, url, fetcher, cacheKey),
+    priority,
+    true,
+  )
+  let released = false
+
+  return {
+    promise: record.promise,
+    release: () => {
+      if (released) {
+        return
+      }
+      released = true
+      record.managedConsumers = Math.max(0, record.managedConsumers - 1)
+      cancelUnobservedImageRequest(record)
+    },
+    setPriority: (nextPriority) => updateQueuedImagePriority(key, nextPriority),
+  }
+}
+
+export const getImageLoadPerformance = (): ImageLoadPerformance => ({
+  activeRequests: activeImageRequests,
+  averageLoadMs: completedImageLoads ? totalImageLoadMs / completedImageLoads : 0,
+  averageQueueWaitMs: completedImageLoads ? totalImageQueueWaitMs / completedImageLoads : 0,
+  cacheHits: persistentImageHits,
+  completedLoads: completedImageLoads,
+  lastLoadMs: lastImageLoadMs,
+  networkLoads: networkImageLoads,
+  queuedRequests: imageQueue.length,
+})
 
 export const clearImageCache = async (ownerUserId?: string) => {
   const storage = cacheStorage()
@@ -1199,6 +1460,12 @@ export const clearImageCache = async (ownerUserId?: string) => {
         memoryImageBytes -= image.blob.size
       }
       memoryImages.delete(key)
+    }
+  }
+
+  for (const key of [...nativeImageSources.keys()]) {
+    if (!ownerUserId || key.startsWith(`${encodeURIComponent(ownerUserId)}:`)) {
+      nativeImageSources.delete(key)
     }
   }
 

@@ -2,6 +2,7 @@ import {
   Component,
   startTransition,
   lazy,
+  memo,
   Suspense,
   useCallback,
   useDeferredValue,
@@ -121,11 +122,17 @@ import { useAuthenticatedResourceUrl } from './authenticatedResource'
 import {
   clearImageCache,
   getImageCacheSummary,
+  getImageLoadPerformance,
   imageCacheChangedEvent,
   runImageCacheSelfTest,
   type ImageCacheSummary,
   type ImageCacheSelfTestResult,
 } from './imageCache'
+import {
+  completeRoutePerformanceMeasurement,
+  getRoutePerformanceSummary,
+  startRoutePerformanceMeasurement,
+} from './performanceMetrics'
 import {
   appRoutePath,
   categoryForRoute,
@@ -649,6 +656,11 @@ const ui = {
     coverStorage: 'Cover images stored',
     coverStorageHelp: 'Covers that appeared on this device are kept locally for offline browsing.',
     coverStorageBackend: (backend: string) => `Cover storage backend: ${backend}.`,
+    coverPerformance: 'Cover loading',
+    routePerformance: 'Page switching',
+    performanceNotMeasured: 'Not measured yet',
+    performanceMilliseconds: (last: number, average: number) => `${Math.round(last)} ms last · ${Math.round(average)} ms average`,
+    coverQueueStatus: (active: number, queued: number) => `${active} active · ${queued} queued`,
     testCoverStorage: 'Test cover storage',
     testCoverStorageBusy: 'Testing cover storage...',
     testCoverStoragePassed: (backend: string, bytes: number) =>
@@ -952,6 +964,11 @@ const ui = {
     coverStorage: 'Gespeicherte Titelbilder',
     coverStorageHelp: 'Titelbilder, die auf diesem Gerät angezeigt wurden, bleiben zum Offline-Durchsuchen lokal gespeichert.',
     coverStorageBackend: (backend: string) => `Speicherort für Titelbilder: ${backend}.`,
+    coverPerformance: 'Titelbilder laden',
+    routePerformance: 'Seitenwechsel',
+    performanceNotMeasured: 'Noch nicht gemessen',
+    performanceMilliseconds: (last: number, average: number) => `${Math.round(last)} ms zuletzt · ${Math.round(average)} ms im Schnitt`,
+    coverQueueStatus: (active: number, queued: number) => `${active} aktiv · ${queued} wartend`,
     testCoverStorage: 'Titelbildspeicher testen',
     testCoverStorageBusy: 'Titelbildspeicher wird getestet...',
     testCoverStoragePassed: (backend: string, bytes: number) =>
@@ -1837,6 +1854,121 @@ const findEntrySelection = (
   return preferredVariant ? { entry: firstEntry, variant: preferredVariant } : null
 }
 
+type SeriesPosterProps = {
+  authenticated: boolean
+  categoryName: string
+  compact?: boolean
+  offlineMode: boolean
+  ownerUserId?: string | null
+  series: SeriesSummary
+  showCover?: boolean
+}
+
+const SeriesPoster = memo(function SeriesPoster({
+  authenticated,
+  categoryName,
+  compact = false,
+  offlineMode,
+  ownerUserId,
+  series,
+  showCover = authenticated,
+}: SeriesPosterProps) {
+  const hasCover = showCover && Boolean(series.coverUrl)
+  const displayTitle = getSeriesDisplayTitle(series)
+
+  return (
+    <div className={`poster ${compact ? 'poster--compact' : ''} ${hasCover ? 'poster--covered' : ''}`}>
+      {hasCover && (
+        <AuthenticatedResourceImage
+          alt=""
+          cacheKey={`cover:${series.id}`}
+          className="poster__image"
+          decoding="async"
+          loading={compact ? 'eager' : 'lazy'}
+          onError={(event) => {
+            event.currentTarget.style.display = 'none'
+          }}
+          offlineOnly={offlineMode}
+          ownerUserId={ownerUserId}
+          sourceUrl={series.coverUrl || ''}
+        />
+      )}
+      <span className="poster__badge">{categoryName}</span>
+      <div className="poster__spark" />
+      <div className="poster__copy">
+        <span>{series.year || series.format}</span>
+        <strong>{series.titleShort.trim() || displayTitle}</strong>
+      </div>
+    </div>
+  )
+})
+
+type LibrarySeriesCardProps = {
+  categoryName: string
+  downloadsReadyLabel: string
+  language: Language
+  navigate: RouteLinkProps['navigate']
+  offlineAvailable: boolean
+  offlineMode: boolean
+  offlineOnlyLabel: string
+  ownerUserId?: string | null
+  series: SeriesSummary
+}
+
+const LibrarySeriesCard = memo(function LibrarySeriesCard({
+  categoryName,
+  downloadsReadyLabel,
+  language,
+  navigate,
+  offlineAvailable,
+  offlineMode,
+  offlineOnlyLabel,
+  ownerUserId,
+  series,
+}: LibrarySeriesCardProps) {
+  return (
+    <RouteLink
+      className="series-card"
+      navigate={navigate}
+      route={{
+        name: 'series',
+        category: categoryRouteId(series.category),
+        seriesId: series.id,
+        tab: 'entries',
+        season: null,
+      }}
+    >
+      <SeriesPoster
+        authenticated
+        categoryName={categoryName}
+        offlineMode={offlineMode}
+        ownerUserId={ownerUserId}
+        series={series}
+      />
+      <div className="series-card__body">
+        <div className="series-card__topline">
+          <span className="section-kicker">{categoryName}</span>
+          <div className="chip-row">
+            {offlineMode && (
+              <span className="chip">
+                {offlineAvailable ? downloadsReadyLabel : offlineOnlyLabel}
+              </span>
+            )}
+            <span className="series-card__progress">{series.progressLabel}</span>
+          </div>
+        </div>
+        <h3 className="series-card__title">{getSeriesDisplayTitle(series)}</h3>
+        <p className="series-card__description">{series.description}</p>
+        <div className="meta-row series-card__meta">
+          <span>{series.year || series.format}</span>
+          <span>{formatCountLabel(series.category, series.stats.fileCount, language)}</span>
+          <span>{getSeriesSourceText(series)}</span>
+        </div>
+      </div>
+    </RouteLink>
+  )
+})
+
 function App() {
   const [currentRoute, setCurrentRoute] = useState<AppRoute>(routeForLocation)
   const currentView: ViewId = routeView(currentRoute)
@@ -1893,9 +2025,6 @@ function App() {
   )
   const [openBookmarkMenuKey, setOpenBookmarkMenuKey] = useState<string | null>(null)
   const [removingBookmarkSeriesId, setRemovingBookmarkSeriesId] = useState<string | null>(null)
-  const [bookTopicFilters, setBookTopicFilters] = useState<string[]>(
-    currentRoute.name === 'library' ? currentRoute.topics : [],
-  )
   const [filterSheetOpen, setFilterSheetOpen] = useState(false)
   const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(
     isSeriesRoute(currentRoute) ? currentRoute.seriesId : null,
@@ -1928,10 +2057,6 @@ function App() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchResults, setSearchResults] = useState<SeriesSummary[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
-  const [topbarHidden, setTopbarHidden] = useState(false)
-  const [discoverSort, setDiscoverSort] = useState<'title' | 'year'>(
-    currentRoute.name === 'library' ? currentRoute.sort : 'title',
-  )
   const [discoverViewMode, setDiscoverViewMode] = useState<'grid' | 'list'>('grid')
   const [seriesCache, setSeriesCache] = useState<Record<string, SeriesDetail>>({})
   const [seriesError, setSeriesError] = useState<string | null>(null)
@@ -1974,7 +2099,11 @@ function App() {
   })
   const searchInputRef = useRef<HTMLInputElement | null>(null)
   const mobileSearchInputRef = useRef<HTMLInputElement | null>(null)
-  const lastScrollYRef = useRef(0)
+  const lastLibraryRouteRef = useRef<Extract<AppRoute, { name: 'library' }>>(
+    currentRoute.name === 'library'
+      ? currentRoute
+      : { name: 'library', category: categoryRouteId(initialCategory), topics: [], sort: 'title' },
+  )
   const historyIndexRef = useRef(0)
   const routeScrollPositionsRef = useRef(new Map<number, [number, number]>())
   const routeTransitionRef = useRef<RouteTransition>({
@@ -1995,6 +2124,22 @@ function App() {
   const scanStreamWasActiveRef = useRef(false)
   const cacheWriteTimerRef = useRef<number | null>(null)
   const [readerChromeVisible, setReaderChromeVisible] = useState(true)
+
+  const activeLibraryRoute = currentRoute.name === 'library'
+    ? currentRoute
+    : lastLibraryRouteRef.current
+  const libraryCategory = activeLibraryRoute.category
+  const bookTopicFilters = activeLibraryRoute.topics
+  const discoverSort = activeLibraryRoute.sort
+  const navigationCategory = categoryForRoute(currentRoute) ?? (
+    currentRoute.name === 'offlineReader' ? currentCategory : libraryCategory
+  )
+
+  useEffect(() => {
+    if (currentRoute.name === 'library') {
+      lastLibraryRouteRef.current = currentRoute
+    }
+  }, [currentRoute])
 
   const navigateRoute = useCallback(
     (nextRoute: AppRoute, options: RouteNavigationOptions = {}) => {
@@ -2054,6 +2199,7 @@ function App() {
         preserveScroll: Boolean(options.preserveScroll),
         restoreScroll: null,
       }
+      startRoutePerformanceMeasurement()
       startTransition(() => setCurrentRoute(nextRoute))
     },
     [],
@@ -2103,6 +2249,7 @@ function App() {
           nextState.orbitalScroll ??
           [0, 0],
       }
+      startRoutePerformanceMeasurement()
       startTransition(() => setCurrentRoute(routeForLocation()))
     }
 
@@ -2492,9 +2639,6 @@ function App() {
         setOfflineReaderDownloadId(null)
         return
       case 'library':
-        setCurrentCategory(currentRoute.category)
-        setBookTopicFilters(currentRoute.category === 'books' ? currentRoute.topics : [])
-        setDiscoverSort(currentRoute.sort)
         setSearchQuery('')
         setOfflineReaderDownloadId(null)
         return
@@ -2689,7 +2833,7 @@ function App() {
     (metadataReviewItems[0]
       ? library.find((series) => series.id === metadataReviewItems[0].id) ?? null
       : null)
-  const creatorProfiles = Object.values(
+  const creatorProfiles = useMemo(() => Object.values(
     readerLibraryForDisplay.reduce<Record<string, CreatorProfile>>((profiles, series) => {
       if (!series.sourceName) {
         return profiles
@@ -2730,7 +2874,7 @@ function App() {
       ...profile,
       series: [...profile.series].sort((left, right) => left.title.localeCompare(right.title)),
     }))
-    .sort((left, right) => left.name.localeCompare(right.name))
+    .sort((left, right) => left.name.localeCompare(right.name)), [readerLibraryForDisplay])
   const selectedCreatorProfile =
     (selectedCreatorKey
       ? creatorProfiles.find((profile) => profile.key === selectedCreatorKey) ?? null
@@ -2742,11 +2886,11 @@ function App() {
   const relatedCreatorSeries = selectedSeriesSummary
     ? (selectedSeriesCreatorProfile?.series.filter((series) => series.id !== selectedSeriesSummary.id) ?? []).slice(0, 6)
     : []
-  const bookTopicOptions = [...new Set(
+  const bookTopicOptions = useMemo(() => [...new Set(
     readerLibraryForDisplay
       .filter((series) => series.category === 'books')
       .flatMap((series) => getSeriesTopicTags(series)),
-  )].sort((left, right) => left.localeCompare(right))
+  )].sort((left, right) => left.localeCompare(right)), [readerLibraryForDisplay])
 
   const toBootstrapState = (nextState: AppState | BootstrapState): BootstrapState => ({
     appName: nextState.appName,
@@ -3378,43 +3522,6 @@ function App() {
   }, [browseCategory])
 
   useEffect(() => {
-    if (!authenticated || currentView === 'reader' || searchOpen || filterSheetOpen) {
-      setTopbarHidden(false)
-      return
-    }
-
-    const mobileQuery = window.matchMedia('(max-width: 900px)')
-
-    const syncTopbar = () => {
-      if (!mobileQuery.matches) {
-        setTopbarHidden(false)
-        return
-      }
-
-      const nextScrollY = window.scrollY
-      const delta = nextScrollY - lastScrollYRef.current
-
-      if (nextScrollY < 32 || delta < -8) {
-        setTopbarHidden(false)
-      } else if (nextScrollY > 120 && delta > 8) {
-        setTopbarHidden(true)
-      }
-
-      lastScrollYRef.current = nextScrollY
-    }
-
-    lastScrollYRef.current = window.scrollY
-    window.addEventListener('scroll', syncTopbar, { passive: true })
-    mobileQuery.addEventListener('change', syncTopbar)
-    syncTopbar()
-
-    return () => {
-      window.removeEventListener('scroll', syncTopbar)
-      mobileQuery.removeEventListener('change', syncTopbar)
-    }
-  }, [authenticated, currentView, filterSheetOpen, searchOpen])
-
-  useEffect(() => {
     if (!appState?.sourceRoots.length) {
       setSelectedRootId('')
       setBrowsePath('')
@@ -3711,12 +3818,12 @@ function App() {
 
     const transition = routeTransitionRef.current
     if (transition.preserveScroll) {
-      return
+      const measurementFrame = window.requestAnimationFrame(completeRoutePerformanceMeasurement)
+      return () => window.cancelAnimationFrame(measurementFrame)
     }
 
     let frame = 0
-    let correctionFrame = 0
-    let timeout = 0
+    let userInteracted = false
     const targetScroll = transition.restoreScroll ?? [0, 0]
 
     const applyRoutePosition = () => {
@@ -3728,19 +3835,29 @@ function App() {
     }
 
     applyRoutePosition()
+    const markUserInteraction = () => {
+      userInteracted = true
+    }
+    window.addEventListener('wheel', markUserInteraction, { passive: true, once: true })
+    window.addEventListener('touchstart', markUserInteraction, { passive: true, once: true })
+    window.addEventListener('pointerdown', markUserInteraction, { passive: true, once: true })
+    window.addEventListener('keydown', markUserInteraction, { once: true })
     frame = window.requestAnimationFrame(() => {
-      applyRoutePosition()
+      if (!userInteracted) {
+        applyRoutePosition()
+      }
       if (transition.focusMain) {
         mainShellRef.current?.focus({ preventScroll: true })
       }
-      correctionFrame = window.requestAnimationFrame(applyRoutePosition)
-      timeout = window.setTimeout(applyRoutePosition, 120)
+      completeRoutePerformanceMeasurement()
     })
 
     return () => {
       window.cancelAnimationFrame(frame)
-      window.cancelAnimationFrame(correctionFrame)
-      window.clearTimeout(timeout)
+      window.removeEventListener('wheel', markUserInteraction)
+      window.removeEventListener('touchstart', markUserInteraction)
+      window.removeEventListener('pointerdown', markUserInteraction)
+      window.removeEventListener('keydown', markUserInteraction)
     }
   }, [authenticated, currentRoutePath])
 
@@ -5210,16 +5327,9 @@ function App() {
         : {
             name: 'library',
             category: categoryRouteId(currentCategory),
-            topics: bookTopicFilters,
-            sort: discoverSort,
+            topics: [],
+            sort: 'title',
           }
-
-    if (next.topics) {
-      setBookTopicFilters(next.topics)
-    }
-    if (next.sort) {
-      setDiscoverSort(next.sort)
-    }
 
     navigateRoute(
       { ...route, ...next },
@@ -5281,35 +5391,16 @@ function App() {
   }
 
   const renderPoster = (series: SeriesSummary, compact = false, showCover = authenticated) => {
-    const hasCover = showCover && Boolean(series.coverUrl)
-    const displayTitle = getSeriesDisplayTitle(series)
-
     return (
-      <div
-        className={`poster ${compact ? 'poster--compact' : ''} ${hasCover ? 'poster--covered' : ''}`}
-      >
-        {hasCover && (
-          <AuthenticatedResourceImage
-            alt=""
-            cacheKey={`cover:${series.id}`}
-            className="poster__image"
-            decoding="async"
-            loading={offlineMode || compact ? 'eager' : 'lazy'}
-            onError={(event) => {
-              event.currentTarget.style.display = 'none'
-            }}
-            offlineOnly={offlineMode}
-            ownerUserId={sessionUser?.id}
-            sourceUrl={series.coverUrl || ''}
-          />
-        )}
-        <span className="poster__badge">{categoryLabel(series.category)}</span>
-        <div className="poster__spark" />
-        <div className="poster__copy">
-          <span>{series.year || series.format}</span>
-          <strong>{series.titleShort.trim() || displayTitle}</strong>
-        </div>
-      </div>
+      <SeriesPoster
+        authenticated={authenticated}
+        categoryName={categoryLabel(series.category)}
+        compact={compact}
+        offlineMode={offlineMode}
+        ownerUserId={sessionUser?.id}
+        series={series}
+        showCover={showCover}
+      />
     )
   }
 
@@ -5338,39 +5429,21 @@ function App() {
   })
 
   const renderSeriesCard = (series: SeriesSummary) => {
-    const displayTitle = getSeriesDisplayTitle(series)
-
     return (
-      <RouteLink
-        className="series-card"
+      <LibrarySeriesCard
+        categoryName={categoryLabel(series.category)}
+        downloadsReadyLabel={text.downloadsReady}
         key={series.id}
         navigate={navigateRoute}
-        route={seriesRoute(series)}
-      >
-        {renderPoster(series)}
-        <div className="series-card__body">
-          <div className="series-card__topline">
-            <span className="section-kicker">{categoryLabel(series.category)}</span>
-            <div className="chip-row">
-              {offlineMode && (
-                <span className="chip">
-                  {getReadyOfflineDownloadForSeries(series, seriesCache[series.id] ?? null)
-                    ? text.downloadsReady
-                    : text.offlineOnly}
-                </span>
-              )}
-              <span className="series-card__progress">{series.progressLabel}</span>
-            </div>
-          </div>
-          <h3 className="series-card__title">{displayTitle}</h3>
-          <p className="series-card__description">{series.description}</p>
-          <div className="meta-row series-card__meta">
-            <span>{series.year || series.format}</span>
-            <span>{formatCountLabel(series.category, series.stats.fileCount, language)}</span>
-            <span>{getSeriesSourceText(series)}</span>
-          </div>
-        </div>
-      </RouteLink>
+        language={language}
+        offlineAvailable={Boolean(
+          offlineMode && getReadyOfflineDownloadForSeries(series, seriesCache[series.id] ?? null),
+        )}
+        offlineMode={offlineMode}
+        offlineOnlyLabel={text.offlineOnly}
+        ownerUserId={sessionUser?.id}
+        series={series}
+      />
     )
   }
 
@@ -5417,39 +5490,43 @@ function App() {
       </>
     ) : null
 
-  const filteredCategoryLibrary = readerLibraryForDisplay.filter((series) => {
-    if (series.category !== currentCategory) {
-      return false
-    }
-
-    if (currentCategory === 'books' && bookTopicFilters.length > 0) {
-      const seriesTopics = getSeriesTopicTags(series)
-
-      return bookTopicFilters.some((topic) => seriesTopics.includes(topic))
-    }
-
-    return true
-  })
-  const sortedCategoryLibrary = [...filteredCategoryLibrary].sort((left, right) => {
-    if (discoverSort === 'year') {
-      const leftYear = left.year ?? Number.MAX_SAFE_INTEGER
-      const rightYear = right.year ?? Number.MAX_SAFE_INTEGER
-
-      if (leftYear !== rightYear) {
-        return leftYear - rightYear
+  const sortedCategoryLibrary = useMemo(() => readerLibraryForDisplay
+    .filter((series) => {
+      if (series.category !== libraryCategory) {
+        return false
       }
-    }
 
-    return left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' })
-  })
-  const visibleSearchResults = searchResults.filter((series) => isReaderCategory(series.category))
+      if (libraryCategory === 'books' && bookTopicFilters.length > 0) {
+        const seriesTopics = getSeriesTopicTags(series)
+        return bookTopicFilters.some((topic) => seriesTopics.includes(topic))
+      }
+
+      return true
+    })
+    .sort((left, right) => {
+      if (discoverSort === 'year') {
+        const leftYear = left.year ?? Number.MAX_SAFE_INTEGER
+        const rightYear = right.year ?? Number.MAX_SAFE_INTEGER
+
+        if (leftYear !== rightYear) {
+          return leftYear - rightYear
+        }
+      }
+
+      return left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' })
+    }), [bookTopicFilters, discoverSort, libraryCategory, readerLibraryForDisplay])
+  const visibleSearchResults = useMemo(
+    () => searchResults.filter((series) => isReaderCategory(series.category)),
+    [searchResults],
+  )
   const libraryResults = deferredSearch !== '' ? visibleSearchResults : sortedCategoryLibrary
-  const scopedSearchLibrary =
+  const scopedSearchLibrary = useMemo(() => (
     searchScope === 'all'
       ? []
       : readerLibraryForDisplay
           .filter((series) => series.category === searchScope)
           .sort((left, right) => left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' }))
+  ), [readerLibraryForDisplay, searchScope])
 
   const searchPreview = visibleSearchResults.slice(0, currentView === 'search' ? 50 : 10)
   const searchPageBrowseResults = deferredSearch === '' ? scopedSearchLibrary : []
@@ -5617,8 +5694,8 @@ function App() {
       : currentView === 'downloads'
         ? text.downloadsTitle
       : currentView === 'library'
-        ? `${text.libraryTitle} / ${text.scopes[currentCategory]}${
-            currentCategory === 'books' && bookTopicFilters.length > 0 ? ` / ${bookTopicFilters.join(', ')}` : ''
+        ? `${text.libraryTitle} / ${text.scopes[libraryCategory]}${
+            libraryCategory === 'books' && bookTopicFilters.length > 0 ? ` / ${bookTopicFilters.join(', ')}` : ''
           }`
         : currentView === 'search'
           ? text.searchTitle
@@ -5920,6 +5997,8 @@ function App() {
   }
 
   const renderDownloads = () => {
+    const imagePerformance = getImageLoadPerformance()
+    const routePerformance = getRoutePerformanceSummary()
     const filteredDownloads = offlineDownloads.filter((record) => {
       if (offlineFilter === 'active') {
         return isOfflineDownloadActive(record)
@@ -5988,6 +6067,31 @@ function App() {
               <span>{text.browserStorageQuota}</span>
               <strong>{formatBytes(offlineStorageSummary?.browserQuotaBytes, language)}</strong>
             </div>
+            <div className="downloads-storage-card__row">
+              <span>{text.coverPerformance}</span>
+              <strong>
+                {imagePerformance.completedLoads
+                  ? text.performanceMilliseconds(
+                      imagePerformance.lastLoadMs,
+                      imagePerformance.averageLoadMs + imagePerformance.averageQueueWaitMs,
+                    )
+                  : text.performanceNotMeasured}
+              </strong>
+            </div>
+            <div className="downloads-storage-card__row">
+              <span>{text.routePerformance}</span>
+              <strong>
+                {routePerformance.completedTransitions
+                  ? text.performanceMilliseconds(
+                      routePerformance.lastTransitionMs,
+                      routePerformance.averageTransitionMs,
+                    )
+                  : text.performanceNotMeasured}
+              </strong>
+            </div>
+            <p className="helper-text">
+              {text.coverQueueStatus(imagePerformance.activeRequests, imagePerformance.queuedRequests)}
+            </p>
             <div className="downloads-storage-card__actions">
               <button
                 className="ghost-button ghost-button--small"
@@ -6476,7 +6580,7 @@ function App() {
           </h2>
         </div>
         <div className="chip-row discover-meta-row">
-          <span className="chip chip--accent">{text.scopes[currentCategory]}</span>
+          <span className="chip chip--accent">{text.scopes[libraryCategory]}</span>
           <span className="chip">
             {libraryResults.length} {text.searchCount}
           </span>
@@ -6518,7 +6622,7 @@ function App() {
             </button>
           </div>
         </div>
-        {currentCategory === 'books' && bookTopicOptions.length > 0 && deferredSearch === '' && (
+        {libraryCategory === 'books' && bookTopicOptions.length > 0 && deferredSearch === '' && (
           <div className="library-filter-summary">
             <button className="ghost-button" onClick={() => setFilterSheetOpen(true)} type="button">
               <AppIcon name="filter" />
@@ -6536,8 +6640,8 @@ function App() {
       <nav className="discover-tabs" aria-label={text.mobileNav.discover}>
         {readerCategoryOrder.map((category) => (
           <RouteLink
-            ariaCurrent={currentCategory === category ? 'page' : undefined}
-            className={`discover-tab ${currentCategory === category ? 'is-active' : ''}`}
+            ariaCurrent={libraryCategory === category ? 'page' : undefined}
+            className={`discover-tab ${libraryCategory === category ? 'is-active' : ''}`}
             key={category}
             navigate={navigateRoute}
             route={{
@@ -6552,7 +6656,7 @@ function App() {
         ))}
       </nav>
 
-      {currentCategory === 'books' && filterSheetOpen && (
+      {libraryCategory === 'books' && filterSheetOpen && (
         <div className="sheet-backdrop" role="presentation" onMouseDown={() => setFilterSheetOpen(false)}>
           <section
             aria-label={text.booksTopics}
@@ -8269,7 +8373,7 @@ function App() {
     <div className={`app-shell ${isNativeApp ? 'app-shell--native' : ''} ${currentView === 'reader' ? 'app-shell--reader' : ''}`}>
       <a className="skip-link" href="#main-content">{text.skipToContent}</a>
       {currentView !== 'reader' && (
-      <header className={`topbar ${topbarHidden ? 'topbar--hidden' : ''}`}>
+      <header className="topbar">
         <RouteLink
           className="brand-lockup"
           navigate={navigateRoute}
@@ -8390,7 +8494,7 @@ function App() {
                     ? currentView === 'bookmarks' ? 'page' : undefined
                     : item.id === 'downloads'
                       ? currentView === 'downloads' ? 'page' : undefined
-                      : ['library', 'series'].includes(currentView) && currentCategory === item.id
+                      : ['library', 'series'].includes(currentView) && navigationCategory === item.id
                         ? 'page'
                         : undefined
                 }
@@ -8403,7 +8507,7 @@ function App() {
                       ? currentView === 'downloads'
                         ? 'is-active'
                         : ''
-                    : ['library', 'series'].includes(currentView) && currentCategory === item.id
+                    : ['library', 'series'].includes(currentView) && navigationCategory === item.id
                       ? 'is-active'
                       : ''
                 }`}
@@ -8553,7 +8657,7 @@ function App() {
             onNavigate={() => setSearchOpen(false)}
             route={{
               name: 'library',
-              category: categoryRouteId(currentCategory),
+              category: categoryRouteId(navigationCategory),
               topics: [],
               sort: discoverSort,
             }}

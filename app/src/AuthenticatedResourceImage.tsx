@@ -20,32 +20,45 @@ export function AuthenticatedResourceImage({
   const imageRef = useRef<HTMLImageElement | null>(null)
   const shouldLoadImmediately = !isNativeApp || imageProps.loading === 'eager'
   const [nearViewport, setNearViewport] = useState(shouldLoadImmediately)
+  const [visible, setVisible] = useState(shouldLoadImmediately)
 
   useEffect(() => {
     if (shouldLoadImmediately) {
       setNearViewport(true)
+      setVisible(true)
       return
     }
 
     setNearViewport(false)
+    setVisible(false)
     const image = imageRef.current
     if (!image || typeof IntersectionObserver === 'undefined') {
       setNearViewport(true)
       return
     }
 
-    const observer = new IntersectionObserver(
+    const nearbyObserver = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) {
           setNearViewport(true)
-          observer.disconnect()
+          nearbyObserver.disconnect()
         }
       },
-      { rootMargin: '600px 0px' },
+      { rootMargin: '1400px 0px' },
     )
+    const visibleObserver = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setVisible(true)
+        visibleObserver.disconnect()
+      }
+    })
 
-    observer.observe(image)
-    return () => observer.disconnect()
+    nearbyObserver.observe(image)
+    visibleObserver.observe(image)
+    return () => {
+      nearbyObserver.disconnect()
+      visibleObserver.disconnect()
+    }
   }, [shouldLoadImmediately, sourceUrl])
 
   const { url } = useAuthenticatedResourceUrl(nearViewport ? sourceUrl : null, {
@@ -53,7 +66,15 @@ export function AuthenticatedResourceImage({
     cacheMode: 'image',
     offlineOnly,
     ownerUserId,
+    priority: visible ? 'visible' : 'nearby',
   })
 
-  return <img {...imageProps} ref={imageRef} src={url || undefined} />
+  return (
+    <img
+      {...imageProps}
+      loading={isNativeApp && nearViewport ? 'eager' : imageProps.loading}
+      ref={imageRef}
+      src={url || undefined}
+    />
+  )
 }

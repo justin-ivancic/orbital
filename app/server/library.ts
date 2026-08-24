@@ -2853,6 +2853,13 @@ const buildMediaVersionSuffix = (
   return version ? `?v=${encodeURIComponent(version)}` : ''
 }
 
+const buildCardCoverSuffix = (
+  media: { last_scan_at: string | null; metadata_refreshed_at?: string | null },
+) => {
+  const versionSuffix = buildMediaVersionSuffix(media)
+  return versionSuffix ? `${versionSuffix}&variant=card` : '?variant=card'
+}
+
 const mapSeriesRowToSummary = (
   series: SeriesRow,
   entryCount = series.file_count,
@@ -2870,7 +2877,7 @@ const mapSeriesRowToSummary = (
     progressLabel: buildProgressLabel(series.category, entryCount),
     description: series.description,
     folder: series.folder_path,
-    coverUrl: series.cover_path ? `/api/media/cover/${series.id}${mediaVersion}` : null,
+    coverUrl: series.cover_path ? `/api/media/cover/${series.id}${buildCardCoverSuffix(series)}` : null,
     bannerUrl: series.banner_path ? `/api/media/banner/${series.id}${mediaVersion}` : null,
     coverSource: series.cover_source,
     metadataSource: series.metadata_source,
@@ -2981,7 +2988,7 @@ const getMetadataQueue = (db: Database): MetadataQueueItem[] =>
     category: item.category,
     title: item.title,
     coverUrl: item.cover_path && fileExists(item.cover_path)
-      ? `/api/media/cover/${item.id}${buildMediaVersionSuffix(item)}`
+      ? `/api/media/cover/${item.id}${buildCardCoverSuffix(item)}`
       : null,
     coverSource: item.cover_source,
     metadataSource: item.metadata_source,

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  acquireCachedImage,
   clearImageCache,
   getImageCacheSummary,
   loadCachedImage,
@@ -133,6 +134,87 @@ test('limits simultaneous image requests', async () => {
 
   await Promise.all(requests)
   assert.ok(peakRequests <= 3)
+  await clearImageCache(ownerUserId)
+})
+
+test('loads visible covers before older nearby covers waiting in the queue', async () => {
+  const ownerUserId = 'image-cache-priority-user'
+  let releaseBlockers: (value?: void | PromiseLike<void>) => void = () => undefined
+  const blockersReleased = new Promise<void>((resolve) => {
+    releaseBlockers = resolve
+  })
+  const startOrder: string[] = []
+
+  const blockers = Array.from({ length: 3 }, (_, index) => loadCachedImage(
+    ownerUserId,
+    `https://example.test/api/media/cover/blocker-${index}`,
+    async () => {
+      await blockersReleased
+      return responseFor(`blocker-${index}`)
+    },
+  ))
+  const nearby = acquireCachedImage(
+    ownerUserId,
+    'https://example.test/api/media/cover/nearby',
+    async () => {
+      startOrder.push('nearby')
+      return responseFor('nearby')
+    },
+    'cover:nearby',
+    'nearby',
+  )
+  const visible = acquireCachedImage(
+    ownerUserId,
+    'https://example.test/api/media/cover/visible',
+    async () => {
+      startOrder.push('visible')
+      return responseFor('visible')
+    },
+    'cover:visible',
+    'visible',
+  )
+
+  releaseBlockers()
+  await Promise.all([...blockers, nearby.promise, visible.promise])
+
+  assert.deepEqual(startOrder, ['visible', 'nearby'])
+  nearby.release()
+  visible.release()
+  await clearImageCache(ownerUserId)
+})
+
+test('drops an unobserved cover request before it starts', async () => {
+  const ownerUserId = 'image-cache-cancel-user'
+  let releaseBlockers: (value?: void | PromiseLike<void>) => void = () => undefined
+  const blockersReleased = new Promise<void>((resolve) => {
+    releaseBlockers = resolve
+  })
+  let cancelledFetcherRan = false
+
+  const blockers = Array.from({ length: 3 }, (_, index) => loadCachedImage(
+    ownerUserId,
+    `https://example.test/api/media/cover/cancel-blocker-${index}`,
+    async () => {
+      await blockersReleased
+      return responseFor(`blocker-${index}`)
+    },
+  ))
+  const cancelled = acquireCachedImage(
+    ownerUserId,
+    'https://example.test/api/media/cover/cancelled',
+    async () => {
+      cancelledFetcherRan = true
+      return responseFor('cancelled')
+    },
+    'cover:cancelled',
+  )
+
+  cancelled.release()
+  await assert.rejects(cancelled.promise, { name: 'AbortError' })
+  releaseBlockers()
+  await Promise.all(blockers)
+
+  assert.equal(cancelledFetcherRan, false)
   await clearImageCache(ownerUserId)
 })
 

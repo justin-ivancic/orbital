@@ -11,6 +11,7 @@ import {
   loadCbzArchiveManifest,
   sendCbzPageImage,
 } from './cbzArchive'
+import { resolveCardCoverPath } from './coverThumbnails'
 import { getEntryEmbeddedMediaTracks, renderEmbeddedSubtitleTrack, streamEmbeddedAudioTrack } from './embeddedMedia'
 import { openDatabase } from './database'
 import {
@@ -1439,9 +1440,12 @@ app.get('/api/offline/manifests/:manifestId/resources/:resourceKey', requireAuth
 app.get('/api/media/cover/:seriesId', requireAuth, async (request, response) => {
   try {
     const cover = resolveSeriesCoverPath(db, request.params.seriesId)
+    const coverPath = request.query.variant === 'card'
+      ? await resolveCardCoverPath(coversDirectory, request.params.seriesId, cover.filePath)
+      : cover.filePath
     setPrivateVersionedCacheHeaders(response, request.query.v)
-    response.setHeader('Content-Type', cover.mimeType)
-    await sendMediaFile(request, response, cover.filePath)
+    response.setHeader('Content-Type', coverPath === cover.filePath ? cover.mimeType : 'image/webp')
+    await sendMediaFile(request, response, coverPath)
   } catch (error) {
     sendError(response, error, 404)
   }

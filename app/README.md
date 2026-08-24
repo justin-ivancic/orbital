@@ -76,7 +76,11 @@ to `https://library.justinivancic.com`; set `VITE_ORBITAL_API_BASE_URL` before
 building to target another server. Android cover storage uses the app-private
 `Directory.Data` filesystem as its canonical store, so covers remain available
 after the app process is closed. IndexedDB is retained only as a compatibility
-fallback for older covers.
+fallback for older covers. The Android UI renders verified cached covers through
+direct app-private file URLs instead of rebuilding base64 images in JavaScript.
+The server also creates bounded card thumbnails on first use, and the Downloads
+page reports recent cover-loading and page-switching timings for device-level
+performance checks.
 
 To rebuild and publish the APK that the hosted Profile page serves, run:
 

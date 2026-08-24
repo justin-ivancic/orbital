@@ -6142,6 +6142,8 @@ button[aria-label] {
   padding: 0;
   border: 0;
   background: transparent;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 360px;
 }
 
 .series-grid--shelf .series-card__body {
@@ -6192,6 +6194,8 @@ button[aria-label] {
 
 .series-grid:not(.series-grid--shelf) .series-card {
   padding: 16px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 180px;
 }
 
 .poster {

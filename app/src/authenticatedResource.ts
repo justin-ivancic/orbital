@@ -1,6 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
-import { loadCachedImage } from './imageCache'
+import {
+  acquireCachedImage,
+  getCachedImageSource,
+  type CachedImageRequest,
+  type ImageLoadPriority,
+} from './imageCache'
 import { isNativeApp, resolveApiUrl } from './platform'
 
 type AuthenticatedResourceState = {
@@ -33,6 +38,7 @@ export type AuthenticatedResourceOptions = {
   cacheMode?: 'image'
   ownerUserId?: string | null
   offlineOnly?: boolean
+  priority?: ImageLoadPriority
 }
 
 export const fetchAuthenticatedResource = async (input: string) => {
@@ -63,6 +69,14 @@ export const useAuthenticatedResourceUrl = (
     loading: needsAuthentication,
     error: null,
   }))
+  const imageRequestRef = useRef<CachedImageRequest | null>(null)
+  const priorityRef = useRef<ImageLoadPriority>(options.priority ?? 'nearby')
+
+  useEffect(() => {
+    const priority = options.priority ?? 'nearby'
+    priorityRef.current = priority
+    imageRequestRef.current?.setPriority(priority)
+  }, [options.priority])
 
   useEffect(() => {
     if (!resolvedInput) {
@@ -77,32 +91,67 @@ export const useAuthenticatedResourceUrl = (
 
     let disposed = false
     let objectUrl: string | null = null
+    let imageRequest: CachedImageRequest | null = null
 
     setState({ url: null, loading: true, error: null })
 
-    const loadBlob = shouldCacheImage
-      ? loadCachedImage(
-          options.ownerUserId || '',
+    const loadResource = async () => {
+      if (shouldCacheImage) {
+        const ownerUserId = options.ownerUserId || ''
+        const cacheKey = options.cacheKey || resolvedInput
+        const cachedSource = await getCachedImageSource(
+          ownerUserId,
+          resolvedInput,
+          cacheKey,
+          Boolean(options.offlineOnly),
+        )
+        if (cachedSource) {
+          return cachedSource
+        }
+
+        imageRequest = acquireCachedImage(
+          ownerUserId,
           resolvedInput,
           options.offlineOnly ? undefined : () => fetchAuthenticatedResource(resolvedInput),
-          options.cacheKey || resolvedInput,
+          cacheKey,
+          priorityRef.current,
         )
-      : fetchAuthenticatedResource(resolvedInput).then(async (response) => {
-          if (!response.ok) {
-            throw new Error(`Failed to load resource (${response.status})`)
-          }
-
-          return response.blob()
-        })
-
-    void loadBlob
-      .then((blob) => {
-        if (disposed) {
-          return
+        imageRequestRef.current = imageRequest
+        const blob = await imageRequest.promise
+        const storedSource = await getCachedImageSource(
+          ownerUserId,
+          resolvedInput,
+          cacheKey,
+          Boolean(options.offlineOnly),
+        )
+        if (storedSource) {
+          return storedSource
         }
 
         objectUrl = URL.createObjectURL(blob)
-        setState({ url: objectUrl, loading: false, error: null })
+        return objectUrl
+      }
+
+      const response = await fetchAuthenticatedResource(resolvedInput)
+      if (!response.ok) {
+        throw new Error(`Failed to load resource (${response.status})`)
+      }
+
+      objectUrl = URL.createObjectURL(await response.blob())
+      return objectUrl
+    }
+
+    void loadResource()
+      .then((resourceUrl) => {
+        if (disposed) {
+          if (objectUrl === resourceUrl) {
+            URL.revokeObjectURL(resourceUrl)
+            objectUrl = null
+          }
+          return
+        }
+
+        setState({ url: resourceUrl, loading: false, error: null })
       })
       .catch((loadError) => {
         if (disposed) {
@@ -118,6 +167,10 @@ export const useAuthenticatedResourceUrl = (
 
     return () => {
       disposed = true
+      imageRequest?.release()
+      if (imageRequestRef.current === imageRequest) {
+        imageRequestRef.current = null
+      }
       if (objectUrl) {
         URL.revokeObjectURL(objectUrl)
       }

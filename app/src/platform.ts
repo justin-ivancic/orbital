@@ -1,8 +1,8 @@
 import { Capacitor } from '@capacitor/core'
 
 export const isNativeApp = Capacitor.isNativePlatform()
-export const androidAppVersionCode = 16
-export const androidAppVersionName = '1.15'
+export const androidAppVersionCode = 17
+export const androidAppVersionName = '1.16'
 
 const configuredApiBaseUrl = String(import.meta.env.VITE_ORBITAL_API_BASE_URL || '').trim()
 const defaultApiBaseUrl = 'https://library.justinivancic.com'
