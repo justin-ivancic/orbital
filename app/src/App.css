@@ -6214,6 +6214,11 @@ button[aria-label] {
   contain-intrinsic-size: auto 180px;
 }
 
+.app-shell--native .series-card {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+}
+
 .poster {
   overflow: hidden;
 }

@@ -88,6 +88,10 @@ are copied locally with the native filesystem, interrupted replacements remain
 resumable, and the previous complete package is kept until its replacement is
 fully ready.
 
+Small offline resources download with bounded concurrency. Progress records are
+checkpointed periodically instead of rebuilding storage totals after every
+chapter, which keeps library scrolling responsive while a series downloads.
+
 To rebuild and publish the APK that the hosted Profile page serves, run:
 
 ```bash

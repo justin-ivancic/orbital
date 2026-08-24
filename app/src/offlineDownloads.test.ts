@@ -15,6 +15,7 @@ import {
   OfflineResourceIntegrityError,
   planReusableOfflineResources,
   progressForOfflineResources,
+  runOfflineDownloadQueue,
 } from './offlineDownloads'
 
 const makeSeriesSummary = (id: string, title: string): SeriesSummary => ({
@@ -345,4 +346,38 @@ test('offline progress counts only completed resources', () => {
     verifiedBytes: 200,
     downloadedResourceCount: 1,
   })
+})
+
+test('offline resource queue bounds concurrent work while completing every item', async () => {
+  let active = 0
+  let maximumActive = 0
+  const completed: number[] = []
+
+  await runOfflineDownloadQueue([1, 2, 3, 4, 5, 6, 7], 3, async (item) => {
+    active += 1
+    maximumActive = Math.max(maximumActive, active)
+    await new Promise((resolve) => setTimeout(resolve, item % 2 === 0 ? 2 : 1))
+    completed.push(item)
+    active -= 1
+  })
+
+  assert.equal(maximumActive, 3)
+  assert.deepEqual(completed.toSorted((left, right) => left - right), [1, 2, 3, 4, 5, 6, 7])
+})
+
+test('offline resource queue stops scheduling new work after a failure', async () => {
+  const started: number[] = []
+
+  await assert.rejects(
+    runOfflineDownloadQueue([1, 2, 3, 4, 5, 6], 2, async (item) => {
+      started.push(item)
+      if (item === 2) {
+        throw new Error('failed resource')
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2))
+    }),
+    /failed resource/,
+  )
+
+  assert.ok(started.length <= 3)
 })

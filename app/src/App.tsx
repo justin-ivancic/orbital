@@ -63,6 +63,7 @@ import type {
   LibraryEntry,
   OfflineDownloadManifest,
   OfflineDownloadRecord,
+  OfflineDownloadResource,
   OfflineDownloadTarget,
   OfflineStorageSummary,
   ReaderProgress,
@@ -115,6 +116,7 @@ import {
   OfflineResourceIntegrityError,
   planReusableOfflineResources,
   mergeOfflineLibrary,
+  runOfflineDownloadQueue,
   waitForOfflineRetry,
 } from './offlineDownloads'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
@@ -164,6 +166,8 @@ const TextFileReader = lazy(() => import('./LocalFileReaders').then((module) => 
 const VideoPlayer = lazy(() => import('./VideoPlayer').then((module) => ({ default: module.VideoPlayer })))
 
 const emptyLibrary: SeriesSummary[] = []
+const offlineDownloadConcurrency = isNativeApp ? 3 : 4
+const offlineProgressCheckpointIntervalMs = 1500
 const emptyOfflineReadingStateUpdatedAt = new Date(0).toISOString()
 const emptyMetadataReviewItems: AppState['metadataQueue'] = []
 const defaultReaderCategory: CategoryId = 'books'
@@ -4041,15 +4045,6 @@ function App() {
         (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
       )
     })
-    if (sessionUser) {
-      Promise.all([
-        getOfflineStorageSummary(sessionUser.id),
-        getImageCacheSummary(sessionUser.id),
-      ]).then(([summary, covers]) => {
-        setOfflineStorageSummary(summary)
-        setImageCacheSummary(covers)
-      }).catch(() => undefined)
-    }
   }
 
   const setOfflineBusy = (busyKey: string, label: string | null) => {
@@ -4236,15 +4231,62 @@ function App() {
           : text.downloadForOffline,
       )
 
-      for (const resource of manifest.resources) {
-        if (controller.signal.aborted) {
-          throw new OfflineDownloadCancelledError()
+      const pendingResources = manifest.resources.filter((resource) => (
+        !isOfflineResourceComplete(resource, storedByKey.get(resource.key))
+      ))
+      const localResourcesByKey = new Map(
+        storedResources.map((stored) => [stored.resource.key, stored.resource]),
+      )
+      let progressRecord: OfflineDownloadRecord = record
+      let lastCheckpointAt = Date.now()
+      let checkpointInFlight: Promise<void> | null = null
+
+      const snapshotDownloadRecord = () => ({
+        ...progressRecord,
+        manifest: {
+          ...progressRecord.manifest,
+          resources: progressRecord.manifest.resources.map((resource) => (
+            localResourcesByKey.get(resource.key) ?? resource
+          )),
+        },
+        status: 'downloading' as const,
+        retryAt: null,
+        updatedAt: new Date().toISOString(),
+      })
+
+      const persistProgress = async (force = false): Promise<void> => {
+        if (checkpointInFlight) {
+          if (force) {
+            await checkpointInFlight
+            return persistProgress(true)
+          }
+          return
         }
 
-        const stored = storedByKey.get(resource.key)
+        const now = Date.now()
+        if (!force && now - lastCheckpointAt < offlineProgressCheckpointIntervalMs) {
+          return
+        }
 
-        if (isOfflineResourceComplete(resource, stored)) {
-          continue
+        lastCheckpointAt = now
+        const snapshot = snapshotDownloadRecord()
+        record = snapshot
+        progressRecord = snapshot
+        checkpointInFlight = updateOfflineRecord(snapshot).finally(() => {
+          checkpointInFlight = null
+        })
+        await checkpointInFlight
+        setOfflineBusy(
+          busyKey,
+          manifest.target.type === 'series'
+            ? text.downloadProgress(progressRecord.downloadedResourceCount, progressRecord.resourceCount)
+            : text.downloadForOffline,
+        )
+      }
+
+      const downloadResource = async (resource: OfflineDownloadResource) => {
+        if (controller.signal.aborted) {
+          throw new OfflineDownloadCancelledError()
         }
 
         let attempt = 0
@@ -4268,44 +4310,43 @@ function App() {
             }
 
             attempt += 1
-            setOfflineBusy(
-              busyKey,
-              manifest.target.type === 'series'
-                ? text.downloadProgress(record.downloadedResourceCount, record.resourceCount)
-                : text.downloadForOffline,
-            )
             await waitForOfflineRetry(offlineRetryDelay(attempt), controller.signal)
           }
         }
 
-        const localResource = await putOfflineResource(record.id, record.ownerUserId, resource, blob)
-        storedByKey.set(resource.key, {
-          resource: localResource,
-          size: blob.size,
-        })
-        record = {
-          ...record,
-          manifest: {
-            ...record.manifest,
-            resources: record.manifest.resources.map((candidate) =>
-              candidate.key === localResource.key ? localResource : candidate,
-            ),
-          },
+        const localResource = await putOfflineResource(
+          progressRecord.id,
+          progressRecord.ownerUserId,
+          resource,
+          blob,
+        )
+        storedByKey.set(resource.key, { resource: localResource, size: blob.size })
+        localResourcesByKey.set(resource.key, localResource)
+        progressRecord = {
+          ...progressRecord,
           status: 'downloading',
           retryAt: null,
-          downloadedBytes: record.downloadedBytes + blob.size,
-          verifiedBytes: record.verifiedBytes + (resource.size || blob.size),
-          downloadedResourceCount: record.downloadedResourceCount + 1,
+          downloadedBytes: progressRecord.downloadedBytes + blob.size,
+          verifiedBytes: progressRecord.verifiedBytes + (resource.size || blob.size),
+          downloadedResourceCount: progressRecord.downloadedResourceCount + 1,
           updatedAt: new Date().toISOString(),
         }
-        setOfflineBusy(
-          busyKey,
-          manifest.target.type === 'series'
-            ? text.downloadProgress(record.downloadedResourceCount, record.resourceCount)
-            : text.downloadForOffline,
-        )
-        await updateOfflineRecord(record)
+        await persistProgress()
       }
+
+      try {
+        await runOfflineDownloadQueue(
+          pendingResources,
+          offlineDownloadConcurrency,
+          downloadResource,
+        )
+      } catch (error) {
+        await persistProgress(true).catch(() => undefined)
+        throw error
+      }
+
+      await persistProgress(true)
+      record = progressRecord
 
       record = {
         ...record,

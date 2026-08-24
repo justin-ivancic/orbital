@@ -246,3 +246,42 @@ export const waitForOfflineRetry = async (
 
 export const offlineRetryDelay = (attempt: number) =>
   Math.min(8000, 1000 * (2 ** Math.max(0, attempt - 1)))
+
+export const runOfflineDownloadQueue = async <T,>(
+  items: readonly T[],
+  concurrency: number,
+  processItem: (item: T) => Promise<void>,
+) => {
+  if (!items.length) {
+    return
+  }
+
+  const workerCount = Math.max(1, Math.min(Math.floor(concurrency), items.length))
+  let nextIndex = 0
+  let failed = false
+  let firstError: unknown
+
+  const runWorker = async () => {
+    while (!failed) {
+      const itemIndex = nextIndex
+      nextIndex += 1
+
+      if (itemIndex >= items.length) {
+        return
+      }
+
+      try {
+        await processItem(items[itemIndex])
+      } catch (error) {
+        failed = true
+        firstError = error
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()))
+
+  if (failed) {
+    throw firstError
+  }
+}
