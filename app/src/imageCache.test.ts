@@ -4,6 +4,7 @@ import {
   clearImageCache,
   getImageCacheSummary,
   loadCachedImage,
+  runImageCacheSelfTest,
 } from './imageCache.ts'
 
 class TestCache {
@@ -178,7 +179,9 @@ test('reports persisted cover bytes and count for storage management', async () 
       storedBytes: 15,
       imageCount: 1,
       persistent: true,
+      backend: 'cache-storage',
       lastWriteError: null,
+      lastError: null,
     })
   } finally {
     await clearImageCache(ownerUserId)
@@ -212,6 +215,37 @@ test('updates persistent cover storage after a cover is loaded', async () => {
     assert.equal(summary.imageCount, 1)
     assert.ok(summary.storedBytes > 0)
     assert.equal(summary.lastWriteError, null)
+  } finally {
+    await clearImageCache(ownerUserId)
+    if (previousWindow === undefined) {
+      Reflect.deleteProperty(globalThis, 'window')
+    } else {
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        value: previousWindow,
+      })
+    }
+  }
+})
+
+test('runs a verified cover storage self-test without leaving a diagnostic image', async () => {
+  const ownerUserId = 'image-cache-self-test-user'
+  const storage = new TestCacheStorage()
+  const previousWindow = (globalThis as { window?: unknown }).window
+
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { caches: storage },
+  })
+
+  try {
+    await clearImageCache(ownerUserId)
+    const result = await runImageCacheSelfTest(ownerUserId)
+
+    assert.equal(result.passed, true)
+    assert.equal(result.backend, 'cache-storage')
+    assert.equal(result.bytesRead, result.bytesWritten)
+    assert.equal((await getImageCacheSummary(ownerUserId)).imageCount, 0)
   } finally {
     await clearImageCache(ownerUserId)
     if (previousWindow === undefined) {

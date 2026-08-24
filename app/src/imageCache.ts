@@ -48,7 +48,19 @@ export type ImageCacheSummary = {
   storedBytes: number
   imageCount: number
   persistent: boolean
+  backend: 'cache-storage' | 'indexeddb' | 'native-filesystem' | 'none'
   lastWriteError?: string | null
+  lastError?: string | null
+}
+
+export type ImageCacheSelfTestResult = {
+  passed: boolean
+  backend: ImageCacheSummary['backend']
+  bytesWritten: number
+  bytesRead: number
+  storedBytes: number
+  imageCount: number
+  error: string | null
 }
 
 export const imageCacheChangedEvent = 'orbital:image-cache-changed'
@@ -58,8 +70,27 @@ const inFlightImages = new Map<string, Promise<Blob>>()
 const imageQueue: ImageQueueItem[] = []
 const ownerGenerations = new Map<string, number>()
 const imageCacheWriteErrors = new Map<string, string>()
+const imageCacheBackends = new Map<string, ImageCacheSummary['backend']>()
 let memoryImageBytes = 0
 let activeImageRequests = 0
+
+const errorMessage = (error: unknown, fallback: string) => {
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    const message = (error as { message?: unknown }).message
+    if (typeof message === 'string' && message) {
+      return message
+    }
+  }
+
+  return fallback
+}
+
+const isMissingNativePathError = (error: unknown) =>
+  /not found|does not exist|no such file|missing/i.test(errorMessage(error, ''))
 
 const notifyImageCacheChanged = (ownerUserId: string) => {
   if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') {
@@ -479,7 +510,13 @@ const readIndexedDbImagesForOwner = async (ownerUserId: string) => {
 
 const getIndexedDbImageSummary = async (ownerUserId: string): Promise<ImageCacheSummary> => {
   if (!canUseIndexedDb()) {
-    return { storedBytes: 0, imageCount: 0, persistent: false }
+    return {
+      storedBytes: 0,
+      imageCount: 0,
+      persistent: false,
+      backend: 'none',
+      lastError: null,
+    }
   }
 
   const db = await openImageDb()
@@ -508,6 +545,8 @@ const getIndexedDbImageSummary = async (ownerUserId: string): Promise<ImageCache
       storedBytes: freshRecords.reduce((total, record) => total + record.size, 0),
       imageCount: freshRecords.length,
       persistent: true,
+      backend: 'indexeddb',
+      lastError: null,
     }
   } finally {
     db.close()
@@ -621,9 +660,11 @@ const readPersistentImage = async (
   cacheKey = url,
   allowStaleUrl = false,
 ) => {
-  const cacheImage = await readCacheStorageImage(ownerUserId, url)
-  if (cacheImage) {
-    return cacheImage
+  if (!nativeImageStorageEnabled) {
+    const cacheImage = await readCacheStorageImage(ownerUserId, url)
+    if (cacheImage) {
+      return cacheImage
+    }
   }
 
   const nativeImage = await readNativeImage(ownerUserId, url, cacheKey, allowStaleUrl)
@@ -719,15 +760,18 @@ const writePersistentImage = async (
   let lastError: unknown = null
 
   if (Capacitor.isNativePlatform()) {
-    // IndexedDB is the canonical cover store on Android. It is app-private,
-    // survives WebView restarts, and is the same persistence layer used by the
-    // web fallback. Keep the native filesystem reader below for older covers
-    // and use it only if IndexedDB is unavailable on a particular WebView.
+    // Use the same app-private filesystem as offline books on Android. This is
+    // independent of WebView storage eviction and remains readable after a
+    // process restart. IndexedDB remains a compatibility fallback for covers
+    // created by older APKs or unusual WebViews where Filesystem is unavailable.
     try {
-      stored = await writeIndexedDbImage(ownerUserId, url, cacheKey, blob)
+      stored = await writeNativeImage(ownerUserId, url, cacheKey, blob)
       if (stored) {
-        const verified = await readIndexedDbImage(ownerUserId, url, cacheKey)
+        const verified = await readNativeImage(ownerUserId, url, cacheKey)
         stored = Boolean(verified && verified.size === blob.size)
+        if (stored) {
+          imageCacheBackends.set(ownerUserId, 'native-filesystem')
+        }
       }
     } catch (error) {
       lastError = error
@@ -735,10 +779,13 @@ const writePersistentImage = async (
 
     if (!stored) {
       try {
-        stored = await writeNativeImage(ownerUserId, url, cacheKey, blob)
+        stored = await writeIndexedDbImage(ownerUserId, url, cacheKey, blob)
         if (stored) {
-          const verified = await readNativeImage(ownerUserId, url, cacheKey)
+          const verified = await readIndexedDbImage(ownerUserId, url, cacheKey)
           stored = Boolean(verified && verified.size === blob.size)
+          if (stored) {
+            imageCacheBackends.set(ownerUserId, 'indexeddb')
+          }
         }
       } catch (error) {
         lastError = error
@@ -747,6 +794,9 @@ const writePersistentImage = async (
   } else {
     try {
       stored = await writeCacheStorageImage(ownerUserId, url, blob)
+      if (stored) {
+        imageCacheBackends.set(ownerUserId, 'cache-storage')
+      }
     } catch (error) {
       lastError = error
     }
@@ -754,6 +804,9 @@ const writePersistentImage = async (
     if (!stored) {
       try {
         stored = await writeIndexedDbImage(ownerUserId, url, cacheKey, blob)
+        if (stored) {
+          imageCacheBackends.set(ownerUserId, 'indexeddb')
+        }
       } catch (error) {
         lastError = error
       }
@@ -763,9 +816,10 @@ const writePersistentImage = async (
   if (stored) {
     imageCacheWriteErrors.delete(ownerUserId)
   } else {
+    imageCacheBackends.set(ownerUserId, 'none')
     imageCacheWriteErrors.set(
       ownerUserId,
-      lastError instanceof Error ? lastError.message : 'Cover storage could not be verified.',
+      errorMessage(lastError, 'Cover storage could not be verified.'),
     )
   }
   notifyImageCacheChanged(ownerUserId)
@@ -774,7 +828,13 @@ const writePersistentImage = async (
 
 const getNativeImageSummary = async (ownerUserId: string): Promise<ImageCacheSummary> => {
   if (!nativeImageStorageEnabled) {
-    return { storedBytes: 0, imageCount: 0, persistent: false }
+    return {
+      storedBytes: 0,
+      imageCount: 0,
+      persistent: false,
+      backend: 'none',
+      lastError: null,
+    }
   }
 
   try {
@@ -807,16 +867,32 @@ const getNativeImageSummary = async (ownerUserId: string): Promise<ImageCacheSum
       storedBytes: validSizes.reduce((total, size) => total + size, 0),
       imageCount: validSizes.length,
       persistent: true,
+      backend: 'native-filesystem',
+      lastError: null,
     }
-  } catch {
-    return { storedBytes: 0, imageCount: 0, persistent: true }
+  } catch (error) {
+    return {
+      storedBytes: 0,
+      imageCount: 0,
+      persistent: true,
+      backend: 'native-filesystem',
+      lastError: isMissingNativePathError(error)
+        ? null
+        : errorMessage(error, 'The Android cover folder could not be inspected.'),
+    }
   }
 }
 
 const getCacheStorageSummary = async (ownerUserId: string): Promise<ImageCacheSummary> => {
   const storage = cacheStorage()
   if (!storage) {
-    return { storedBytes: 0, imageCount: 0, persistent: false }
+    return {
+      storedBytes: 0,
+      imageCount: 0,
+      persistent: false,
+      backend: 'none',
+      lastError: null,
+    }
   }
 
   try {
@@ -843,25 +919,43 @@ const getCacheStorageSummary = async (ownerUserId: string): Promise<ImageCacheSu
       storedBytes: sizes.reduce((total, size) => total + size, 0),
       imageCount: sizes.length,
       persistent: true,
+      backend: 'cache-storage',
+      lastError: null,
     }
-  } catch {
-    return { storedBytes: 0, imageCount: 0, persistent: false }
+  } catch (error) {
+    return {
+      storedBytes: 0,
+      imageCount: 0,
+      persistent: false,
+      backend: 'cache-storage',
+      lastError: errorMessage(error, 'Cover storage could not be inspected.'),
+    }
   }
 }
 
 export const getImageCacheSummary = async (ownerUserId: string): Promise<ImageCacheSummary> => {
   if (nativeImageStorageEnabled) {
     const nativeSummary = await getNativeImageSummary(ownerUserId)
-    const fallbackSummary = await getIndexedDbImageSummary(ownerUserId).catch(() => ({
+    const fallbackSummary = await getIndexedDbImageSummary(ownerUserId).catch((error) => ({
       storedBytes: 0,
       imageCount: 0,
       persistent: true,
+      backend: 'indexeddb' as const,
+      lastError: errorMessage(error, 'IndexedDB cover storage could not be inspected.'),
     }))
     return {
       storedBytes: nativeSummary.storedBytes + fallbackSummary.storedBytes,
       imageCount: nativeSummary.imageCount + fallbackSummary.imageCount,
       persistent: true,
+      backend: nativeSummary.imageCount > 0
+        ? 'native-filesystem'
+        : fallbackSummary.imageCount > 0
+          ? 'indexeddb'
+          : 'native-filesystem',
       lastWriteError: imageCacheWriteErrors.get(ownerUserId) || null,
+      lastError: nativeSummary.lastError || (
+        nativeSummary.imageCount === 0 ? fallbackSummary.lastError : null
+      ),
     }
   }
 
@@ -870,12 +964,143 @@ export const getImageCacheSummary = async (ownerUserId: string): Promise<ImageCa
     storedBytes: 0,
     imageCount: 0,
     persistent: false,
+    backend: 'none' as const,
+    lastError: null,
   }))
   return {
     storedBytes: cacheSummary.storedBytes + fallbackSummary.storedBytes,
     imageCount: cacheSummary.imageCount + fallbackSummary.imageCount,
     persistent: cacheSummary.persistent || fallbackSummary.persistent,
+    backend: cacheSummary.imageCount > 0
+      ? 'cache-storage'
+      : fallbackSummary.imageCount > 0
+        ? 'indexeddb'
+        : cacheSummary.backend,
     lastWriteError: imageCacheWriteErrors.get(ownerUserId) || null,
+    lastError: cacheSummary.lastError || fallbackSummary.lastError || null,
+  }
+}
+
+const deleteNativeImage = async (ownerUserId: string, cacheKey: string) => {
+  if (!nativeImageStorageEnabled) {
+    return
+  }
+
+  const path = nativeImagePath(ownerUserId, cacheKey)
+  const metadataPath = nativeImageMetadataPath(ownerUserId, cacheKey)
+  await Promise.all([
+    '',
+    '.part',
+    '.previous',
+  ].flatMap((suffix) => [
+    Filesystem.deleteFile({ path: `${path}${suffix}`, directory: Directory.Data }).catch(() => undefined),
+    Filesystem.deleteFile({ path: `${metadataPath}${suffix}`, directory: Directory.Data }).catch(() => undefined),
+  ]))
+}
+
+const deleteIndexedDbImage = async (ownerUserId: string, cacheKey: string) => {
+  if (!canUseIndexedDb()) {
+    return
+  }
+
+  const db = await openImageDb()
+  try {
+    const transaction = db.transaction(imageStoreName, 'readwrite')
+    const done = imageTransactionDone(transaction)
+    transaction.objectStore(imageStoreName).delete(imageStorageKey(ownerUserId, cacheKey))
+    await done
+  } finally {
+    db.close()
+  }
+}
+
+const deleteCacheStorageImage = async (ownerUserId: string, url: string) => {
+  const storage = cacheStorage()
+  if (!storage) {
+    return
+  }
+
+  try {
+    const cache = await storage.open(cacheNameForOwner(ownerUserId))
+    await cache.delete(url)
+  } catch {
+    // The diagnostic cleanup is best-effort.
+  }
+}
+
+const deletePersistentImage = async (
+  ownerUserId: string,
+  url: string,
+  cacheKey: string,
+) => {
+  if (nativeImageStorageEnabled) {
+    await deleteNativeImage(ownerUserId, cacheKey)
+  }
+
+  await deleteIndexedDbImage(ownerUserId, cacheKey).catch(() => undefined)
+  await deleteCacheStorageImage(ownerUserId, url)
+}
+
+export const runImageCacheSelfTest = async (
+  ownerUserId: string,
+): Promise<ImageCacheSelfTestResult> => {
+  const cacheKey = `diagnostic:cover-storage:${Date.now()}`
+  const url = `https://orbital.local/cover-storage-test/${Date.now()}`
+  const testBlob = new Blob([
+    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]),
+  ], { type: 'image/png' })
+
+  await deletePersistentImage(ownerUserId, url, cacheKey)
+
+  try {
+    const beforeSummary = await getImageCacheSummary(ownerUserId)
+    const stored = await writePersistentImage(ownerUserId, url, cacheKey, testBlob)
+    const readBack = stored
+      ? await readPersistentImage(ownerUserId, url, cacheKey)
+      : null
+    const summary = await getImageCacheSummary(ownerUserId)
+    const bytesRead = readBack?.size || 0
+    const summaryIncludesTest =
+      summary.imageCount >= beforeSummary.imageCount + 1 &&
+      summary.storedBytes >= beforeSummary.storedBytes + testBlob.size
+    const passed = stored && bytesRead === testBlob.size && summaryIncludesTest
+
+    return {
+      passed,
+      backend: imageCacheBackends.get(ownerUserId) || summary.backend,
+      bytesWritten: testBlob.size,
+      bytesRead,
+      storedBytes: summary.storedBytes,
+      imageCount: summary.imageCount,
+      error: passed
+        ? null
+        : imageCacheWriteErrors.get(ownerUserId) || summary.lastError || (
+            stored && bytesRead === testBlob.size && !summaryIncludesTest
+              ? 'The cover was read back, but the storage summary could not find it.'
+              : 'The cover could not be written and read back.'
+          ),
+    }
+  } catch (error) {
+    const summary = await getImageCacheSummary(ownerUserId).catch(() => ({
+      storedBytes: 0,
+      imageCount: 0,
+      persistent: true,
+      backend: 'none' as const,
+      lastError: null,
+    }))
+
+    return {
+      passed: false,
+      backend: imageCacheBackends.get(ownerUserId) || summary.backend,
+      bytesWritten: testBlob.size,
+      bytesRead: 0,
+      storedBytes: summary.storedBytes,
+      imageCount: summary.imageCount,
+      error: errorMessage(error, 'The cover storage self-test failed.'),
+    }
+  } finally {
+    await deletePersistentImage(ownerUserId, url, cacheKey)
+    notifyImageCacheChanged(ownerUserId)
   }
 }
 
@@ -978,6 +1203,7 @@ export const clearImageCache = async (ownerUserId?: string) => {
   if (ownerUserId) {
     ownerGenerations.set(ownerUserId, (ownerGenerations.get(ownerUserId) || 0) + 1)
     imageCacheWriteErrors.delete(ownerUserId)
+    imageCacheBackends.delete(ownerUserId)
   }
 
   if (nativeImageStorageEnabled) {

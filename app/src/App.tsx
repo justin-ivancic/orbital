@@ -122,7 +122,9 @@ import {
   clearImageCache,
   getImageCacheSummary,
   imageCacheChangedEvent,
+  runImageCacheSelfTest,
   type ImageCacheSummary,
+  type ImageCacheSelfTestResult,
 } from './imageCache'
 import {
   appRoutePath,
@@ -646,6 +648,12 @@ const ui = {
     browserStorageQuota: 'Browser storage limit',
     coverStorage: 'Cover images stored',
     coverStorageHelp: 'Covers that appeared on this device are kept locally for offline browsing.',
+    coverStorageBackend: (backend: string) => `Cover storage backend: ${backend}.`,
+    testCoverStorage: 'Test cover storage',
+    testCoverStorageBusy: 'Testing cover storage...',
+    testCoverStoragePassed: (backend: string, bytes: number) =>
+      `Cover storage test passed: ${backend}, ${bytes} bytes verified.`,
+    testCoverStorageFailed: (error: string) => `Cover storage test failed: ${error}`,
     clearCoverStorage: 'Free cover space',
     clearCoverStorageBusy: 'Freeing cover space...',
     clearCoverStorageConfirm: 'Remove the locally stored cover images? They can be downloaded again when you browse the library online.',
@@ -943,6 +951,12 @@ const ui = {
     browserStorageQuota: 'Browser-Speicherlimit',
     coverStorage: 'Gespeicherte Titelbilder',
     coverStorageHelp: 'Titelbilder, die auf diesem Gerät angezeigt wurden, bleiben zum Offline-Durchsuchen lokal gespeichert.',
+    coverStorageBackend: (backend: string) => `Speicherort für Titelbilder: ${backend}.`,
+    testCoverStorage: 'Titelbildspeicher testen',
+    testCoverStorageBusy: 'Titelbildspeicher wird getestet...',
+    testCoverStoragePassed: (backend: string, bytes: number) =>
+      `Titelbildspeicher-Test erfolgreich: ${backend}, ${bytes} Bytes geprüft.`,
+    testCoverStorageFailed: (error: string) => `Titelbildspeicher-Test fehlgeschlagen: ${error}`,
     clearCoverStorage: 'Titelbildspeicher freigeben',
     clearCoverStorageBusy: 'Titelbildspeicher wird freigegeben...',
     clearCoverStorageConfirm: 'Gespeicherte Titelbilder von diesem Gerät entfernen? Sie können beim nächsten Online-Besuch erneut geladen werden.',
@@ -1851,6 +1865,9 @@ function App() {
   const [imageCacheSummary, setImageCacheSummary] =
     useState<ImageCacheSummary | null>(null)
   const [imageCacheBusy, setImageCacheBusy] = useState(false)
+  const [imageCacheTestBusy, setImageCacheTestBusy] = useState(false)
+  const [imageCacheTestResult, setImageCacheTestResult] =
+    useState<ImageCacheSelfTestResult | null>(null)
   const [offlineFilter, setOfflineFilter] = useState<'active' | 'ready' | 'attention' | 'all'>('all')
   const [offlineBusyIds, setOfflineBusyIds] = useState<Record<string, string>>({})
   const [offlineResumeTick, setOfflineResumeTick] = useState(0)
@@ -4344,6 +4361,33 @@ function App() {
     }
   }
 
+  const handleTestImageCache = async () => {
+    if (!sessionUser || imageCacheTestBusy) {
+      return
+    }
+
+    setImageCacheTestBusy(true)
+    setImageCacheTestResult(null)
+
+    try {
+      const result = await runImageCacheSelfTest(sessionUser.id)
+      setImageCacheTestResult(result)
+      setImageCacheSummary(await getImageCacheSummary(sessionUser.id))
+    } catch (error) {
+      setImageCacheTestResult({
+        passed: false,
+        backend: 'none',
+        bytesWritten: 0,
+        bytesRead: 0,
+        storedBytes: imageCacheSummary?.storedBytes ?? 0,
+        imageCount: imageCacheSummary?.imageCount ?? 0,
+        error: error instanceof Error ? error.message : text.authErrorFallback,
+      })
+    } finally {
+      setImageCacheTestBusy(false)
+    }
+  }
+
   const openOfflineDownload = (record: OfflineDownloadRecord, preferredEntryId?: string | null) => {
     if (record.status !== 'ready') {
       return
@@ -5960,12 +6004,41 @@ function App() {
                 <AppIcon name="trash" />
                 {imageCacheBusy ? text.clearCoverStorageBusy : text.clearCoverStorage}
               </button>
+              <button
+                className="ghost-button ghost-button--small"
+                disabled={imageCacheTestBusy}
+                onClick={() => void handleTestImageCache()}
+                type="button"
+              >
+                <AppIcon name="hardDrive" />
+                {imageCacheTestBusy ? text.testCoverStorageBusy : text.testCoverStorage}
+              </button>
             </div>
             <p className="helper-text">{text.persistentStorageHelp}</p>
             <p className="helper-text">{text.coverStorageHelp}</p>
+            {imageCacheSummary?.backend && (
+              <p className="helper-text">
+                {text.coverStorageBackend(imageCacheSummary.backend)}
+              </p>
+            )}
+            {imageCacheSummary?.lastError && (
+              <p className="auth-error">
+                Cover storage could not be inspected: {imageCacheSummary.lastError}
+              </p>
+            )}
             {imageCacheSummary?.lastWriteError && (
               <p className="auth-error">
                 Cover storage error: {imageCacheSummary.lastWriteError}
+              </p>
+            )}
+            {imageCacheTestResult && (
+              <p className={imageCacheTestResult.passed ? 'auth-success' : 'auth-error'}>
+                {imageCacheTestResult.passed
+                  ? text.testCoverStoragePassed(
+                      imageCacheTestResult.backend,
+                      imageCacheTestResult.bytesRead,
+                    )
+                  : text.testCoverStorageFailed(imageCacheTestResult.error || 'Unknown error.')}
               </p>
             )}
           </div>

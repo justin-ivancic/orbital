@@ -17,7 +17,7 @@ Orbital Library is a self-hosted media library for browsing and reading locally 
 - PWA app shell with explicit offline downloads for chapters, books, and series
 - Installable Capacitor Android app with app-private offline storage
 - Downloads management with estimated size, verified local bytes, browser quota, repair, and delete controls
-- Naturally loaded cover images are stored in app-private storage for offline browsing, with cover storage accounting and cleanup controls in Downloads
+- Naturally loaded cover images are stored in the same verified app-private filesystem used by Android downloads, with cover storage accounting, an on-device self-test, and cleanup controls in Downloads
 - Direct Android APK download from the authenticated Profile page
 
 The repository does not include personal media, databases, logs, or local environment files. It includes the current debug APK in `mobile-distribution/` so the deployed Profile page can provide a direct device download.
@@ -73,7 +73,10 @@ npm run mobile:assemble
 The APK is written to
 `android/app/build/outputs/apk/debug/app-debug.apk`. The native client defaults
 to `https://library.justinivancic.com`; set `VITE_ORBITAL_API_BASE_URL` before
-building to target another server.
+building to target another server. Android cover storage uses the app-private
+`Directory.Data` filesystem as its canonical store, so covers remain available
+after the app process is closed. IndexedDB is retained only as a compatibility
+fallback for older covers.
 
 To rebuild and publish the APK that the hosted Profile page serves, run:
 
