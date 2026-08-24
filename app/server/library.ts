@@ -2857,7 +2857,9 @@ const buildCardCoverSuffix = (
   media: { last_scan_at: string | null; metadata_refreshed_at?: string | null },
 ) => {
   const versionSuffix = buildMediaVersionSuffix(media)
-  return versionSuffix ? `${versionSuffix}&variant=card` : '?variant=card'
+  // Changing this revision causes native clients to replace older, oversized
+  // cached card covers without invalidating the source cover itself.
+  return versionSuffix ? `${versionSuffix}&variant=card&cardv=2` : '?variant=card&cardv=2'
 }
 
 const mapSeriesRowToSummary = (

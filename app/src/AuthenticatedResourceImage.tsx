@@ -3,6 +3,33 @@ import { useEffect, useRef, useState } from 'react'
 import { useAuthenticatedResourceUrl } from './authenticatedResource'
 import { isNativeApp } from './platform'
 
+type IntersectionListener = (intersecting: boolean) => void
+
+const nearbyImageListeners = new WeakMap<Element, IntersectionListener>()
+const visibleImageListeners = new WeakMap<Element, IntersectionListener>()
+let nearbyImageObserver: IntersectionObserver | null = null
+let visibleImageObserver: IntersectionObserver | null = null
+
+const getNearbyImageObserver = () => {
+  if (!nearbyImageObserver && typeof IntersectionObserver !== 'undefined') {
+    nearbyImageObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => nearbyImageListeners.get(entry.target)?.(entry.isIntersecting))
+    }, { rootMargin: '1200px 0px' })
+  }
+
+  return nearbyImageObserver
+}
+
+const getVisibleImageObserver = () => {
+  if (!visibleImageObserver && typeof IntersectionObserver !== 'undefined') {
+    visibleImageObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => visibleImageListeners.get(entry.target)?.(entry.isIntersecting))
+    })
+  }
+
+  return visibleImageObserver
+}
+
 type AuthenticatedResourceImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, 'src'> & {
   cacheKey?: string
   offlineOnly?: boolean
@@ -32,32 +59,23 @@ export function AuthenticatedResourceImage({
     setNearViewport(false)
     setVisible(false)
     const image = imageRef.current
-    if (!image || typeof IntersectionObserver === 'undefined') {
+    const nearbyObserver = getNearbyImageObserver()
+    const visibleObserver = getVisibleImageObserver()
+    if (!image || !nearbyObserver || !visibleObserver) {
       setNearViewport(true)
       return
     }
 
-    const nearbyObserver = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setNearViewport(true)
-          nearbyObserver.disconnect()
-        }
-      },
-      { rootMargin: '1400px 0px' },
-    )
-    const visibleObserver = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        setVisible(true)
-        visibleObserver.disconnect()
-      }
-    })
+    nearbyImageListeners.set(image, setNearViewport)
+    visibleImageListeners.set(image, setVisible)
 
     nearbyObserver.observe(image)
     visibleObserver.observe(image)
     return () => {
-      nearbyObserver.disconnect()
-      visibleObserver.disconnect()
+      nearbyObserver.unobserve(image)
+      visibleObserver.unobserve(image)
+      nearbyImageListeners.delete(image)
+      visibleImageListeners.delete(image)
     }
   }, [shouldLoadImmediately, sourceUrl])
 

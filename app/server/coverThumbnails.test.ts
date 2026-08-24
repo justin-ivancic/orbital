@@ -28,6 +28,19 @@ test('creates and reuses a bounded card cover thumbnail', async () => {
     assert.equal(secondPath, firstPath)
     assert.equal(secondStats.mtimeMs, firstStats.mtimeMs)
 
+    const obsoleteThumbnail = createCanvas(100, 100)
+    obsoleteThumbnail.getContext('2d').fillRect(0, 0, 100, 100)
+    await fsPromises.writeFile(firstPath, await obsoleteThumbnail.encode('webp'))
+    await fsPromises.writeFile(`${firstPath}.json`, JSON.stringify({
+      sourceModifiedAt: (await fsPromises.stat(sourcePath)).mtimeMs,
+      sourcePath,
+      sourceSize: (await fsPromises.stat(sourcePath)).size,
+    }))
+    const upgradedPath = await resolveCardCoverPath(directory, 'series-one', sourcePath)
+    const upgraded = await loadImage(upgradedPath)
+    assert.equal(upgraded.width, cardCoverDimensions.maxWidth)
+    assert.equal(upgraded.height, cardCoverDimensions.maxHeight)
+
     const replacement = createCanvas(800, 800)
     replacement.getContext('2d').fillRect(0, 0, 800, 800)
     await fsPromises.writeFile(sourcePath, await replacement.encode('png'))

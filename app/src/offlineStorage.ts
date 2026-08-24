@@ -124,6 +124,12 @@ const writeNativeJson = async (path: string, value: unknown) => {
 }
 
 const blobToBase64 = async (blob: Blob) => {
+  // Give pending touch and scroll work a chance to paint before the synchronous
+  // base64 conversion needed by Capacitor's native Filesystem bridge.
+  if (typeof window !== 'undefined') {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+  }
+
   const bytes = new Uint8Array(await blob.arrayBuffer())
   let binary = ''
 

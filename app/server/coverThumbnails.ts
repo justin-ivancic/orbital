@@ -3,8 +3,12 @@ import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import { createCanvas, loadImage } from '@napi-rs/canvas'
 
-const cardCoverMaxWidth = 600
-const cardCoverMaxHeight = 900
+// Library cards never display a cover close to its original size. Keeping the
+// card derivative modest materially reduces Android WebView decode memory when
+// a shelf contains hundreds of books, while retaining enough detail for high
+// density tablet screens.
+const cardCoverMaxWidth = 420
+const cardCoverMaxHeight = 630
 const thumbnailDirectoryName = '.thumbnails'
 const inFlightThumbnails = new Map<string, Promise<string>>()
 
@@ -17,6 +21,8 @@ type ThumbnailMetadata = {
   sourceModifiedAt: number
   sourcePath: string
   sourceSize: number
+  targetMaxHeight: number
+  targetMaxWidth: number
 }
 
 const thumbnailMetadataPath = (thumbnailPath: string) => `${thumbnailPath}.json`
@@ -36,7 +42,9 @@ const isFreshThumbnail = async (
       stats.size > 0 &&
       metadata.sourcePath === sourcePath &&
       metadata.sourceSize === sourceSize &&
-      metadata.sourceModifiedAt === sourceModifiedAt
+      metadata.sourceModifiedAt === sourceModifiedAt &&
+      metadata.targetMaxWidth === cardCoverMaxWidth &&
+      metadata.targetMaxHeight === cardCoverMaxHeight
     )
   } catch {
     return false
@@ -80,6 +88,8 @@ const generateCardCoverThumbnail = async (
     sourceModifiedAt: sourceStats.mtimeMs,
     sourcePath,
     sourceSize: sourceStats.size,
+    targetMaxHeight: cardCoverMaxHeight,
+    targetMaxWidth: cardCoverMaxWidth,
   }
 
   await fsPromises.mkdir(thumbnailDirectory, { recursive: true })

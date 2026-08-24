@@ -6215,8 +6215,14 @@ button[aria-label] {
 }
 
 .app-shell--native .series-card {
-  content-visibility: visible;
-  contain-intrinsic-size: none;
+  /* Let Android discard paint/decode work for distant shelf items. Rendering
+     every cover at once causes severe raster-memory pressure on e-readers. */
+  content-visibility: auto;
+}
+
+.app-shell--native .series-card,
+.app-shell--native .series-card * {
+  transition: none;
 }
 
 .poster {
