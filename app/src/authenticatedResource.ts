@@ -6,26 +6,12 @@ import {
   type CachedImageRequest,
   type ImageLoadPriority,
 } from './imageCache'
-import { isNativeApp, resolveApiUrl } from './platform'
+import { isLocalAppResourceUrl, isNativeApp, resolveApiUrl } from './platform'
 
 type AuthenticatedResourceState = {
   url: string | null
   loading: boolean
   error: string | null
-}
-
-const localResourceUrlPattern = /^(?:blob|capacitor|data|file):/i
-
-const isLocalWebViewResource = (url: string) => {
-  if (localResourceUrlPattern.test(url)) {
-    return true
-  }
-
-  try {
-    return new URL(url).hostname === 'localhost'
-  } catch {
-    return false
-  }
 }
 
 const fetchLocalResource = (url: string) =>
@@ -44,7 +30,7 @@ export type AuthenticatedResourceOptions = {
 export const fetchAuthenticatedResource = async (input: string) => {
   const resolvedUrl = resolveApiUrl(input)
 
-  if (isNativeApp && isLocalWebViewResource(resolvedUrl)) {
+  if (isNativeApp && isLocalAppResourceUrl(resolvedUrl)) {
     return fetchLocalResource(resolvedUrl)
   }
 
@@ -57,7 +43,7 @@ export const useAuthenticatedResourceUrl = (
 ) => {
   const resolvedInput = input ? resolveApiUrl(input) : null
   const needsAuthentication = Boolean(
-    resolvedInput && isNativeApp && !isLocalWebViewResource(resolvedInput),
+    resolvedInput && isNativeApp && !isLocalAppResourceUrl(resolvedInput),
   )
   const shouldCacheImage = Boolean(
     needsAuthentication &&
@@ -84,7 +70,7 @@ export const useAuthenticatedResourceUrl = (
       return
     }
 
-    if (!isNativeApp || isLocalWebViewResource(resolvedInput)) {
+    if (!isNativeApp || isLocalAppResourceUrl(resolvedInput)) {
       setState({ url: resolvedInput, loading: false, error: null })
       return
     }

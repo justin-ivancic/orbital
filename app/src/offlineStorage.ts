@@ -168,19 +168,13 @@ const listNativeDownloadIds = async () => {
 
 const readAllNativeRecords = async () => {
   const ids = await listNativeDownloadIds()
-  const records: OfflineDownloadRecord[] = []
-
-  for (const encodedId of ids) {
-    const record = await readNativeJson<OfflineDownloadRecord>(
+  const records = await Promise.all(ids.map((encodedId) =>
+    readNativeJson<OfflineDownloadRecord>(
       `${nativeDownloadsPath}/${encodedId}/record.json`,
-    )
+    ),
+  ))
 
-    if (record) {
-      records.push(record)
-    }
-  }
-
-  return records
+  return records.filter((record): record is OfflineDownloadRecord => Boolean(record))
 }
 
 const canUseIndexedDb = () => typeof indexedDB !== 'undefined'
@@ -999,9 +993,10 @@ export const deleteAllOfflineDownloadsForUser = async (ownerUserId: string) => {
 
 export const getOfflineStorageSummary = async (
   ownerUserId: string,
+  knownRecords?: OfflineDownloadRecord[],
 ): Promise<OfflineStorageSummary> => {
   if (nativeStorageEnabled) {
-    const records = (await readAllNativeRecords()).filter(
+    const records = (knownRecords ?? await readAllNativeRecords()).filter(
       (record) => record.ownerUserId === ownerUserId,
     )
 
@@ -1020,12 +1015,12 @@ export const getOfflineStorageSummary = async (
   const db = await openOfflineDb()
 
   try {
-    const records = await readAllFromIndex<OfflineDownloadRecord>(
-      db,
-      downloadsStoreName,
-      'ownerUserId',
-      ownerUserId,
-    )
+    const records = knownRecords ?? await readAllFromIndex<OfflineDownloadRecord>(
+        db,
+        downloadsStoreName,
+        'ownerUserId',
+        ownerUserId,
+      )
     const estimate = await navigator.storage?.estimate?.().catch(() => null)
     const persistent = await navigator.storage?.persisted?.().catch(() => null)
 

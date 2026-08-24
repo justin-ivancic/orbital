@@ -154,6 +154,7 @@ import {
 import {
   androidAppVersionCode,
   androidAppVersionName,
+  isLocalAppResourceUrl,
   isNativeApp,
   resolveApiUrl,
 } from './platform'
@@ -176,8 +177,7 @@ const readerScopeOrder: ScopeId[] = ['all', ...readerCategoryOrder]
 const isReaderCategory = (category: CategoryId) => category !== 'anime'
 const resolveReaderCategory = (category: CategoryId) =>
   isReaderCategory(category) ? category : defaultReaderCategory
-const isOfflineLocalResourceUrl = (url: string) =>
-  /^(?:blob|capacitor|data|file):/i.test(url) || url.startsWith('/__orbital_offline/')
+const isOfflineLocalResourceUrl = isLocalAppResourceUrl
 
 const offlineStateForProfile = (offlineProfile: SessionUser) => {
   const bootstrapState: BootstrapState = {
@@ -3304,21 +3304,24 @@ function App() {
     }
 
     setOfflineDownloadsLoaded(false)
+    setOfflineStorageSummary(null)
 
     try {
-      const [downloads, summary, covers] = await Promise.all([
-        listOfflineDownloads(sessionUser.id),
-        getOfflineStorageSummary(sessionUser.id),
-        getImageCacheSummary(sessionUser.id),
-      ])
+      const downloads = await listOfflineDownloads(sessionUser.id)
 
       if (refreshRequest !== offlineRefreshRequestRef.current) {
         return
       }
 
       setOfflineDownloads(downloads)
-      setOfflineStorageSummary(summary)
-      setImageCacheSummary(covers)
+      setOfflineDownloadsLoaded(true)
+      void getOfflineStorageSummary(sessionUser.id, downloads)
+        .then((summary) => {
+          if (refreshRequest === offlineRefreshRequestRef.current) {
+            setOfflineStorageSummary(summary)
+          }
+        })
+        .catch(() => undefined)
     } catch (error) {
       if (refreshRequest === offlineRefreshRequestRef.current && !offlineMode) {
         setStateError(error instanceof Error ? error.message : text.authErrorFallback)
