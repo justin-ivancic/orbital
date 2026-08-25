@@ -7,6 +7,8 @@ import type {
   SeriesSummary,
 } from './appTypes'
 import {
+  getOfflineSeriesCoverage,
+  getOfflineSeriesAvailability,
   isOfflineResourceComplete,
   isRetryableOfflineDownloadError,
   mergeOfflineDownloadRecord,
@@ -102,6 +104,44 @@ const makeRecord = (manifest: OfflineDownloadManifest): OfflineDownloadRecord =>
   downloadedResourceCount: 0,
   failureReason: null,
   retryAt: null,
+})
+
+test('offline coverage counts unique ready entries and ignores incomplete packages', () => {
+  const completeSeries = {
+    ...makeRecord(makeManifest([makeResource('entry-1', 'v1', 100)])),
+    status: 'ready' as const,
+  }
+  const partialManifest = {
+    ...makeManifest([{ ...makeResource('entry-2', 'v1', 100), seriesId: 'series-3' }]),
+    manifestId: 'pkg_partial',
+    target: { type: 'entry' as const, entryId: 'entry-2' },
+  }
+  const partialEntry = {
+    ...makeRecord(partialManifest),
+    status: 'ready' as const,
+  }
+  const incompleteManifest = {
+    ...makeManifest([{ ...makeResource('entry-3', 'v1', 100), seriesId: 'series-2' }]),
+    manifestId: 'pkg_incomplete',
+    target: { type: 'entry' as const, entryId: 'entry-3' },
+  }
+  const incompleteEntry = {
+    ...makeRecord(incompleteManifest),
+    status: 'downloading' as const,
+  }
+
+  const coverage = getOfflineSeriesCoverage([
+    partialEntry,
+    completeSeries,
+    incompleteEntry,
+  ])
+
+  assert.deepEqual([...coverage.get('series-1') ?? []], ['entry-1'])
+  assert.deepEqual([...coverage.get('series-3') ?? []], ['entry-2'])
+  assert.equal(coverage.has('series-2'), false)
+  assert.equal(getOfflineSeriesAvailability(coverage.get('series-1'), 1), 'complete')
+  assert.equal(getOfflineSeriesAvailability(coverage.get('series-1'), 2), 'partial')
+  assert.equal(getOfflineSeriesAvailability(coverage.get('series-2'), 1), undefined)
 })
 
 test('offline catalogue merge keeps cached metadata and adds local-only series', () => {

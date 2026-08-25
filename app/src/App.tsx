@@ -109,6 +109,8 @@ import {
 import {
   isOfflineResourceComplete,
   isRetryableOfflineDownloadError,
+  getOfflineSeriesCoverage,
+  getOfflineSeriesAvailability,
   mergeOfflineDownloadRecord,
   mergeOfflineManifestWithStoredResources,
   offlineRetryDelay,
@@ -118,6 +120,7 @@ import {
   mergeOfflineLibrary,
   runOfflineDownloadQueue,
   waitForOfflineRetry,
+  type OfflineSeriesAvailability,
 } from './offlineDownloads'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
 import { useAuthenticatedResourceUrl } from './authenticatedResource'
@@ -627,6 +630,8 @@ const ui = {
     downloadsEmpty: 'Nothing downloaded on this device yet.',
     downloadsStorage: 'Device storage',
     downloadsReady: 'Available offline',
+    offlineCompleteBadge: 'Offline',
+    offlinePartialBadge: 'Partial',
     downloadsPartial: 'Needs attention',
     downloadsActive: 'Downloading',
     downloadsQueued: 'Queued to retry',
@@ -942,6 +947,8 @@ const ui = {
     downloadsEmpty: 'Auf diesem Geraet ist noch nichts heruntergeladen.',
     downloadsStorage: 'Geraetespeicher',
     downloadsReady: 'Offline verfuegbar',
+    offlineCompleteBadge: 'Offline',
+    offlinePartialBadge: 'Teilweise',
     downloadsPartial: 'Braucht Aufmerksamkeit',
     downloadsActive: 'Laedt herunter',
     downloadsQueued: 'Wird erneut versucht',
@@ -1876,6 +1883,9 @@ type SeriesPosterProps = {
   authenticated: boolean
   categoryName: string
   compact?: boolean
+  coverLoading?: 'eager' | 'lazy'
+  offlineAvailability?: OfflineSeriesAvailability
+  offlineBadgeLabel?: string
   offlineMode: boolean
   ownerUserId?: string | null
   series: SeriesSummary
@@ -1886,6 +1896,9 @@ const SeriesPoster = memo(function SeriesPoster({
   authenticated,
   categoryName,
   compact = false,
+  coverLoading,
+  offlineAvailability,
+  offlineBadgeLabel,
   offlineMode,
   ownerUserId,
   series,
@@ -1902,7 +1915,7 @@ const SeriesPoster = memo(function SeriesPoster({
           cacheKey={`cover:${series.id}`}
           className="poster__image"
           decoding="async"
-          loading={compact ? 'eager' : 'lazy'}
+          loading={coverLoading ?? (compact ? 'eager' : 'lazy')}
           onError={(event) => {
             event.currentTarget.style.display = 'none'
           }}
@@ -1910,6 +1923,17 @@ const SeriesPoster = memo(function SeriesPoster({
           ownerUserId={ownerUserId}
           sourceUrl={series.coverUrl || ''}
         />
+      )}
+      {offlineAvailability && offlineBadgeLabel && (
+        <span
+          aria-label={offlineBadgeLabel}
+          className={`poster__offline-badge poster__offline-badge--${offlineAvailability}`}
+          role="img"
+          title={offlineBadgeLabel}
+        >
+          <AppIcon name={offlineAvailability === 'complete' ? 'check' : 'download'} />
+          <span aria-hidden="true" className="poster__offline-badge-label">{offlineBadgeLabel}</span>
+        </span>
       )}
       <span className="poster__badge">{categoryName}</span>
       <div className="poster__spark" />
@@ -1923,24 +1947,26 @@ const SeriesPoster = memo(function SeriesPoster({
 
 type LibrarySeriesCardProps = {
   categoryName: string
-  downloadsReadyLabel: string
   language: Language
   navigate: RouteLinkProps['navigate']
-  offlineAvailable: boolean
+  offlineAvailability?: OfflineSeriesAvailability
+  offlineCompleteLabel: string
   offlineMode: boolean
   offlineOnlyLabel: string
+  offlinePartialLabel: string
   ownerUserId?: string | null
   series: SeriesSummary
 }
 
 const LibrarySeriesCard = memo(function LibrarySeriesCard({
   categoryName,
-  downloadsReadyLabel,
   language,
   navigate,
-  offlineAvailable,
+  offlineAvailability,
+  offlineCompleteLabel,
   offlineMode,
   offlineOnlyLabel,
+  offlinePartialLabel,
   ownerUserId,
   series,
 }: LibrarySeriesCardProps) {
@@ -1959,6 +1985,12 @@ const LibrarySeriesCard = memo(function LibrarySeriesCard({
       <SeriesPoster
         authenticated
         categoryName={categoryName}
+        offlineAvailability={offlineAvailability}
+        offlineBadgeLabel={offlineAvailability === 'complete'
+          ? offlineCompleteLabel
+          : offlineAvailability === 'partial'
+            ? offlinePartialLabel
+            : undefined}
         offlineMode={offlineMode}
         ownerUserId={ownerUserId}
         series={series}
@@ -1969,7 +2001,11 @@ const LibrarySeriesCard = memo(function LibrarySeriesCard({
           <div className="chip-row">
             {offlineMode && (
               <span className="chip">
-                {offlineAvailable ? downloadsReadyLabel : offlineOnlyLabel}
+                {offlineAvailability === 'complete'
+                  ? offlineCompleteLabel
+                  : offlineAvailability === 'partial'
+                    ? offlinePartialLabel
+                    : offlineOnlyLabel}
               </span>
             )}
             <span className="series-card__progress">{series.progressLabel}</span>
@@ -2314,6 +2350,10 @@ function App() {
     () => offlineDownloads.filter((record) => record.status === 'ready'),
     [offlineDownloads],
   )
+  const offlineCoverageBySeriesId = useMemo(
+    () => getOfflineSeriesCoverage(readyOfflineDownloads),
+    [readyOfflineDownloads],
+  )
   const readyOfflineLibrary = useMemo(
     () => readyOfflineDownloads.map((record) => buildOfflineSeriesDetail(record)),
     [readyOfflineDownloads],
@@ -2354,6 +2394,13 @@ function App() {
       )) ?? null
     },
     [getReadyOfflineDownloadForEntry, readyOfflineDownloads],
+  )
+  const getOfflineAvailabilityForSeries = useCallback(
+    (series: SeriesSummary) => getOfflineSeriesAvailability(
+      offlineCoverageBySeriesId.get(series.id),
+      series.stats.fileCount,
+    ),
+    [offlineCoverageBySeriesId],
   )
 
   useEffect(() => {
@@ -5520,11 +5567,19 @@ function App() {
   }
 
   const renderPoster = (series: SeriesSummary, compact = false, showCover = authenticated) => {
+    const offlineAvailability = getOfflineAvailabilityForSeries(series)
+
     return (
       <SeriesPoster
         authenticated={authenticated}
         categoryName={categoryLabel(series.category)}
         compact={compact}
+        offlineAvailability={offlineAvailability}
+        offlineBadgeLabel={offlineAvailability === 'complete'
+          ? text.offlineCompleteBadge
+          : offlineAvailability === 'partial'
+            ? text.offlinePartialBadge
+            : undefined}
         offlineMode={offlineMode}
         ownerUserId={sessionUser?.id}
         series={series}
@@ -5561,15 +5616,14 @@ function App() {
     return (
       <LibrarySeriesCard
         categoryName={categoryLabel(series.category)}
-        downloadsReadyLabel={text.downloadsReady}
         key={series.id}
         navigate={navigateRoute}
         language={language}
-        offlineAvailable={Boolean(
-          offlineMode && getReadyOfflineDownloadForSeries(series, seriesCache[series.id] ?? null),
-        )}
+        offlineAvailability={getOfflineAvailabilityForSeries(series)}
+        offlineCompleteLabel={text.offlineCompleteBadge}
         offlineMode={offlineMode}
         offlineOnlyLabel={text.offlineOnly}
+        offlinePartialLabel={text.offlinePartialBadge}
         ownerUserId={sessionUser?.id}
         series={series}
       />
@@ -6156,6 +6210,9 @@ function App() {
   const renderDownloads = () => {
     const imagePerformance = getImageLoadPerformance()
     const routePerformance = getRoutePerformanceSummary()
+    const catalogueSeriesById = new Map(
+      readerLibraryForDisplay.map((series) => [series.id, series]),
+    )
     const filteredDownloads = offlineDownloads.filter((record) => {
       if (offlineFilter === 'active') {
         return isOfflineDownloadActive(record)
@@ -6317,7 +6374,7 @@ function App() {
           </div>
         </section>
 
-        <section className="bookmark-filter-bar downloads-filter-bar" role="tablist" aria-label={text.downloadsTitle}>
+        <section className="bookmark-filter-bar downloads-filter-bar" aria-label={text.downloadsTitle}>
           {[
             { id: 'all' as const, label: text.downloadsAll },
             { id: 'active' as const, label: text.downloadsActive },
@@ -6325,6 +6382,7 @@ function App() {
             { id: 'attention' as const, label: text.downloadsPartial },
           ].map((item) => (
             <button
+              aria-pressed={offlineFilter === item.id}
               className={`tab-button ${offlineFilter === item.id ? 'is-active' : ''}`}
               key={item.id}
               onClick={() => setOfflineFilter(item.id)}
@@ -6362,76 +6420,93 @@ function App() {
               const targetBusy = offlineBusyIds[getOfflineTargetKey(record.manifest.target)]
               const rowBusy = offlineBusyIds[record.id] || targetBusy
               const activeDownload = isOfflineDownloadActive(record)
+              const offlineSeries = buildOfflineSeriesDetail(record)
+              const catalogueSeries = catalogueSeriesById.get(offlineSeries.id)
+              const downloadedSeries = catalogueSeries
+                ? {
+                    ...offlineSeries,
+                    coverUrl: offlineSeries.coverUrl ?? catalogueSeries.coverUrl,
+                  }
+                : offlineSeries
 
               return (
                 <article className={`download-card download-card--${record.status}`} key={record.id}>
                   <div className="download-card__main">
-                    <div className="download-card__icon">
-                      <AppIcon name={record.status === 'ready' ? 'download' : activeDownload ? 'refresh' : 'offline'} />
+                    <div className="download-card__poster">
+                      <SeriesPoster
+                        authenticated={authenticated}
+                        categoryName={categoryLabel(record.manifest.category)}
+                        compact
+                        coverLoading="lazy"
+                        offlineMode={offlineMode}
+                        ownerUserId={sessionUser?.id}
+                        series={downloadedSeries}
+                        showCover
+                      />
                     </div>
-                    <div>
+                    <div className="download-card__content">
                       <div className="download-card__topline">
                         <span className="section-kicker">{categoryLabel(record.manifest.category)}</span>
                         <span className="chip">{statusLabel}</span>
                       </div>
                       <h3>{record.manifest.title}</h3>
                       <p>{record.manifest.subtitle}</p>
+                      <div className="download-card__meter" aria-hidden="true">
+                        <span style={{ width: `${progressRatio * 100}%` }} />
+                      </div>
+                      <div className="download-card__stats">
+                        <span>
+                          {text.downloadedBytes}: {formatBytes(record.downloadedBytes, language)}
+                        </span>
+                        <span>
+                          {text.estimatedBytes}: {formatBytes(record.manifest.estimatedBytes, language)}
+                        </span>
+                        <span>
+                          {record.downloadedResourceCount} / {record.resourceCount}
+                        </span>
+                      </div>
+                      {record.failureReason && <p className="download-card__error">{record.failureReason}</p>}
+                      <div className="download-card__actions">
+                        <button
+                          className="primary-button"
+                          disabled={record.status !== 'ready' || allDownloadsBusy}
+                          onClick={() => openOfflineDownload(record)}
+                          type="button"
+                        >
+                          <AppIcon name="read" />
+                          {text.openOffline}
+                        </button>
+                        <button
+                          className="ghost-button"
+                          disabled={allDownloadsBusy || Boolean(rowBusy)}
+                          onClick={() => void startOfflineDownload(record.manifest.target)}
+                          type="button"
+                        >
+                          <AppIcon name="refresh" />
+                          {record.status === 'ready' ? text.downloadAgain : text.repairDownload}
+                        </button>
+                        {activeDownload && (
+                          <button
+                            className="ghost-button"
+                            disabled={allDownloadsBusy || (record.status !== 'queued' && !offlineRunningTargetsRef.current.has(getOfflineTargetKey(record.manifest.target)) && !targetBusy)}
+                            onClick={() => void handleCancelDownload(record)}
+                            type="button"
+                          >
+                            <AppIcon name="pause" />
+                            {text.cancelDownload}
+                          </button>
+                        )}
+                        <button
+                          className="ghost-button"
+                          disabled={allDownloadsBusy || Boolean(rowBusy)}
+                          onClick={() => void handleDeleteDownload(record.id)}
+                          type="button"
+                        >
+                          <AppIcon name="trash" />
+                          {text.deleteDownload}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                  <div className="download-card__meter" aria-hidden="true">
-                    <span style={{ width: `${progressRatio * 100}%` }} />
-                  </div>
-                  <div className="download-card__stats">
-                    <span>
-                      {text.downloadedBytes}: {formatBytes(record.downloadedBytes, language)}
-                    </span>
-                    <span>
-                      {text.estimatedBytes}: {formatBytes(record.manifest.estimatedBytes, language)}
-                    </span>
-                    <span>
-                      {record.downloadedResourceCount} / {record.resourceCount}
-                    </span>
-                  </div>
-                  {record.failureReason && <p className="download-card__error">{record.failureReason}</p>}
-                  <div className="download-card__actions">
-                    <button
-                      className="primary-button"
-                      disabled={record.status !== 'ready' || allDownloadsBusy}
-                      onClick={() => openOfflineDownload(record)}
-                      type="button"
-                    >
-                      <AppIcon name="read" />
-                      {text.openOffline}
-                    </button>
-                    <button
-                      className="ghost-button"
-                      disabled={allDownloadsBusy || Boolean(rowBusy)}
-                      onClick={() => void startOfflineDownload(record.manifest.target)}
-                      type="button"
-                    >
-                      <AppIcon name="refresh" />
-                      {record.status === 'ready' ? text.downloadAgain : text.repairDownload}
-                    </button>
-                    {activeDownload && (
-                      <button
-                        className="ghost-button"
-                        disabled={allDownloadsBusy || (record.status !== 'queued' && !offlineRunningTargetsRef.current.has(getOfflineTargetKey(record.manifest.target)) && !targetBusy)}
-                        onClick={() => void handleCancelDownload(record)}
-                        type="button"
-                      >
-                        <AppIcon name="pause" />
-                        {text.cancelDownload}
-                      </button>
-                    )}
-                    <button
-                      className="ghost-button"
-                      disabled={allDownloadsBusy || Boolean(rowBusy)}
-                      onClick={() => void handleDeleteDownload(record.id)}
-                      type="button"
-                    >
-                      <AppIcon name="trash" />
-                      {text.deleteDownload}
-                    </button>
                   </div>
                 </article>
               )

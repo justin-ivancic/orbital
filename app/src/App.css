@@ -1413,22 +1413,33 @@ select {
   border-radius: 22px;
 }
 
+.app-shell--native .download-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 190px;
+}
+
 .download-card__main {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 18px;
   align-items: start;
 }
 
-.download-card__icon {
-  width: 44px;
-  height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 16px;
-  color: var(--ink);
-  background: var(--paper);
+.download-card__poster {
+  min-width: 0;
+}
+
+.download-card__poster .poster {
+  width: 100%;
+  min-height: 0;
+  aspect-ratio: 18 / 25;
+  border: 1px solid var(--ink);
+}
+
+.download-card__content {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
 }
 
 .download-card__topline {
@@ -3877,14 +3888,12 @@ button:disabled {
   }
 
   .download-card__main {
-    grid-template-columns: 40px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: 92px minmax(0, 1fr);
+    gap: 12px;
   }
 
-  .download-card__icon {
-    width: 38px;
-    height: 38px;
-    border-radius: 14px;
+  .download-card__content {
+    gap: 10px;
   }
 
   .download-card__actions .ghost-button,
@@ -5501,7 +5510,6 @@ select:disabled,
 .brand-lockup__mark,
 .profile-pill__avatar,
 .profile-avatar-large,
-.download-card__icon,
 .segmented-control button.is-active,
 .segmented-control a.is-active,
 .language-toggle button.is-active,
@@ -5531,7 +5539,6 @@ select:disabled,
 .brand-lockup__mark *,
 .profile-pill__avatar *,
 .profile-avatar-large *,
-.download-card__icon *,
 .segmented-control button.is-active *,
 .segmented-control a.is-active *,
 .language-toggle button.is-active *,
@@ -5682,6 +5689,53 @@ button[aria-label] {
 .poster__badge {
   border-radius: 0;
   font-weight: 800;
+}
+
+.poster__offline-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  background: var(--paper);
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  pointer-events: none;
+}
+
+.poster__offline-badge--complete {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.poster__offline-badge .app-icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: inherit;
+}
+
+.poster--compact .poster__offline-badge {
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  min-height: 26px;
+  justify-content: center;
+  padding: 4px 6px;
+  font-size: 0.62rem;
+}
+
+.poster--compact .poster__offline-badge-label {
+  display: none;
 }
 
 .series-hero__banner {

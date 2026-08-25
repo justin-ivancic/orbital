@@ -18,6 +18,51 @@ export type OfflineResourceTransfer = {
   stored: OfflineStoredResource
 }
 
+export type OfflineSeriesAvailability = 'complete' | 'partial'
+
+export const getOfflineSeriesAvailability = (
+  downloadedEntryIds: Set<string> | undefined,
+  currentEntryCount: number,
+): OfflineSeriesAvailability | undefined => {
+  const downloadedEntryCount = downloadedEntryIds?.size ?? 0
+
+  if (!downloadedEntryCount) {
+    return undefined
+  }
+
+  return downloadedEntryCount >= currentEntryCount ? 'complete' : 'partial'
+}
+
+export const getOfflineSeriesCoverage = (
+  records: OfflineDownloadRecord[],
+) => {
+  const entryIdsBySeriesId = new Map<string, Set<string>>()
+
+  records.forEach((record) => {
+    if (record.status !== 'ready') {
+      return
+    }
+
+    const seriesIds = new Set(
+      record.manifest.resources
+        .map((resource) => resource.seriesId)
+        .filter((seriesId): seriesId is string => Boolean(seriesId)),
+    )
+
+    if (record.manifest.target.type === 'series') {
+      seriesIds.add(record.manifest.target.seriesId)
+    }
+
+    seriesIds.forEach((seriesId) => {
+      const downloadedEntryIds = entryIdsBySeriesId.get(seriesId) ?? new Set<string>()
+      record.manifest.entries.forEach((entry) => downloadedEntryIds.add(entry.entryId))
+      entryIdsBySeriesId.set(seriesId, downloadedEntryIds)
+    })
+  })
+
+  return entryIdsBySeriesId
+}
+
 /**
  * Keeps the last-known catalogue visible while replacing only media URLs that
  * have a verified local copy. A single-entry download must not replace the
