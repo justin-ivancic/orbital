@@ -1263,6 +1263,14 @@ select {
   margin: 0;
 }
 
+.entry-table__toolbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .entry-table th,
 .entry-table td {
   text-align: left;
@@ -3786,6 +3794,12 @@ button:disabled {
   }
 
   .entry-table__toolbar .ghost-button {
+    width: 100%;
+  }
+
+  .entry-table__toolbar-actions {
+    align-items: stretch;
+    flex-direction: column;
     width: 100%;
   }
 

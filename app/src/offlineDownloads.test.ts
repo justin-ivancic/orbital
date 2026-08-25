@@ -9,6 +9,7 @@ import type {
 import {
   getOfflineSeriesCoverage,
   getOfflineSeriesAvailability,
+  isOfflineDownloadCandidateForTarget,
   isOfflineResourceComplete,
   isRetryableOfflineDownloadError,
   mergeOfflineDownloadRecord,
@@ -142,6 +143,43 @@ test('offline coverage counts unique ready entries and ignores incomplete packag
   assert.equal(getOfflineSeriesAvailability(coverage.get('series-1'), 1), 'complete')
   assert.equal(getOfflineSeriesAvailability(coverage.get('series-1'), 2), 'partial')
   assert.equal(getOfflineSeriesAvailability(coverage.get('series-2'), 1), undefined)
+})
+
+test('a series update reuses both series and individual-entry packages from that series', () => {
+  const seriesRecord = makeRecord(makeManifest([makeResource('entry-1', 'v1', 100)]))
+  const entryManifest = {
+    ...makeManifest([makeResource('entry-2', 'v1', 100)]),
+    manifestId: 'pkg_entry',
+    target: { type: 'entry' as const, entryId: 'entry-2' },
+  }
+  const entryRecord = makeRecord(entryManifest)
+  const otherSeriesManifest = {
+    ...makeManifest([{ ...makeResource('entry-3', 'v1', 100), seriesId: 'series-2' }]),
+    manifestId: 'pkg_other',
+    target: { type: 'entry' as const, entryId: 'entry-3' },
+  }
+  const otherSeriesRecord = makeRecord(otherSeriesManifest)
+
+  assert.equal(
+    isOfflineDownloadCandidateForTarget(seriesRecord, { type: 'series', seriesId: 'series-1' }),
+    true,
+  )
+  assert.equal(
+    isOfflineDownloadCandidateForTarget(entryRecord, { type: 'series', seriesId: 'series-1' }),
+    true,
+  )
+  assert.equal(
+    isOfflineDownloadCandidateForTarget(otherSeriesRecord, { type: 'series', seriesId: 'series-1' }),
+    false,
+  )
+  assert.equal(
+    isOfflineDownloadCandidateForTarget(entryRecord, { type: 'entry', entryId: 'entry-2' }),
+    true,
+  )
+  assert.equal(
+    isOfflineDownloadCandidateForTarget(seriesRecord, { type: 'entry', entryId: 'entry-2' }),
+    false,
+  )
 })
 
 test('offline catalogue merge keeps cached metadata and adds local-only series', () => {

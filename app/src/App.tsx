@@ -111,6 +111,7 @@ import {
   isRetryableOfflineDownloadError,
   getOfflineSeriesCoverage,
   getOfflineSeriesAvailability,
+  isOfflineDownloadCandidateForTarget,
   mergeOfflineDownloadRecord,
   mergeOfflineManifestWithStoredResources,
   offlineRetryDelay,
@@ -641,6 +642,7 @@ const ui = {
     preparingOfflineDownload: 'Preparing update...',
     preparingOfflineUpdate: (current: number, total: number) => `Preparing update ${current} / ${total}`,
     downloadSeries: 'Download series',
+    downloadRemaining: 'Download remaining',
     updateSeriesDownload: 'Update offline series',
     downloadProgress: (current: number, total: number) => `Downloading ${current} / ${total}`,
     downloadEntry: 'Download chapter',
@@ -958,6 +960,7 @@ const ui = {
     preparingOfflineDownload: 'Update wird vorbereitet...',
     preparingOfflineUpdate: (current: number, total: number) => `Update wird vorbereitet ${current} / ${total}`,
     downloadSeries: 'Serie herunterladen',
+    downloadRemaining: 'Fehlende herunterladen',
     updateSeriesDownload: 'Offline-Serie aktualisieren',
     downloadProgress: (current: number, total: number) => `Wird geladen ${current} / ${total}`,
     downloadEntry: 'Kapitel herunterladen',
@@ -2369,6 +2372,13 @@ function App() {
       )) ?? null
     },
     [readyOfflineDownloads],
+  )
+  const getOfflineDownloadForSeries = useCallback(
+    (seriesId: string) => offlineDownloads.find((record) => (
+      record.manifest.target.type === 'series' &&
+      record.manifest.target.seriesId === seriesId
+    )) ?? null,
+    [offlineDownloads],
   )
   const getReadyOfflineDownloadForSeries = useCallback(
     (series: SeriesSummary | null | undefined, seriesDetail: SeriesDetail | null | undefined) => {
@@ -4179,7 +4189,7 @@ function App() {
           ]
             .filter((download) => (
               download.ownerUserId === sessionUser.id &&
-              getOfflineTargetKey(download.manifest.target) === busyKey
+              isOfflineDownloadCandidateForTarget(download, target)
             ))
             .map((download) => [download.id, download] as const),
         ).values(),
@@ -6055,17 +6065,22 @@ function App() {
                 seriesId: series.id,
               } satisfies OfflineDownloadTarget
               const bookmarkSeriesBusy = offlineBusyIds[getOfflineTargetKey(bookmarkSeriesTarget)]
-              const bookmarkSeriesDownload = offlineDownloads.find((download) => (
-                download.manifest.target.type === 'series' &&
-                download.manifest.target.seriesId === series.id
-              )) ?? null
+              const bookmarkSeriesDownload = getOfflineDownloadForSeries(series.id)
               const bookmarkSeriesReady = bookmarkSeriesDownload?.status === 'ready'
+              const bookmarkOfflineAvailability = getOfflineAvailabilityForSeries(series)
+              const bookmarkSeriesHasProgress = Boolean(
+                bookmarkSeriesDownload &&
+                bookmarkSeriesDownload.status !== 'ready' &&
+                bookmarkSeriesDownload.downloadedResourceCount > 0,
+              )
               const bookmarkDownloadLabel = bookmarkSeriesBusy || (
-                bookmarkSeriesReady
-                  ? text.updateSeriesDownload
-                  : series.category === 'books' && series.stats.fileCount <= 1
-                    ? text.downloadBook
-                    : text.downloadSeries
+                bookmarkOfflineAvailability === 'partial' || bookmarkSeriesHasProgress
+                  ? text.downloadRemaining
+                  : bookmarkSeriesReady
+                    ? text.updateSeriesDownload
+                    : series.category === 'books' && series.stats.fileCount <= 1
+                      ? text.downloadBook
+                      : text.downloadSeries
               )
 
               return (
@@ -6213,6 +6228,10 @@ function App() {
     const catalogueSeriesById = new Map(
       readerLibraryForDisplay.map((series) => [series.id, series]),
     )
+    const getDownloadAvailability = (record: OfflineDownloadRecord) => {
+      const offlineSeries = buildOfflineSeriesDetail(record)
+      return getOfflineAvailabilityForSeries(catalogueSeriesById.get(offlineSeries.id) ?? offlineSeries)
+    }
     const filteredDownloads = offlineDownloads.filter((record) => {
       if (offlineFilter === 'active') {
         return isOfflineDownloadActive(record)
@@ -6223,7 +6242,10 @@ function App() {
       }
 
       if (offlineFilter === 'attention') {
-        return ['failed', 'partial', 'stale', 'paused'].includes(record.status)
+        return (
+          ['failed', 'partial', 'stale', 'paused'].includes(record.status) ||
+          (record.status === 'ready' && getDownloadAvailability(record) === 'partial')
+        )
       }
 
       return true
@@ -6403,22 +6425,6 @@ function App() {
                 : record.resourceCount
                   ? record.downloadedResourceCount / record.resourceCount
                   : 0
-              const statusLabel =
-                record.status === 'ready'
-                  ? text.downloadsReady
-                  : record.status === 'downloading'
-                    ? text.downloadsActive
-                    : record.status === 'queued'
-                      ? text.downloadsQueued
-                      : record.status === 'paused'
-                        ? text.downloadsPaused
-                    : record.status === 'stale'
-                      ? text.downloadStale
-                      : record.status === 'failed'
-                        ? text.downloadFailed
-                        : record.status
-              const targetBusy = offlineBusyIds[getOfflineTargetKey(record.manifest.target)]
-              const rowBusy = offlineBusyIds[record.id] || targetBusy
               const activeDownload = isOfflineDownloadActive(record)
               const offlineSeries = buildOfflineSeriesDetail(record)
               const catalogueSeries = catalogueSeriesById.get(offlineSeries.id)
@@ -6428,6 +6434,36 @@ function App() {
                     coverUrl: offlineSeries.coverUrl ?? catalogueSeries.coverUrl,
                   }
                 : offlineSeries
+              const offlineAvailability = getDownloadAvailability(record)
+              const shouldUpdatePartialSeries = record.status === 'ready' && offlineAvailability === 'partial'
+              const shouldDownloadRemaining = shouldUpdatePartialSeries || (
+                ['partial', 'paused'].includes(record.status) && record.downloadedResourceCount > 0
+              )
+              const nextDownloadTarget = shouldUpdatePartialSeries
+                ? {
+                    type: 'series',
+                    seriesId: downloadedSeries.id,
+                  } satisfies OfflineDownloadTarget
+                : record.manifest.target
+              const targetBusy = offlineBusyIds[getOfflineTargetKey(record.manifest.target)]
+              const nextDownloadBusy = offlineBusyIds[getOfflineTargetKey(nextDownloadTarget)]
+              const rowBusy = offlineBusyIds[record.id] || targetBusy || nextDownloadBusy
+              const statusLabel =
+                shouldUpdatePartialSeries || record.status === 'partial'
+                  ? text.offlinePartialBadge
+                  : record.status === 'ready'
+                    ? text.downloadsReady
+                    : record.status === 'downloading'
+                      ? text.downloadsActive
+                      : record.status === 'queued'
+                        ? text.downloadsQueued
+                        : record.status === 'paused'
+                          ? text.downloadsPaused
+                      : record.status === 'stale'
+                        ? text.downloadStale
+                        : record.status === 'failed'
+                          ? text.downloadFailed
+                          : record.status
 
               return (
                 <article className={`download-card download-card--${record.status}`} key={record.id}>
@@ -6479,11 +6515,15 @@ function App() {
                         <button
                           className="ghost-button"
                           disabled={allDownloadsBusy || Boolean(rowBusy)}
-                          onClick={() => void startOfflineDownload(record.manifest.target)}
+                          onClick={() => void startOfflineDownload(nextDownloadTarget)}
                           type="button"
                         >
-                          <AppIcon name="refresh" />
-                          {record.status === 'ready' ? text.downloadAgain : text.repairDownload}
+                          <AppIcon name={shouldDownloadRemaining ? 'download' : 'refresh'} />
+                          {shouldDownloadRemaining
+                            ? text.downloadRemaining
+                            : record.status === 'ready'
+                              ? text.downloadAgain
+                              : text.repairDownload}
                         </button>
                         {activeDownload && (
                           <button
@@ -7001,6 +7041,11 @@ function App() {
     } satisfies OfflineDownloadTarget
     const seriesOfflineBusy = offlineBusyIds[getOfflineTargetKey(seriesOfflineTarget)]
     const seriesOfflineDownload = getReadyOfflineDownloadForSeries(selectedSeriesSummary, selectedSeries)
+    const seriesOfflineAvailability = getOfflineAvailabilityForSeries(selectedSeriesSummary)
+    const seriesOfflineRecord = getOfflineDownloadForSeries(selectedSeriesSummary.id)
+    const seriesHasDownloadProgress = Boolean(
+      seriesOfflineRecord && seriesOfflineRecord.downloadedResourceCount > 0,
+    )
 
     return (
       <div className="series-tab-grid">
@@ -7145,19 +7190,31 @@ function App() {
                 {text.loadingSeries}
               </button>
             )}
-            <button
-              className="ghost-button"
-              disabled={offlineMode || Boolean(seriesOfflineBusy)}
-              onClick={() => (
-                seriesOfflineDownload
-                  ? openOfflineDownload(seriesOfflineDownload)
-                  : void startOfflineDownload(seriesOfflineTarget)
-              )}
-              type="button"
-            >
-              <AppIcon name={seriesOfflineDownload ? 'offline' : 'download'} />
-              {seriesOfflineBusy || (seriesOfflineDownload ? text.openOffline : text.downloadSeries)}
-            </button>
+            {seriesOfflineDownload && (
+              <button
+                className="ghost-button"
+                onClick={() => openOfflineDownload(seriesOfflineDownload)}
+                type="button"
+              >
+                <AppIcon name="offline" />
+                {text.openOffline}
+              </button>
+            )}
+            {seriesOfflineAvailability !== 'complete' && (
+              <button
+                className="ghost-button"
+                disabled={offlineMode || Boolean(seriesOfflineBusy)}
+                onClick={() => void startOfflineDownload(seriesOfflineTarget)}
+                type="button"
+              >
+                <AppIcon name="download" />
+                {seriesOfflineBusy || (
+                  seriesOfflineAvailability === 'partial' || seriesHasDownloadProgress
+                    ? text.downloadRemaining
+                    : text.downloadSeries
+                )}
+              </button>
+            )}
             <RouteLink
               className="ghost-button"
               navigate={navigateRoute}
@@ -7216,6 +7273,11 @@ function App() {
     } satisfies OfflineDownloadTarget
     const seriesOfflineBusy = offlineBusyIds[getOfflineTargetKey(seriesOfflineTarget)]
     const seriesOfflineDownload = getReadyOfflineDownloadForSeries(selectedSeries, selectedSeries)
+    const seriesOfflineAvailability = getOfflineAvailabilityForSeries(selectedSeries)
+    const seriesOfflineRecord = getOfflineDownloadForSeries(selectedSeries.id)
+    const seriesHasDownloadProgress = Boolean(
+      seriesOfflineRecord && seriesOfflineRecord.downloadedResourceCount > 0,
+    )
 
     return (
       <div className="panel panel--padded">
@@ -7226,19 +7288,33 @@ function App() {
               {formatCountLabel(selectedSeries.category, selectedSeries.entries.length, language)}
             </p>
           </div>
-          <button
-            className="ghost-button"
-            disabled={offlineMode || Boolean(seriesOfflineBusy)}
-            onClick={() => (
-              seriesOfflineDownload
-                ? openOfflineDownload(seriesOfflineDownload)
-                : void startOfflineDownload(seriesOfflineTarget)
+          <div className="entry-table__toolbar-actions">
+            {seriesOfflineDownload && (
+              <button
+                className="ghost-button"
+                onClick={() => openOfflineDownload(seriesOfflineDownload)}
+                type="button"
+              >
+                <AppIcon name="offline" />
+                {text.openOffline}
+              </button>
             )}
-            type="button"
-          >
-            <AppIcon name={seriesOfflineDownload ? 'offline' : 'download'} />
-            {seriesOfflineBusy || (seriesOfflineDownload ? text.openOffline : text.downloadSeries)}
-          </button>
+            {seriesOfflineAvailability !== 'complete' && (
+              <button
+                className="ghost-button"
+                disabled={offlineMode || Boolean(seriesOfflineBusy)}
+                onClick={() => void startOfflineDownload(seriesOfflineTarget)}
+                type="button"
+              >
+                <AppIcon name="download" />
+                {seriesOfflineBusy || (
+                  seriesOfflineAvailability === 'partial' || seriesHasDownloadProgress
+                    ? text.downloadRemaining
+                    : text.downloadSeries
+                )}
+              </button>
+            )}
+          </div>
         </div>
         {selectedSeries.category === 'anime' && availableAnimeSeasons.length > 1 && (
           <div className="season-filter-bar" role="tablist" aria-label="Anime seasons">

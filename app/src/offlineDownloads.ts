@@ -2,6 +2,7 @@ import type {
   OfflineDownloadManifest,
   OfflineDownloadRecord,
   OfflineDownloadResource,
+  OfflineDownloadTarget,
   SeriesDetail,
   SeriesSummary,
 } from './appTypes'
@@ -61,6 +62,23 @@ export const getOfflineSeriesCoverage = (
   })
 
   return entryIdsBySeriesId
+}
+
+export const isOfflineDownloadCandidateForTarget = (
+  record: OfflineDownloadRecord,
+  target: OfflineDownloadTarget,
+) => {
+  if (target.type === 'entry') {
+    return (
+      record.manifest.target.type === 'entry' &&
+      record.manifest.target.entryId === target.entryId
+    )
+  }
+
+  return (
+    (record.manifest.target.type === 'series' && record.manifest.target.seriesId === target.seriesId) ||
+    record.manifest.resources.some((resource) => resource.seriesId === target.seriesId)
+  )
 }
 
 /**
