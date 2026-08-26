@@ -278,6 +278,17 @@ export const openDatabase = (dataDirectory: string) => {
   ensureColumn('scan_runs', 'requested_source_id', 'TEXT')
   ensureColumn('scan_runs', 'resume_attempt', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn('scan_runs', 'heartbeat_at', 'TEXT')
+  ensureColumn('scan_runs', 'lineage_id', 'TEXT')
+  ensureColumn('scan_runs', 'resumed_from_run_id', 'TEXT')
+  ensureColumn('scan_runs', 'current_source_id', 'TEXT')
+  ensureColumn('scan_runs', 'current_series_key', 'TEXT')
+  ensureColumn('scan_runs', 'current_series_title', 'TEXT')
+  ensureColumn('scan_runs', 'current_series_index', 'INTEGER')
+  ensureColumn('scan_runs', 'current_series_total', 'INTEGER')
+  ensureColumn('scan_runs', 'current_series_entry_completed', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('scan_runs', 'current_series_entry_total', 'INTEGER')
+  ensureColumn('scan_runs', 'process_rss_bytes', 'INTEGER')
+  ensureColumn('scan_runs', 'heap_used_bytes', 'INTEGER')
 
   const needsCategoryConstraintMigration = ['source_folders', 'series', 'bookmarks'].some((tableName) => {
     const table = db
@@ -426,11 +437,28 @@ export const openDatabase = (dataDirectory: string) => {
   }
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS scan_series_checkpoints (
+      lineage_id TEXT NOT NULL,
+      source_folder_id TEXT NOT NULL REFERENCES source_folders(id) ON DELETE CASCADE,
+      series_key TEXT NOT NULL,
+      series_id TEXT,
+      fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'quarantined')),
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      completed_entries INTEGER NOT NULL DEFAULT 0,
+      total_entries INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (lineage_id, source_folder_id, series_key)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_series_source_folder ON series(source_folder_id);
     CREATE INDEX IF NOT EXISTS idx_series_category_sort ON series(category, year, title COLLATE NOCASE);
     CREATE INDEX IF NOT EXISTS idx_entries_series_order ON entries(series_id, sort_order, label, title);
     CREATE INDEX IF NOT EXISTS idx_entries_source_folder ON entries(source_folder_id);
     CREATE INDEX IF NOT EXISTS idx_comments_series_created ON comments(series_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_scan_checkpoints_source_status
+      ON scan_series_checkpoints(lineage_id, source_folder_id, status);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS series_search_fts USING fts5(
       series_id UNINDEXED,

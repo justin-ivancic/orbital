@@ -2,12 +2,11 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import crypto from 'node:crypto'
 import path from 'node:path'
-import { createCanvas } from '@napi-rs/canvas'
+import { fork } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import type { Database } from 'better-sqlite3'
 import bcrypt from 'bcryptjs'
-import JSZip from 'jszip'
 import mime from 'mime-types'
-import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs'
 import type {
   AppState,
   Bookmark,
@@ -454,6 +453,9 @@ const localCoverNames = [
 
 const SCAN_FILESYSTEM_CONCURRENCY = 16
 const SCAN_SERIES_CHECKPOINT_INTERVAL = 25
+const SCAN_ENTRY_COMMIT_BATCH_SIZE = 250
+const SCAN_SERIES_HARD_FAILURE_LIMIT = 2
+const SCAN_COVER_WORKER_TIMEOUT_MS = 60_000
 
 const emptyMediaTracks = (): MediaTrackCollection => ({
   audio: [],
@@ -966,32 +968,6 @@ const formatFileSystemError = (error: unknown) =>
 const fileSystemIdentity = (stats: fs.Stats) =>
   Number.isFinite(stats.dev) && Number.isFinite(stats.ino) ? `${stats.dev}:${stats.ino}` : null
 
-const createAsyncLimiter = (limit: number) => {
-  let activeOperations = 0
-  const waitingOperations: Array<() => void> = []
-
-  const acquire = async () => {
-    if (activeOperations >= limit) {
-      await new Promise<void>((resolve) => waitingOperations.push(resolve))
-    }
-    activeOperations += 1
-  }
-
-  const release = () => {
-    activeOperations -= 1
-    waitingOperations.shift()?.()
-  }
-
-  return async <Result>(operation: () => Promise<Result>) => {
-    await acquire()
-    try {
-      return await operation()
-    } finally {
-      release()
-    }
-  }
-}
-
 const findLocalCoverFileName = (directoryEntries: fs.Dirent[]) => {
   const regularFileNames = directoryEntries
     .filter((entry) => entry.isFile())
@@ -1019,85 +995,7 @@ const scanDirectory = async (
   const files: FileRecord[] = []
   const warnings: ScanDirectoryWarning[] = []
   const localCoversByDirectory = new Map<string, string>()
-  const runFilesystemOperation = createAsyncLimiter(SCAN_FILESYSTEM_CONCURRENCY)
   let rootIdentity: string | null = null
-
-  const visit = async (absolutePath: string, relativeDirectory: string): Promise<void> => {
-    let directoryEntries: fs.Dirent[]
-
-    try {
-      directoryEntries = await runFilesystemOperation(() =>
-        fsPromises.readdir(absolutePath, { withFileTypes: true }),
-      )
-    } catch (error) {
-      warnings.push({
-        path: absolutePath,
-        message: `Skipped directory: ${formatFileSystemError(error)}`,
-      })
-      return
-    }
-
-    directoryEntries.sort((left, right) => naturalCompare(left.name, right.name))
-
-    const localCoverFileName = findLocalCoverFileName(directoryEntries)
-    if (localCoverFileName) {
-      localCoversByDirectory.set(absolutePath, path.join(absolutePath, localCoverFileName))
-    }
-
-    await Promise.all(directoryEntries.map(async (directoryEntry) => {
-      if (directoryEntry.name.startsWith('.')) {
-        return
-      }
-
-      const entryAbsolutePath = path.join(absolutePath, directoryEntry.name)
-      const entryRelativePath = relativeDirectory
-        ? path.join(relativeDirectory, directoryEntry.name)
-        : directoryEntry.name
-
-      if (directoryEntry.isDirectory()) {
-        await visit(entryAbsolutePath, entryRelativePath)
-        return
-      }
-
-      // Never follow file symlinks outside a linked library source.
-      if (!directoryEntry.isFile()) {
-        return
-      }
-
-      const extension = path.extname(directoryEntry.name).toLowerCase()
-
-      if (!allowedExtensions.has(extension)) {
-        return
-      }
-
-      let stats: fs.Stats
-
-      try {
-        stats = await runFilesystemOperation(() => fsPromises.lstat(entryAbsolutePath))
-      } catch (error) {
-        warnings.push({
-          path: entryAbsolutePath,
-          message: `Skipped file: ${formatFileSystemError(error)}`,
-        })
-        return
-      }
-
-      if (!stats.isFile() || stats.isSymbolicLink()) {
-        return
-      }
-
-      files.push({
-        path: entryAbsolutePath,
-        relativePath: entryRelativePath,
-        baseName: directoryEntry.name,
-        extension,
-        size: stats.size,
-        mtimeMs: Math.floor(stats.mtimeMs),
-        identity: fileSystemIdentity(stats),
-      })
-
-    }))
-  }
 
   try {
     const rootStats = await fsPromises.stat(rootPath)
@@ -1109,7 +1007,122 @@ const scanDirectory = async (
       })
     } else {
       rootIdentity = fileSystemIdentity(rootStats)
-      await visit(rootPath, '')
+      const pendingDirectories = [{ absolutePath: rootPath, relativeDirectory: '' }]
+      let directoryOffset = 0
+
+      while (directoryOffset < pendingDirectories.length) {
+        const directoryBatch = pendingDirectories.slice(
+          directoryOffset,
+          directoryOffset + SCAN_FILESYSTEM_CONCURRENCY,
+        )
+        directoryOffset += directoryBatch.length
+        const directoryResults = await Promise.all(
+          directoryBatch.map(async ({ absolutePath, relativeDirectory }) => {
+            try {
+              const entries = await fsPromises.readdir(absolutePath, { withFileTypes: true })
+              entries.sort((left, right) => naturalCompare(left.name, right.name))
+              return { absolutePath, relativeDirectory, entries }
+            } catch (error) {
+              warnings.push({
+                path: absolutePath,
+                message: `Skipped directory: ${formatFileSystemError(error)}`,
+              })
+              return null
+            }
+          }),
+        )
+        const fileCandidates: Array<{
+          absolutePath: string
+          relativePath: string
+          baseName: string
+          extension: string
+        }> = []
+
+        for (const directoryResult of directoryResults) {
+          if (!directoryResult) {
+            continue
+          }
+
+          const localCoverFileName = findLocalCoverFileName(directoryResult.entries)
+          if (localCoverFileName) {
+            localCoversByDirectory.set(
+              directoryResult.absolutePath,
+              path.join(directoryResult.absolutePath, localCoverFileName),
+            )
+          }
+
+          for (const directoryEntry of directoryResult.entries) {
+            if (directoryEntry.name.startsWith('.')) {
+              continue
+            }
+
+            const entryAbsolutePath = path.join(directoryResult.absolutePath, directoryEntry.name)
+            const entryRelativePath = directoryResult.relativeDirectory
+              ? path.join(directoryResult.relativeDirectory, directoryEntry.name)
+              : directoryEntry.name
+
+            if (directoryEntry.isDirectory()) {
+              pendingDirectories.push({
+                absolutePath: entryAbsolutePath,
+                relativeDirectory: entryRelativePath,
+              })
+              continue
+            }
+
+            if (!directoryEntry.isFile()) {
+              continue
+            }
+
+            const extension = path.extname(directoryEntry.name).toLowerCase()
+            if (allowedExtensions.has(extension)) {
+              fileCandidates.push({
+                absolutePath: entryAbsolutePath,
+                relativePath: entryRelativePath,
+                baseName: directoryEntry.name,
+                extension,
+              })
+            }
+          }
+        }
+
+        for (let offset = 0; offset < fileCandidates.length; offset += SCAN_FILESYSTEM_CONCURRENCY) {
+          const fileBatch = fileCandidates.slice(offset, offset + SCAN_FILESYSTEM_CONCURRENCY)
+          const fileResults = await Promise.all(
+            fileBatch.map(async (candidate) => {
+              try {
+                const stats = await fsPromises.lstat(candidate.absolutePath)
+                if (!stats.isFile() || stats.isSymbolicLink()) {
+                  return null
+                }
+                return { candidate, stats }
+              } catch (error) {
+                warnings.push({
+                  path: candidate.absolutePath,
+                  message: `Skipped file: ${formatFileSystemError(error)}`,
+                })
+                return null
+              }
+            }),
+          )
+
+          for (const fileResult of fileResults) {
+            if (!fileResult) {
+              continue
+            }
+            files.push({
+              path: fileResult.candidate.absolutePath,
+              relativePath: fileResult.candidate.relativePath,
+              baseName: fileResult.candidate.baseName,
+              extension: fileResult.candidate.extension,
+              size: fileResult.stats.size,
+              mtimeMs: Math.floor(fileResult.stats.mtimeMs),
+              identity: fileSystemIdentity(fileResult.stats),
+            })
+          }
+        }
+
+        await yieldToEventLoop()
+      }
     }
   } catch (error) {
     warnings.push({
@@ -1804,8 +1817,114 @@ const shouldEmitSeriesCheckpoint = (completedSeries: number, totalSeries: number
   completedSeries === totalSeries ||
   completedSeries % SCAN_SERIES_CHECKPOINT_INTERVAL === 0
 
+const isSqliteFailure = (error: unknown) =>
+  Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      typeof error.code === 'string' &&
+      error.code.startsWith('SQLITE_'),
+  )
+
 const buildScanSummary = (scannedSourceCount: number, metrics: ScanMetrics) =>
   `${scannedSourceCount} source folder${scannedSourceCount === 1 ? '' : 's'} scanned; ${metrics.discoveredFiles} files checked, ${metrics.reusedFiles} reused, ${metrics.parsedFiles} parsed, ${metrics.unchangedFiles} unchanged, ${metrics.newFiles} new, ${metrics.movedFiles} moved, ${metrics.deletedFiles} deleted${metrics.skippedSources ? `; ${metrics.skippedSources} source${metrics.skippedSources === 1 ? '' : 's'} skipped` : ''}`
+
+type DurableScanProgress = {
+  sourceId: string | null
+  seriesKey: string | null
+  seriesTitle: string | null
+  seriesIndex: number | null
+  seriesTotal: number | null
+  completedEntries: number
+  totalEntries: number | null
+}
+
+type ScanSeriesCheckpointRow = {
+  series_key: string
+  series_id: string | null
+  fingerprint: string
+  status: 'running' | 'completed' | 'failed' | 'quarantined'
+  failure_count: number
+  last_error: string | null
+  completed_entries: number
+  total_entries: number
+}
+
+const fingerprintSeries = (series: SeriesSpec) => {
+  const digest = crypto.createHash('sha256')
+  digest.update(`${LIBRARY_SCANNER_VERSION}\0${series.key}\0${series.entries.length}\0`)
+  for (const entry of series.entries) {
+    digest.update(entry.file.relativePath)
+    digest.update('\0')
+    digest.update(String(entry.file.size))
+    digest.update('\0')
+    digest.update(String(entry.file.mtimeMs))
+    digest.update('\0')
+    digest.update(entry.file.identity || '')
+    digest.update('\0')
+  }
+  return digest.digest('hex')
+}
+
+const getSeriesCheckpoints = (db: Database, lineageId: string, sourceFolderId: string) => {
+  const rows = db
+    .prepare(
+      `
+        SELECT series_key, series_id, fingerprint, status, failure_count, last_error,
+               completed_entries, total_entries
+        FROM scan_series_checkpoints
+        WHERE lineage_id = ? AND source_folder_id = ?
+      `,
+    )
+    .all(lineageId, sourceFolderId) as ScanSeriesCheckpointRow[]
+  return new Map(rows.map((row) => [row.series_key, row]))
+}
+
+const persistSeriesCheckpoint = (
+  db: Database,
+  lineageId: string,
+  sourceFolderId: string,
+  series: SeriesSpec,
+  fingerprint: string,
+  payload: {
+    seriesId?: string | null
+    status: ScanSeriesCheckpointRow['status']
+    failureCount?: number
+    lastError?: string | null
+    completedEntries?: number
+  },
+) => {
+  const now = nowIso()
+  db.prepare(
+    `
+      INSERT INTO scan_series_checkpoints (
+        lineage_id, source_folder_id, series_key, series_id, fingerprint, status,
+        failure_count, last_error, completed_entries, total_entries, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(lineage_id, source_folder_id, series_key) DO UPDATE SET
+        series_id = excluded.series_id,
+        fingerprint = excluded.fingerprint,
+        status = excluded.status,
+        failure_count = excluded.failure_count,
+        last_error = excluded.last_error,
+        completed_entries = excluded.completed_entries,
+        total_entries = excluded.total_entries,
+        updated_at = excluded.updated_at
+    `,
+  ).run(
+    lineageId,
+    sourceFolderId,
+    series.key,
+    payload.seriesId ?? null,
+    fingerprint,
+    payload.status,
+    payload.failureCount ?? 0,
+    payload.lastError ?? null,
+    payload.completedEntries ?? 0,
+    series.entries.length,
+    now,
+  )
+}
 
 const persistScanCheckpoint = (
   db: Database,
@@ -1813,13 +1932,18 @@ const persistScanCheckpoint = (
   changedFiles: number,
   metrics: ScanMetrics,
   summary: string,
+  progress?: DurableScanProgress,
 ) => {
+  const memoryUsage = process.memoryUsage()
   db.prepare(
     `
       UPDATE scan_runs
       SET heartbeat_at = ?, changed_files = ?, discovered_files = ?, parsed_files = ?,
           reused_files = ?, unchanged_files = ?, new_files = ?, deleted_files = ?,
-          moved_files = ?, processed_series = ?, summary = ?
+          moved_files = ?, processed_series = ?, summary = ?, current_source_id = ?,
+          current_series_key = ?, current_series_title = ?, current_series_index = ?,
+          current_series_total = ?, current_series_entry_completed = ?,
+          current_series_entry_total = ?, process_rss_bytes = ?, heap_used_bytes = ?
       WHERE id = ? AND status = 'running'
     `,
   ).run(
@@ -1834,6 +1958,15 @@ const persistScanCheckpoint = (
     metrics.movedFiles,
     metrics.processedSeries,
     summary,
+    progress?.sourceId ?? null,
+    progress?.seriesKey ?? null,
+    progress?.seriesTitle ?? null,
+    progress?.seriesIndex ?? null,
+    progress?.seriesTotal ?? null,
+    progress?.completedEntries ?? 0,
+    progress?.totalEntries ?? null,
+    memoryUsage.rss,
+    memoryUsage.heapUsed,
     scanRunId,
   )
 }
@@ -1943,9 +2076,9 @@ const getStoredScanStatus = (db: Database): ScanStatus => {
 
 export const getLatestScanStatus = (db: Database) => getStoredScanStatus(db)
 
-export const MAX_AUTOMATIC_SCAN_RESUMES = 2
-
 export type InterruptedScanResumption = {
+  runId: string
+  lineageId: string
   sourceId: string | null
   resumeAttempt: number
   shouldResume: boolean
@@ -1955,7 +2088,8 @@ export const markInterruptedScans = (db: Database): InterruptedScanResumption[] 
   const interruptedRuns = db
     .prepare(
       `
-        SELECT id, requested_source_id, resume_attempt
+        SELECT id, requested_source_id, resume_attempt, lineage_id,
+               current_source_id, current_series_key, current_series_title
         FROM scan_runs
         WHERE status = 'running'
         ORDER BY started_at DESC
@@ -1965,6 +2099,10 @@ export const markInterruptedScans = (db: Database): InterruptedScanResumption[] 
     id: string
     requested_source_id: string | null
     resume_attempt: number
+    lineage_id: string | null
+    current_source_id: string | null
+    current_series_key: string | null
+    current_series_title: string | null
   }>
 
   if (!interruptedRuns.length) {
@@ -1984,10 +2122,44 @@ export const markInterruptedScans = (db: Database): InterruptedScanResumption[] 
   const resumptions: InterruptedScanResumption[] = []
 
   for (const run of interruptedRuns) {
-    const shouldResume = run.resume_attempt < MAX_AUTOMATIC_SCAN_RESUMES
-    const summary = shouldResume
-      ? 'Scan was interrupted before completion; completed records were retained. It will resume automatically.'
-      : 'Scan was interrupted before completion; completed records were retained. Automatic resume stopped after repeated interruptions.'
+    const lineageId = run.lineage_id || run.id
+    let quarantinedSeries = false
+
+    if (run.current_source_id && run.current_series_key) {
+      const checkpoint = db
+        .prepare(
+          `
+            SELECT failure_count
+            FROM scan_series_checkpoints
+            WHERE lineage_id = ? AND source_folder_id = ? AND series_key = ?
+            LIMIT 1
+          `,
+        )
+        .get(lineageId, run.current_source_id, run.current_series_key) as
+        | { failure_count: number }
+        | undefined
+      const failureCount = (checkpoint?.failure_count ?? 0) + 1
+      quarantinedSeries = failureCount >= SCAN_SERIES_HARD_FAILURE_LIMIT
+      db.prepare(
+        `
+          UPDATE scan_series_checkpoints
+          SET status = ?, failure_count = ?, last_error = ?, updated_at = ?
+          WHERE lineage_id = ? AND source_folder_id = ? AND series_key = ?
+        `,
+      ).run(
+        quarantinedSeries ? 'quarantined' : 'failed',
+        failureCount,
+        'The server process stopped while this series was being processed.',
+        finishedAt,
+        lineageId,
+        run.current_source_id,
+        run.current_series_key,
+      )
+    }
+
+    const summary = quarantinedSeries
+      ? `Scan was interrupted while processing ${run.current_series_title || 'one series'}; completed records were retained. That series will be quarantined and the scan will resume.`
+      : 'Scan was interrupted before completion; completed records were retained. It will resume automatically.'
     appendScanEvent(db, run.id, 'error', summary)
     db.prepare(
       `
@@ -1997,9 +2169,11 @@ export const markInterruptedScans = (db: Database): InterruptedScanResumption[] 
       `,
     ).run(finishedAt, summary, finishedAt, run.id)
     resumptions.push({
+      runId: run.id,
+      lineageId,
       sourceId: run.requested_source_id,
       resumeAttempt: run.resume_attempt,
-      shouldResume,
+      shouldResume: true,
     })
   }
 
@@ -2435,50 +2609,74 @@ const getGroupedEntryCountsBySeries = (
   return groupedCounts
 }
 
-const renderPdfCover = async (inputPath: string, outputPath: string) => {
-  const documentData = new Uint8Array(await fsPromises.readFile(inputPath))
-  const loadingTask = pdfjs.getDocument({
-    data: documentData,
-    useSystemFonts: true,
+type CoverWorkerRequest =
+  | { kind: 'pdf'; inputPath: string; outputPath: string }
+  | { kind: 'cbz'; inputPath: string; outputBasePath: string }
+
+type CoverWorkerResult =
+  | { ok: true; outputPath: string; mimeType: string }
+  | { ok: false; error: string }
+
+const runCoverWorker = (request: CoverWorkerRequest) =>
+  new Promise<{ outputPath: string; mimeType: string }>((resolve, reject) => {
+    const workerPath = fileURLToPath(new URL('./scanCoverWorker.ts', import.meta.url))
+    const workerExecArguments = process.execArgv.filter(
+      (argument) => argument !== '--test' && argument !== '--eval' && argument !== '-e',
+    )
+    const worker = fork(workerPath, [], {
+      execArgv: ['--max-old-space-size=192', ...workerExecArguments],
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    })
+    let settled = false
+    let stderr = ''
+    let timeout: NodeJS.Timeout | null = null
+
+    const finish = (error?: Error, result?: { outputPath: string; mimeType: string }) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      if (timeout) {
+        clearTimeout(timeout)
+      }
+      worker.removeAllListeners()
+      if (worker.connected) {
+        worker.disconnect()
+      }
+      if (error) {
+        reject(error)
+      } else if (result) {
+        resolve(result)
+      }
+    }
+
+    worker.stderr?.on('data', (chunk: Buffer) => {
+      if (stderr.length < 4_000) {
+        stderr += chunk.toString('utf8').slice(0, 4_000 - stderr.length)
+      }
+    })
+    worker.once('error', (error) => finish(error))
+    worker.once('exit', (code, signal) => {
+      if (!settled) {
+        const detail = stderr.trim() || `exit ${code ?? 'unknown'}${signal ? ` (${signal})` : ''}`
+        finish(new Error(`Cover worker stopped unexpectedly: ${detail}`))
+      }
+    })
+    worker.once('message', (message: CoverWorkerResult) => {
+      if (message.ok) {
+        finish(undefined, { outputPath: message.outputPath, mimeType: message.mimeType })
+      } else {
+        finish(new Error(message.error))
+      }
+    })
+
+    timeout = setTimeout(() => {
+      worker.kill('SIGKILL')
+      finish(new Error('Cover extraction exceeded 60 seconds and was stopped.'))
+    }, SCAN_COVER_WORKER_TIMEOUT_MS)
+
+    worker.send(request)
   })
-
-  const pdfDocument = await loadingTask.promise
-
-  try {
-    const firstPage = await pdfDocument.getPage(1)
-    const baseViewport = firstPage.getViewport({ scale: 1 })
-    const scale = 500 / Math.max(baseViewport.width, 1)
-    const viewport = firstPage.getViewport({ scale })
-    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height))
-    const context = canvas.getContext('2d')
-
-    await firstPage.render({ canvasContext: context, viewport }).promise
-    await fsPromises.writeFile(outputPath, canvas.toBuffer('image/png'))
-  } finally {
-    await pdfDocument.destroy()
-  }
-}
-
-const extractCbzCover = async (inputPath: string, outputBasePath: string) => {
-  const archive = await JSZip.loadAsync(await fsPromises.readFile(inputPath))
-  const imageEntry = Object.values(archive.files)
-    .filter((entry) => !entry.dir && imageExtensions.has(path.extname(entry.name).toLowerCase()))
-    .sort((left, right) => naturalCompare(left.name, right.name))[0]
-
-  if (!imageEntry) {
-    throw new Error('No readable image page found in archive.')
-  }
-
-  const extension = path.extname(imageEntry.name).toLowerCase() || '.jpg'
-  const outputPath = `${outputBasePath}${extension}`
-  const imageBuffer = await imageEntry.async('nodebuffer')
-  await fsPromises.writeFile(outputPath, imageBuffer)
-
-  return {
-    outputPath,
-    mimeType: mime.lookup(outputPath) || 'image/jpeg',
-  }
-}
 
 const writeFallbackCover = async (
   category: CategoryId,
@@ -2710,7 +2908,7 @@ const resolveSeriesPresentation = async (
   try {
     if (firstEntry && firstEntry.format === 'pdf') {
       const outputPath = `${outputBasePath}.png`
-      await renderPdfCover(firstEntry.file.path, outputPath)
+      await runCoverWorker({ kind: 'pdf', inputPath: firstEntry.file.path, outputPath })
 
       return applyMetadataOverrideToPresentation({
         year: resolvedYear,
@@ -2733,7 +2931,11 @@ const resolveSeriesPresentation = async (
     }
 
     if (firstEntry && firstEntry.format === 'cbz') {
-      const archiveCover = await extractCbzCover(firstEntry.file.path, outputBasePath)
+      const archiveCover = await runCoverWorker({
+        kind: 'cbz',
+        inputPath: firstEntry.file.path,
+        outputBasePath,
+      })
 
       return applyMetadataOverrideToPresentation({
         year: resolvedYear,
@@ -4229,6 +4431,7 @@ const upsertSeries = async (
   knownLocalDirectoryCover?: string | null,
   reporter?: ScanReporter,
   scanRunId?: string,
+  onEntryBatchCommitted?: (completedEntries: number, totalEntries: number) => Promise<void> | void,
 ) => {
   const now = nowIso()
   let existingSeries = existingSeriesByKey.get(series.key)
@@ -4363,7 +4566,7 @@ const upsertSeries = async (
     localDirectoryCover,
   )
 
-  db.transaction(() => {
+  const persistSeriesShell = db.transaction(() => {
     if (existingSeries && existingSeries.series_key !== series.key) {
       db.prepare(`UPDATE series SET series_key = ? WHERE id = ?`).run(series.key, existingSeries.id)
     }
@@ -4428,13 +4631,26 @@ const upsertSeries = async (
     existingSeries?.genres_json ?? '[]',
     existingSeries?.tags_json ?? JSON.stringify(effectiveSeries.tags),
     existingSeries?.metadata_refreshed_at ?? null,
-    effectiveSeries.entries.length,
+    existingSeriesEntries.length,
     now,
     now,
     now,
   )
+  })
 
-  for (const entry of effectiveSeries.entries) {
+  persistSeriesShell()
+
+  for (
+    let batchStart = 0;
+    batchStart < effectiveSeries.entries.length;
+    batchStart += SCAN_ENTRY_COMMIT_BATCH_SIZE
+  ) {
+    const entryBatch = effectiveSeries.entries.slice(
+      batchStart,
+      batchStart + SCAN_ENTRY_COMMIT_BATCH_SIZE,
+    )
+    const persistEntryBatch = db.transaction(() => {
+      for (const entry of entryBatch) {
     let existingEntry = existingEntriesByPath.get(entry.file.path)
 
     if (existingEntry && (!existingSeries || existingEntry.series_id !== seriesId)) {
@@ -4586,9 +4802,28 @@ const upsertSeries = async (
       )
     }
 
-    seenEntryPaths.add(entry.file.path)
+        seenEntryPaths.add(entry.file.path)
+      }
+
+      db.prepare(
+        `
+          UPDATE series
+          SET file_count = (
+            SELECT COUNT(*) FROM entries WHERE series_id = ?
+          ), last_scan_at = ?, updated_at = ?
+          WHERE id = ?
+        `,
+      ).run(seriesId, nowIso(), nowIso(), seriesId)
+    })
+
+    persistEntryBatch()
+    await onEntryBatchCommitted?.(
+      Math.min(batchStart + entryBatch.length, effectiveSeries.entries.length),
+      effectiveSeries.entries.length,
+    )
   }
 
+  const finalizeSeries = db.transaction(() => {
   const storedSeriesEntries = db
     .prepare(`SELECT id, file_path FROM entries WHERE source_folder_id = ? AND series_id = ?`)
     .all(sourceFolder.id, seriesId) as Array<{ id: string; file_path: string }>
@@ -4673,7 +4908,9 @@ const upsertSeries = async (
 
   refreshSeriesSearchDocument(db, seriesId)
 
-  })()
+  })
+
+  finalizeSeries()
 
   return {
     seriesId,
@@ -4686,24 +4923,41 @@ const upsertSeries = async (
   }
 }
 
+type ScanRunOptions = {
+  resumeAttempt?: number
+  lineageId?: string
+  resumedFromRunId?: string | null
+}
+
 export const runScan = async (
   db: Database,
   config: AppConfig,
   sourceId?: string,
   reporter?: ScanReporter,
-  resumeAttempt = 0,
+  options: ScanRunOptions = {},
 ): Promise<ScanResult> => {
   const scanRunId = createId('scan')
+  const lineageId = options.lineageId || scanRunId
+  const resumeAttempt = options.resumeAttempt ?? 0
   const startedAt = nowIso()
   db.prepare(
     `
       INSERT INTO scan_runs (
         id, started_at, status, requested_source_id, resume_attempt, heartbeat_at,
+        lineage_id, resumed_from_run_id,
         changed_files, discovered_files, parsed_files, reused_files, unchanged_files,
         new_files, deleted_files, moved_files, processed_series, summary
-      ) VALUES (?, ?, 'running', ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, '')
+      ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, '')
     `,
-  ).run(scanRunId, startedAt, sourceId ?? null, resumeAttempt, startedAt)
+  ).run(
+    scanRunId,
+    startedAt,
+    sourceId ?? null,
+    resumeAttempt,
+    startedAt,
+    lineageId,
+    options.resumedFromRunId ?? null,
+  )
 
   let activeSourceId: string | null = null
   let changedFiles = 0
@@ -4916,6 +5170,7 @@ export const runScan = async (
       const claimedSeriesIds = new Set<string>()
       const claimedEntryIds = new Set<string>()
       let sourceChangedFiles = 0
+      let sourceHadSeriesFailures = false
       const forceReparse =
         sourceFolder.last_scan_status === 'Needs rescan' ||
         sourceFolder.parser_version !== LIBRARY_SCANNER_VERSION
@@ -4927,8 +5182,36 @@ export const runScan = async (
         forceReparse,
       )
       const groupedSeries = groupedSeriesResult.series
+      const seriesFingerprints = groupedSeries.map(fingerprintSeries)
+      const seriesCheckpoints = getSeriesCheckpoints(db, lineageId, sourceFolder.id)
       metrics.parsedFiles += groupedSeriesResult.parsedFiles
       metrics.reusedFiles += groupedSeriesResult.reusedFiles
+
+      let resumedSeriesCount = 0
+      while (resumedSeriesCount < groupedSeries.length) {
+        const series = groupedSeries[resumedSeriesCount]
+        const checkpoint = seriesCheckpoints.get(series.key)
+        const fingerprintMatches = checkpoint?.fingerprint === seriesFingerprints[resumedSeriesCount]
+        const completedCheckpoint =
+          fingerprintMatches &&
+          checkpoint?.status === 'completed' &&
+          Boolean(checkpoint.series_id && existingSeriesById.has(checkpoint.series_id))
+        const quarantinedCheckpoint = fingerprintMatches && checkpoint?.status === 'quarantined'
+
+        if (!completedCheckpoint && !quarantinedCheckpoint) {
+          break
+        }
+        if (checkpoint?.series_id) {
+          keptSeriesIds.add(checkpoint.series_id)
+          claimedSeriesIds.add(checkpoint.series_id)
+        }
+        if (completedCheckpoint) {
+          metrics.unchangedFiles += series.entries.length
+        } else {
+          sourceHadSeriesFailures = true
+        }
+        resumedSeriesCount += 1
+      }
 
       reporter?.onProgress?.({
         runId: scanRunId,
@@ -4937,9 +5220,11 @@ export const runScan = async (
         currentSource: sourceLabel,
         currentSourceFilesDiscovered: files.length,
         currentSourceSeriesTotal: groupedSeries.length,
-        currentSourceSeriesCompleted: 0,
+        currentSourceSeriesCompleted: resumedSeriesCount,
         currentSeries: null,
-        summary: `Discovered ${files.length} ${files.length === 1 ? 'file' : 'files'} in ${sourceLabel}`,
+        summary: resumedSeriesCount > 0
+          ? `Resuming ${sourceLabel} after ${resumedSeriesCount.toLocaleString()} completed series`
+          : `Discovered ${files.length} ${files.length === 1 ? 'file' : 'files'} in ${sourceLabel}`,
       })
       appendScanEvent(
         db,
@@ -4949,7 +5234,20 @@ export const runScan = async (
         reporter,
       )
 
-      for (const [seriesIndex, series] of groupedSeries.entries()) {
+      if (resumedSeriesCount > 0) {
+        appendScanEvent(
+          db,
+          scanRunId,
+          'info',
+          `Resumed ${sourceLabel} at ${resumedSeriesCount}/${groupedSeries.length} series from durable checkpoints`,
+          reporter,
+        )
+      }
+
+      for (let seriesIndex = resumedSeriesCount; seriesIndex < groupedSeries.length; seriesIndex += 1) {
+        const series = groupedSeries[seriesIndex]
+        const seriesFingerprint = seriesFingerprints[seriesIndex]
+        const priorCheckpoint = seriesCheckpoints.get(series.key)
         const seriesCompletedBeforeCurrent = seriesIndex
         if (
           seriesIndex === 0 ||
@@ -4973,24 +5271,146 @@ export const runScan = async (
             ),
           })
         }
-        const upsertResult = await upsertSeries(
+        if (priorCheckpoint?.fingerprint === seriesFingerprint && priorCheckpoint.status === 'quarantined') {
+          sourceHadSeriesFailures = true
+          if (priorCheckpoint.series_id) {
+            keptSeriesIds.add(priorCheckpoint.series_id)
+            claimedSeriesIds.add(priorCheckpoint.series_id)
+          }
+          appendScanEvent(
+            db,
+            scanRunId,
+            'error',
+            `Skipped quarantined series ${series.title}: ${priorCheckpoint.last_error || 'repeated processing failure'}`,
+            reporter,
+          )
+          continue
+        }
+
+        const priorFailureCount = priorCheckpoint?.fingerprint === seriesFingerprint
+          ? priorCheckpoint.failure_count
+          : 0
+        const checkpointSeriesId = existingSeriesByKey.get(series.key)?.id ??
+          (priorCheckpoint?.fingerprint === seriesFingerprint ? priorCheckpoint.series_id : null) ??
+          `${slugify(series.title)}-${hashString(series.key).slice(0, 8)}`
+        persistSeriesCheckpoint(db, lineageId, sourceFolder.id, series, seriesFingerprint, {
+          seriesId: checkpointSeriesId,
+          status: 'running',
+          failureCount: priorFailureCount,
+          completedEntries: priorCheckpoint?.fingerprint === seriesFingerprint
+            ? priorCheckpoint.completed_entries
+            : 0,
+        })
+        persistScanCheckpoint(
           db,
-          config,
-          sourceFolder,
-          series,
-          existingSeriesByKey,
-          existingSeriesById,
-          existingEntriesByPath,
-          existingEntriesBySeriesId,
-          existingEntriesByIdentity,
-          claimedSeriesIds,
-          claimedEntryIds,
-          forceReparse,
-          knownManagedCoverPaths,
-          scanResult.localCoversByDirectory.get(series.folderPath) ?? null,
-          reporter,
           scanRunId,
+          changedFiles,
+          metrics,
+          buildScanProgressSummary(
+            sourceLabel,
+            seriesCompletedBeforeCurrent,
+            groupedSeries.length,
+            files.length,
+            series.title,
+          ),
+          {
+            sourceId: sourceFolder.id,
+            seriesKey: series.key,
+            seriesTitle: series.title,
+            seriesIndex,
+            seriesTotal: groupedSeries.length,
+            completedEntries: priorCheckpoint?.completed_entries ?? 0,
+            totalEntries: series.entries.length,
+          },
         )
+
+        let upsertResult: Awaited<ReturnType<typeof upsertSeries>>
+        try {
+          upsertResult = await upsertSeries(
+            db,
+            config,
+            sourceFolder,
+            series,
+            existingSeriesByKey,
+            existingSeriesById,
+            existingEntriesByPath,
+            existingEntriesBySeriesId,
+            existingEntriesByIdentity,
+            claimedSeriesIds,
+            claimedEntryIds,
+            forceReparse,
+            knownManagedCoverPaths,
+            scanResult.localCoversByDirectory.get(series.folderPath) ?? null,
+            reporter,
+            scanRunId,
+            async (completedEntries, totalEntries) => {
+              reporter?.onProgress?.({
+                runId: scanRunId,
+                totalSources: sourceFolders.length,
+                completedSources,
+                currentSource: sourceLabel,
+                currentSourceFilesDiscovered: files.length,
+                currentSourceSeriesTotal: groupedSeries.length,
+                currentSourceSeriesCompleted: seriesIndex,
+                currentSeries: series.title,
+                summary: `Indexing ${sourceLabel}: ${seriesIndex}/${groupedSeries.length} series • ${series.title} • ${completedEntries}/${totalEntries} entries`,
+              })
+              persistSeriesCheckpoint(db, lineageId, sourceFolder.id, series, seriesFingerprint, {
+                seriesId: checkpointSeriesId,
+                status: 'running',
+                failureCount: priorFailureCount,
+                completedEntries,
+              })
+              persistScanCheckpoint(
+                db,
+                scanRunId,
+                changedFiles,
+                metrics,
+                `Indexing ${sourceLabel}: ${seriesIndex}/${groupedSeries.length} series • ${series.title} • ${completedEntries}/${totalEntries} entries`,
+                {
+                  sourceId: sourceFolder.id,
+                  seriesKey: series.key,
+                  seriesTitle: series.title,
+                  seriesIndex,
+                  seriesTotal: groupedSeries.length,
+                  completedEntries,
+                  totalEntries,
+                },
+              )
+              await yieldToEventLoop()
+            },
+          )
+        } catch (error) {
+          if (isSqliteFailure(error)) {
+            throw error
+          }
+          const errorMessage = error instanceof Error ? error.message : 'Unknown series processing error'
+          const failureCount = priorFailureCount + 1
+          const checkpointStatus = failureCount >= SCAN_SERIES_HARD_FAILURE_LIMIT
+            ? 'quarantined'
+            : 'failed'
+          const existingSeriesId = checkpointSeriesId
+          persistSeriesCheckpoint(db, lineageId, sourceFolder.id, series, seriesFingerprint, {
+            seriesId: existingSeriesId,
+            status: checkpointStatus,
+            failureCount,
+            lastError: errorMessage,
+            completedEntries: priorCheckpoint?.completed_entries ?? 0,
+          })
+          if (existingSeriesId) {
+            keptSeriesIds.add(existingSeriesId)
+          }
+          sourceHadSeriesFailures = true
+          appendScanEvent(
+            db,
+            scanRunId,
+            'error',
+            `${checkpointStatus === 'quarantined' ? 'Quarantined' : 'Skipped'} ${series.title}: ${errorMessage}`,
+            reporter,
+          )
+          await yieldToEventLoop()
+          continue
+        }
         keptSeriesIds.add(upsertResult.seriesId)
         changedFiles += upsertResult.changedFiles
         sourceChangedFiles += upsertResult.changedFiles
@@ -4999,6 +5419,12 @@ export const runScan = async (
         metrics.deletedFiles += upsertResult.deletedFiles
         metrics.movedFiles += upsertResult.movedFiles
         metrics.processedSeries += upsertResult.processedSeries
+        persistSeriesCheckpoint(db, lineageId, sourceFolder.id, series, seriesFingerprint, {
+          seriesId: upsertResult.seriesId,
+          status: 'completed',
+          failureCount: priorFailureCount,
+          completedEntries: series.entries.length,
+        })
         const completedSeries = seriesIndex + 1
         if (shouldEmitSeriesCheckpoint(completedSeries, groupedSeries.length)) {
           const nextSeries = groupedSeries[completedSeries]?.title ?? null
@@ -5037,10 +5463,20 @@ export const runScan = async (
         }
       }
 
-      const deletedSeriesResult = deleteSeriesNotInSet(db, sourceFolder.id, keptSeriesIds)
-      changedFiles += deletedSeriesResult.deletedFiles
-      sourceChangedFiles += deletedSeriesResult.deletedFiles
-      metrics.deletedFiles += deletedSeriesResult.deletedFiles
+      if (sourceHadSeriesFailures) {
+        appendScanEvent(
+          db,
+          scanRunId,
+          'error',
+          `Preserved existing records for ${sourceLabel}; deletion reconciliation was skipped because one or more series failed.`,
+          reporter,
+        )
+      } else {
+        const deletedSeriesResult = deleteSeriesNotInSet(db, sourceFolder.id, keptSeriesIds)
+        changedFiles += deletedSeriesResult.deletedFiles
+        sourceChangedFiles += deletedSeriesResult.deletedFiles
+        metrics.deletedFiles += deletedSeriesResult.deletedFiles
+      }
 
       db.prepare(
         `
@@ -5052,7 +5488,7 @@ export const runScan = async (
       ).run(
         groupedSeries.length,
         nowIso(),
-        'Ready',
+        sourceHadSeriesFailures ? 'Ready with warnings' : 'Ready',
         nowIso(),
         LIBRARY_SCANNER_VERSION,
         scanResult.rootIdentity,
@@ -5121,6 +5557,7 @@ export const runScan = async (
       `${successSummary} with ${changedFiles} changed ${changedFiles === 1 ? 'file' : 'files'}`,
       reporter,
     )
+    db.prepare(`DELETE FROM scan_series_checkpoints WHERE lineage_id = ?`).run(lineageId)
     reporter?.onRunFinished?.({
       runId: scanRunId,
       finishedAt,

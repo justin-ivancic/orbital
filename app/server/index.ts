@@ -288,7 +288,10 @@ const getBootstrapPayload = (user: RequestWithUser['sessionUser'], csrfToken?: s
   csrfToken: user ? csrfToken ?? null : null,
 })
 
-const startBackgroundScan = (sourceId?: string, resumeAttempt = 0) => {
+const startBackgroundScan = (
+  sourceId?: string,
+  options: { resumeAttempt?: number; lineageId?: string; resumedFromRunId?: string | null } = {},
+) => {
   if (activeScanPromise) {
     return activeScanPromise
   }
@@ -433,7 +436,7 @@ const startBackgroundScan = (sourceId?: string, resumeAttempt = 0) => {
 
   activeScanPromise = new Promise<void>((resolve, reject) => {
     setImmediate(() => {
-      runScan(db, config, sourceId, scanReporter, resumeAttempt).then(resolve, reject)
+      runScan(db, config, sourceId, scanReporter, options).then(resolve, reject)
     })
   })
     .then(() => undefined)
@@ -1653,12 +1656,20 @@ const httpServer = app.listen(port, () => {
 const interruptedScanToResume = interruptedScanResumptions.find((run) => run.shouldResume)
 
 if (interruptedScanToResume) {
+  const resumeDelayMs = Math.min(
+    30_000,
+    1_000 * (2 ** Math.min(interruptedScanToResume.resumeAttempt, 5)),
+  )
   setTimeout(() => {
     void startBackgroundScan(
       interruptedScanToResume.sourceId ?? undefined,
-      interruptedScanToResume.resumeAttempt + 1,
+      {
+        resumeAttempt: interruptedScanToResume.resumeAttempt + 1,
+        lineageId: interruptedScanToResume.lineageId,
+        resumedFromRunId: interruptedScanToResume.runId,
+      },
     )
-  }, 1_000)
+  }, resumeDelayMs)
 }
 
 const stopServer = () => {

@@ -11,6 +11,10 @@ type MemoryScanRun = {
   requested_source_id: string | null
   resume_attempt: number
   heartbeat_at: string | null
+  lineage_id: string | null
+  current_source_id: string | null
+  current_series_key: string | null
+  current_series_title: string | null
   summary: string
 }
 
@@ -28,15 +32,26 @@ type MemorySourceFolder = {
   updated_at: string | null
 }
 
+type MemorySeriesCheckpoint = {
+  lineage_id: string
+  source_folder_id: string
+  series_key: string
+  status: 'running' | 'completed' | 'failed' | 'quarantined'
+  failure_count: number
+  last_error: string | null
+  updated_at: string
+}
+
 class MemoryScanDatabase {
   scanRuns: MemoryScanRun[] = []
   scanEvents: MemoryScanEvent[] = []
   sourceFolders: MemorySourceFolder[] = []
+  checkpoints: MemorySeriesCheckpoint[] = []
 
   prepare(sql: string) {
     const normalizedSql = sql.replace(/\s+/g, ' ').trim()
 
-    if (normalizedSql.startsWith('SELECT id, requested_source_id, resume_attempt FROM scan_runs WHERE status =')) {
+    if (normalizedSql.startsWith('SELECT id, requested_source_id, resume_attempt, lineage_id,')) {
       return {
         all: () =>
           this.scanRuns
@@ -45,7 +60,52 @@ class MemoryScanDatabase {
               id: run.id,
               requested_source_id: run.requested_source_id,
               resume_attempt: run.resume_attempt,
+              lineage_id: run.lineage_id,
+              current_source_id: run.current_source_id,
+              current_series_key: run.current_series_key,
+              current_series_title: run.current_series_title,
             })),
+      }
+    }
+
+    if (normalizedSql.startsWith('SELECT failure_count FROM scan_series_checkpoints')) {
+      return {
+        get: (lineageId: string, sourceFolderId: string, seriesKey: string) =>
+          this.checkpoints.find(
+            (checkpoint) =>
+              checkpoint.lineage_id === lineageId &&
+              checkpoint.source_folder_id === sourceFolderId &&
+              checkpoint.series_key === seriesKey,
+          ),
+      }
+    }
+
+    if (normalizedSql.startsWith('UPDATE scan_series_checkpoints SET status =')) {
+      return {
+        run: (
+          status: MemorySeriesCheckpoint['status'],
+          failureCount: number,
+          lastError: string,
+          updatedAt: string,
+          lineageId: string,
+          sourceFolderId: string,
+          seriesKey: string,
+        ) => {
+          const checkpoint = this.checkpoints.find(
+            (item) =>
+              item.lineage_id === lineageId &&
+              item.source_folder_id === sourceFolderId &&
+              item.series_key === seriesKey,
+          )
+          if (!checkpoint) {
+            return { changes: 0 }
+          }
+          checkpoint.status = status
+          checkpoint.failure_count = failureCount
+          checkpoint.last_error = lastError
+          checkpoint.updated_at = updatedAt
+          return { changes: 1 }
+        },
       }
     }
 
@@ -147,6 +207,10 @@ test('latest scan status includes durable events in display order', () => {
     requested_source_id: null,
     resume_attempt: 0,
     heartbeat_at: '2026-06-14T10:01:00.000Z',
+    lineage_id: 'scan_1',
+    current_source_id: null,
+    current_series_key: null,
+    current_series_title: null,
     summary: '1 source folder scanned',
   })
   memoryDb.scanEvents.push(
@@ -185,7 +249,20 @@ test('interrupted running scans are marked as errored on startup', () => {
     requested_source_id: 'source_1',
     resume_attempt: 0,
     heartbeat_at: '2026-06-14T10:00:30.000Z',
+    lineage_id: 'lineage_1',
+    current_source_id: 'source_1',
+    current_series_key: 'series_1',
+    current_series_title: 'Problematic series',
     summary: '',
+  })
+  memoryDb.checkpoints.push({
+    lineage_id: 'lineage_1',
+    source_folder_id: 'source_1',
+    series_key: 'series_1',
+    status: 'running',
+    failure_count: 0,
+    last_error: null,
+    updated_at: '2026-06-14T10:00:30.000Z',
   })
   memoryDb.sourceFolders.push({
     id: 'source_1',
@@ -201,6 +278,56 @@ test('interrupted running scans are marked as errored on startup', () => {
   assert.match(status.summary || '', /^Scan was interrupted before completion;/)
   assert.equal(status.events.at(-1)?.level, 'error')
   assert.match(status.events.at(-1)?.message || '', /^Scan was interrupted before completion;/)
-  assert.deepEqual(resumptions, [{ sourceId: 'source_1', resumeAttempt: 0, shouldResume: true }])
+  assert.deepEqual(resumptions, [{
+    runId: 'scan_running',
+    lineageId: 'lineage_1',
+    sourceId: 'source_1',
+    resumeAttempt: 0,
+    shouldResume: true,
+  }])
+  assert.equal(memoryDb.checkpoints[0]?.status, 'failed')
+  assert.equal(memoryDb.checkpoints[0]?.failure_count, 1)
   assert.equal(memoryDb.sourceFolders[0]?.last_scan_status, 'Error')
+})
+
+test('a series that stops the server twice is quarantined while the scan still resumes', () => {
+  const memoryDb = createTestDatabase()
+  const db = memoryDb as unknown as Database
+
+  memoryDb.scanRuns.push({
+    id: 'scan_second_attempt',
+    started_at: '2026-06-14T10:05:00.000Z',
+    finished_at: null,
+    status: 'running',
+    requested_source_id: 'source_1',
+    resume_attempt: 1,
+    heartbeat_at: '2026-06-14T10:05:30.000Z',
+    lineage_id: 'lineage_1',
+    current_source_id: 'source_1',
+    current_series_key: 'series_1',
+    current_series_title: 'Repeatedly problematic series',
+    summary: '',
+  })
+  memoryDb.checkpoints.push({
+    lineage_id: 'lineage_1',
+    source_folder_id: 'source_1',
+    series_key: 'series_1',
+    status: 'running',
+    failure_count: 1,
+    last_error: 'The server process stopped while this series was being processed.',
+    updated_at: '2026-06-14T10:05:30.000Z',
+  })
+
+  const resumptions = markInterruptedScans(db)
+
+  assert.equal(memoryDb.checkpoints[0]?.status, 'quarantined')
+  assert.equal(memoryDb.checkpoints[0]?.failure_count, 2)
+  assert.match(memoryDb.scanRuns[0]?.summary || '', /will be quarantined and the scan will resume/i)
+  assert.deepEqual(resumptions, [{
+    runId: 'scan_second_attempt',
+    lineageId: 'lineage_1',
+    sourceId: 'source_1',
+    resumeAttempt: 1,
+    shouldResume: true,
+  }])
 })

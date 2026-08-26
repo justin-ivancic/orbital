@@ -72,6 +72,10 @@ test('library scans skip unchanged series and expose reconciliation metrics', as
     assert.equal(firstScan.metrics.newFiles, 2)
     assert.equal(firstScan.metrics.parsedFiles, 2)
     assert.equal(firstScan.metrics.processedSeries, 1)
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM scan_series_checkpoints`).get() as { count: number }).count,
+      0,
+    )
 
     const before = database.db
       .prepare(`SELECT last_scan_at, updated_at FROM series WHERE source_folder_id = ?`)
@@ -307,6 +311,123 @@ test('interrupted scans retain committed series and retry incrementally', async 
     assert.equal(
       (database.db.prepare(`SELECT last_scan_status FROM source_folders WHERE id = ?`).get('source-1') as { last_scan_status: string }).last_scan_status,
       'Ready',
+    )
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a resumed scan continues from durable series checkpoints instead of returning to zero', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+  const seriesCount = 3_700
+  const lineageId = 'scan-lineage-large-library'
+
+  try {
+    createSource(database.db, sourcePath, 'novels')
+    for (let batchStart = 0; batchStart < seriesCount; batchStart += 100) {
+      await Promise.all(
+        Array.from({ length: Math.min(100, seriesCount - batchStart) }, async (_, offset) => {
+          const seriesIndex = batchStart + offset + 1
+          const seriesPath = path.join(sourcePath, `Series ${String(seriesIndex).padStart(5, '0')}`)
+          await fsPromises.mkdir(seriesPath, { recursive: true })
+          await fsPromises.writeFile(path.join(seriesPath, 'Chapter 1.txt'), `chapter ${seriesIndex}`)
+        }),
+      )
+    }
+
+    await assert.rejects(
+      () => runScan(
+        database.db,
+        config,
+        'source-1',
+        {
+          onProgress: ({ currentSourceSeriesCompleted, summary }) => {
+            if (currentSourceSeriesCompleted === 3_600 && !summary?.includes('entries')) {
+              throw new Error('simulated process stop near the reported production boundary')
+            }
+          },
+        },
+        { lineageId },
+      ),
+      /simulated process stop/,
+    )
+
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM series WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      3_600,
+    )
+
+    let firstInventoryProgress: number | null = null
+    const resumed = await runScan(
+      database.db,
+      config,
+      'source-1',
+      {
+        onProgress: ({ currentSourceSeriesTotal, currentSourceSeriesCompleted }) => {
+          if (currentSourceSeriesTotal === seriesCount && firstInventoryProgress == null) {
+            firstInventoryProgress = currentSourceSeriesCompleted
+          }
+        },
+      },
+      { lineageId, resumeAttempt: 1 },
+    )
+
+    assert.equal(firstInventoryProgress, 3_600)
+    assert.equal(resumed.metrics.newFiles, 100)
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM series WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      seriesCount,
+    )
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('large series retain committed entry batches when processing is interrupted', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    const seriesPath = path.join(sourcePath, 'Large Series')
+    await fsPromises.mkdir(seriesPath, { recursive: true })
+    await Promise.all(
+      Array.from({ length: 600 }, (_, index) =>
+        fsPromises.writeFile(
+          path.join(seriesPath, `Chapter ${String(index + 1).padStart(4, '0')}.txt`),
+          `chapter ${index + 1}`,
+        ),
+      ),
+    )
+
+    const interrupted = await runScan(database.db, config, 'source-1', {
+      onProgress: ({ summary }) => {
+        if (summary?.includes('250/600 entries')) {
+          throw new Error('simulated interruption after a committed entry batch')
+        }
+      },
+    })
+    assert.equal(interrupted.scannedSourceIds.includes('source-1'), true)
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM entries WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      250,
+    )
+
+    const resumed = await runScan(database.db, config, 'source-1')
+    assert.equal(resumed.metrics.newFiles, 350)
+    assert.equal(resumed.metrics.unchangedFiles, 250)
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM entries WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      600,
     )
   } finally {
     database.db.close()
@@ -590,7 +711,7 @@ test('library scans regenerate a missing derived cover for an unchanged series',
   }
 })
 
-test('library scan failures mark the source retryable without leaving it stuck in scanning', async () => {
+test('invalid PDF cover extraction is isolated and falls back without failing the scan', async () => {
   const directory = await createTempDirectory()
   const sourcePath = path.join(directory, 'library')
   await fsPromises.mkdir(sourcePath, { recursive: true })
@@ -599,25 +720,81 @@ test('library scan failures mark the source retryable without leaving it stuck i
 
   try {
     createSource(database.db, sourcePath)
-    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    const seriesPath = path.join(sourcePath, 'Broken PDF Series')
+    await fsPromises.mkdir(seriesPath, { recursive: true })
+    await fsPromises.writeFile(path.join(seriesPath, 'Chapter 1.pdf'), 'not a valid pdf')
+
+    const scan = await runScan(database.db, config, 'source-1')
+    const series = database.db
+      .prepare(`SELECT cover_path, cover_source FROM series WHERE source_folder_id = ? LIMIT 1`)
+      .get('source-1') as { cover_path: string; cover_source: string }
+
+    assert.equal(scan.scannedSourceIds.includes('source-1'), true)
+    assert.equal(series.cover_source, 'Generated fallback cover')
+    assert.match(series.cover_path, /\.svg$/)
+    assert.equal(await fsPromises.stat(series.cover_path).then(() => true), true)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a series failure is isolated without failing the whole source or deleting existing records', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath, 'novels')
+    const retainedSeriesPath = path.join(sourcePath, 'Retained Series')
+    const removedSeriesPath = path.join(sourcePath, 'Removed Series')
+    await fsPromises.mkdir(retainedSeriesPath, { recursive: true })
+    await fsPromises.mkdir(removedSeriesPath, { recursive: true })
+    await fsPromises.writeFile(path.join(retainedSeriesPath, 'Chapter 1.txt'), 'retained')
+    await fsPromises.writeFile(path.join(removedSeriesPath, 'Chapter 1.txt'), 'removed')
+    await runScan(database.db, config, 'source-1')
+
+    const retainedCover = database.db
+      .prepare(`SELECT cover_path FROM series WHERE source_folder_id = ? AND title = ?`)
+      .get('source-1', 'Retained Series') as { cover_path: string }
+    await fsPromises.rm(retainedCover.cover_path, { force: true })
+    await fsPromises.rm(removedSeriesPath, { recursive: true, force: true })
 
     const brokenConfig = {
       ...config,
       coversDirectory: path.join(directory, 'missing-covers'),
     }
-    await assert.rejects(() => runScan(database.db, brokenConfig, 'source-1'))
+    const isolatedFailure = await runScan(database.db, brokenConfig, 'source-1')
+    assert.equal(isolatedFailure.scannedSourceIds.includes('source-1'), true)
     assert.equal(
       (database.db.prepare(`SELECT last_scan_status FROM source_folders WHERE id = ?`).get('source-1') as { last_scan_status: string }).last_scan_status,
-      'Error',
+      'Ready with warnings',
     )
     assert.equal(
       (database.db.prepare(`SELECT status FROM scan_runs ORDER BY started_at DESC LIMIT 1`).get() as { status: string }).status,
-      'error',
+      'success',
+    )
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM series WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      2,
+    )
+    const failureEvents = database.db
+      .prepare(`SELECT message FROM scan_events WHERE scan_run_id = ? AND level = 'error'`)
+      .all(isolatedFailure.scanRunId) as Array<{ message: string }>
+    assert.equal(
+      failureEvents.some((event) => /deletion reconciliation was skipped/i.test(event.message)),
+      true,
     )
 
-    await fsPromises.mkdir(brokenConfig.coversDirectory, { recursive: true })
     const retry = await runScan(database.db, config, 'source-1')
-    assert.equal(retry.metrics.newFiles, 1)
+    assert.equal(retry.metrics.newFiles, 0)
+    assert.equal(retry.metrics.deletedFiles, 1)
+    assert.equal(
+      (database.db.prepare(`SELECT COUNT(*) AS count FROM series WHERE source_folder_id = ?`).get('source-1') as { count: number }).count,
+      1,
+    )
     assert.equal(
       (database.db.prepare(`SELECT last_scan_status FROM source_folders WHERE id = ?`).get('source-1') as { last_scan_status: string }).last_scan_status,
       'Ready',

@@ -11,7 +11,7 @@ Orbital Library is a self-hosted media library for browsing and reading locally 
 - Manual bookmarks with per-user saved reader position
 - Series-level comments
 - Admin UI for linking mounted folders
-- Incremental scanning for anime, manga, novels, books, and magazines; bounded parallel inventory checks reuse unchanged entries, detected moves preserve IDs, interrupted work remains committed and resumable, and incomplete source scans preserve existing records
+- Incremental scanning for anime, manga, novels, books, and magazines; bounded parallel inventory checks reuse unchanged entries, detected moves preserve IDs, durable per-series checkpoints resume interrupted work without restarting completed items, large series commit in safe batches, risky PDF/CBZ cover extraction runs in isolated workers, and incomplete source scans preserve existing records
 - Authenticated local media serving
 - Local cover fallbacks for folders, PDFs, CBZ files, and generated placeholders
 - PWA app shell with explicit offline downloads for chapters, books, and series
