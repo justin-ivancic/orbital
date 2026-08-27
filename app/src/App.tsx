@@ -80,7 +80,7 @@ import type {
 } from './appTypes'
 import { categoryOrder } from './appTypes'
 import {
-  selectNewerBookmarksForSync,
+  getBookmarkEntryOrdinal,
   sortBookmarksByRecency,
 } from './bookmarkOrdering'
 import {
@@ -124,6 +124,7 @@ import {
   type OfflineSeriesAvailability,
 } from './offlineDownloads'
 import { ReaderVariantMenu } from './ReaderVariantMenu'
+import { synchronizeOfflineReadingState } from './offlineReadingSync'
 import { useAuthenticatedResourceUrl } from './authenticatedResource'
 import {
   clearImageCache,
@@ -2986,36 +2987,16 @@ function App() {
     }
 
     const localState = await getOfflineReadingState(nextState.user.id)
-    if (!localState.bookmarks.length) {
-      return nextState
-    }
-
-    try {
-      const bookmarksToSync = selectNewerBookmarksForSync(
-        localState.bookmarks,
-        nextState.bookmarks,
-      )
-
-      for (const bookmark of bookmarksToSync) {
-        await api.setBookmark({
-          seriesId: bookmark.seriesId,
-          entryId: bookmark.entryId,
-          entryIndex: bookmark.entryIndex,
-          category: bookmark.category,
-          progress: bookmark.progress,
-          cue: bookmark.cue,
-          position: localState.readingPositions[bookmark.entryId] || { page: 1 },
-          lastSeen: bookmark.lastSeen,
-        })
-      }
-
-      return bookmarksToSync.length ? await api.getState() : nextState
-    } catch (error) {
-      if (failOnSyncError) {
-        throw error
-      }
-      return nextState
-    }
+    return synchronizeOfflineReadingState(
+      nextState,
+      localState,
+      {
+        saveBookmark: (payload) => api.setBookmark(payload),
+        loadRemoteState: () => api.getState(),
+        persistLocalState: (state) => putOfflineReadingState(state),
+      },
+      failOnSyncError,
+    )
   }, [])
 
   const applyRemoteState = useCallback((nextState: AppState) => {
@@ -5801,8 +5782,8 @@ function App() {
       : readerBookmarks.filter((bookmark) => bookmark.category === bookmarkFilter)
   const sortedBookmarks = sortBookmarksByRecency(filteredBookmarks)
   const getBookmarkStats = (bookmark: Bookmark, series: SeriesSummary) => {
-    const entryTotal = Math.max(series.stats.fileCount, bookmark.entryIndex + 1, 1)
-    const entryCurrent = Math.min(entryTotal, Math.max(bookmark.entryIndex + 1, 1))
+    const entryTotal = Math.max(series.stats.fileCount, 1)
+    const entryCurrent = getBookmarkEntryOrdinal(bookmark, entryTotal)
     const entryRemaining = Math.max(entryTotal - entryCurrent, 0)
     const entryRatio = Math.max(0.02, Math.min(1, entryCurrent / entryTotal))
 

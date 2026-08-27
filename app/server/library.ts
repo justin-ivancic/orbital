@@ -4085,55 +4085,69 @@ export const saveBookmark = (
   const now = Number.isFinite(requestedLastSeen)
     ? new Date(Math.min(requestedLastSeen, Date.now())).toISOString()
     : nowIso()
-  db.prepare(
-    `
-      INSERT INTO reading_positions (
-        user_id, entry_id, page, total_pages, view_mode, location_type, progress_label, cue_label
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(user_id, entry_id) DO UPDATE SET
-        page = excluded.page,
-        total_pages = excluded.total_pages,
-        view_mode = excluded.view_mode,
-        location_type = excluded.location_type,
-        progress_label = excluded.progress_label,
-        cue_label = excluded.cue_label
-    `,
-  ).run(
-    user.id,
-    payload.entryId,
-    payload.position.page,
-    payload.position.totalPages ?? null,
-    payload.position.viewMode ?? null,
-    payload.position.locationType ?? null,
-    payload.position.progressLabel ?? null,
-    payload.position.cueLabel ?? null,
-  )
+  const persistBookmark = db.transaction(() => {
+    const existingBookmark = db
+      .prepare(`SELECT last_seen FROM bookmarks WHERE user_id = ? AND series_id = ? LIMIT 1`)
+      .get(user.id, payload.seriesId) as { last_seen: string } | undefined
+    const existingTimestamp = existingBookmark ? Date.parse(existingBookmark.last_seen) : Number.NaN
+    const incomingTimestamp = Date.parse(now)
 
-  db.prepare(
-    `
-      INSERT INTO bookmarks (
-        user_id, series_id, entry_id, entry_index, category, progress, cue, last_seen
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(user_id, series_id) DO UPDATE SET
-        entry_id = excluded.entry_id,
-        entry_index = excluded.entry_index,
-        category = excluded.category,
-        progress = excluded.progress,
-        cue = excluded.cue,
-        last_seen = excluded.last_seen
-    `,
-  ).run(
-    user.id,
-    payload.seriesId,
-    payload.entryId,
-    payload.entryIndex,
-    payload.category,
-    payload.progress,
-    payload.cue,
-    now,
-  )
+    if (Number.isFinite(existingTimestamp) && existingTimestamp > incomingTimestamp) {
+      return
+    }
+
+    db.prepare(
+      `
+        INSERT INTO reading_positions (
+          user_id, entry_id, page, total_pages, view_mode, location_type, progress_label, cue_label
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, entry_id) DO UPDATE SET
+          page = excluded.page,
+          total_pages = excluded.total_pages,
+          view_mode = excluded.view_mode,
+          location_type = excluded.location_type,
+          progress_label = excluded.progress_label,
+          cue_label = excluded.cue_label
+      `,
+    ).run(
+      user.id,
+      payload.entryId,
+      payload.position.page,
+      payload.position.totalPages ?? null,
+      payload.position.viewMode ?? null,
+      payload.position.locationType ?? null,
+      payload.position.progressLabel ?? null,
+      payload.position.cueLabel ?? null,
+    )
+
+    db.prepare(
+      `
+        INSERT INTO bookmarks (
+          user_id, series_id, entry_id, entry_index, category, progress, cue, last_seen
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, series_id) DO UPDATE SET
+          entry_id = excluded.entry_id,
+          entry_index = excluded.entry_index,
+          category = excluded.category,
+          progress = excluded.progress,
+          cue = excluded.cue,
+          last_seen = excluded.last_seen
+      `,
+    ).run(
+      user.id,
+      payload.seriesId,
+      payload.entryId,
+      payload.entryIndex,
+      payload.category,
+      payload.progress,
+      payload.cue,
+      now,
+    )
+  })
+
+  persistBookmark()
 
   return {
     bookmarks: getBookmarks(db, user.id),

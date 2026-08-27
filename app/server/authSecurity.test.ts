@@ -154,6 +154,12 @@ class MemoryDatabase {
     return new MemoryStatement(this, sql)
   }
 
+  transaction<Arguments extends unknown[], Result>(
+    operation: (...args: Arguments) => Result,
+  ) {
+    return (...args: Arguments) => operation(...args)
+  }
+
   run(sql: string, args: unknown[]) {
     if (sql.startsWith('INSERT INTO users')) {
       const [id, username, passwordHash, createdAt, updatedAt] = args as string[]
@@ -350,6 +356,14 @@ class MemoryDatabase {
             series_id: entry.series_id,
           }
         : undefined
+    }
+
+    if (sql.includes('SELECT last_seen FROM bookmarks WHERE user_id = ? AND series_id = ?')) {
+      const [userId, seriesId] = args as string[]
+      const bookmark = this.bookmarks.find(
+        (item) => item.user_id === userId && item.series_id === seriesId,
+      )
+      return bookmark ? { last_seen: bookmark.last_seen } : undefined
     }
 
     if (sql.includes("FROM scan_runs WHERE status = 'success'")) {
@@ -661,6 +675,20 @@ test('bookmark writes can preserve offline recency timestamps during reconnect',
   const state = getAppState(db, config, user)
   assert.equal(state.bookmarks[0]?.lastSeen, resumedTimestamp)
   assert.equal(state.bookmarks[0]?.progress, 'Page 3 of 10')
+})
+
+test('an older offline bookmark cannot overwrite newer server reading progress', async () => {
+  const { db, memoryDb, config } = createTestDatabase()
+  const fixture = memoryDb.seedLibraryFixture()
+  const user = await signupUser(db, 'Reader', 'reader-secret')
+
+  saveFixtureBookmark(db, user, fixture, 8, '2026-08-23T12:00:00.000Z')
+  saveFixtureBookmark(db, user, fixture, 2, '2026-08-23T11:00:00.000Z')
+
+  const state = getAppState(db, config, user)
+  assert.equal(state.bookmarks[0]?.lastSeen, '2026-08-23T12:00:00.000Z')
+  assert.equal(state.bookmarks[0]?.progress, 'Page 8 of 10')
+  assert.equal(state.readingPositions[fixture.entryId]?.page, 8)
 })
 
 test('admin-only state is hidden from member accounts', async () => {

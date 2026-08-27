@@ -29,6 +29,34 @@ export const compareBookmarksByRecency = (left: Bookmark, right: Bookmark) => {
 export const sortBookmarksByRecency = (bookmarks: Bookmark[]) =>
   [...bookmarks].sort(compareBookmarksByRecency)
 
+export const getBookmarkEntryOrdinal = (bookmark: Bookmark, entryTotal: number) => {
+  const safeTotal = Math.max(1, entryTotal)
+  const fallbackOrdinal = Math.min(safeTotal, Math.max(1, bookmark.entryIndex + 1))
+  const labelMatch = bookmark.entryLabel.match(
+    /^(?:chapter|volume|issue|entry)\s+0*(\d+(?:\.\d+)?)(?:\b|\s|$)/i,
+  )
+  const labelOrdinal = labelMatch ? Number(labelMatch[1]) : Number.NaN
+
+  return Number.isFinite(labelOrdinal) && labelOrdinal > 0 && labelOrdinal <= safeTotal
+    ? labelOrdinal
+    : fallbackOrdinal
+}
+
+export const mergePendingBookmarks = (
+  remoteBookmarks: Bookmark[],
+  pendingLocalBookmarks: Bookmark[],
+) => {
+  const mergedBySeriesId = new Map(
+    remoteBookmarks.map((bookmark) => [bookmark.seriesId, bookmark]),
+  )
+
+  for (const bookmark of pendingLocalBookmarks) {
+    mergedBySeriesId.set(bookmark.seriesId, bookmark)
+  }
+
+  return sortBookmarksByRecency([...mergedBySeriesId.values()])
+}
+
 export const selectNewerBookmarksForSync = (
   localBookmarks: Bookmark[],
   remoteBookmarks: Bookmark[],
