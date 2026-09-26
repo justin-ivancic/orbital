@@ -723,6 +723,11 @@ export class NativeDownloadError extends Error {
   }
 }
 
+/**
+ * Android's HttpURLConnection reports HTTP 404/410 as a FileNotFoundException
+ * whose message is just the URL, and other errors as "Server returned HTTP
+ * response code: NNN". Connection problems (timeouts, DNS) carry no URL.
+ */
 const nativeErrorStatus = (message: string) => {
   const code = message.match(/response code:\s*(\d{3})/i)?.[1]
 
@@ -730,7 +735,21 @@ const nativeErrorStatus = (message: string) => {
     return Number(code)
   }
 
-  return /FileNotFound/i.test(message) ? 404 : null
+  return /https?:\/\/\S+/i.test(message) && !/time(?:d)? ?out|reset|refused|unreachable|resolve host|failed to connect/i.test(message)
+    ? 404
+    : null
+}
+
+const createdNativeDirectories = new Set<string>()
+
+/** The native download writes straight to a file and does not create folders. */
+const ensureNativeDirectory = async (path: string) => {
+  if (createdNativeDirectories.has(path)) {
+    return
+  }
+
+  await Filesystem.mkdir({ path, directory: Directory.Data, recursive: true }).catch(() => undefined)
+  createdNativeDirectories.add(path)
 }
 
 /**
@@ -746,6 +765,7 @@ export const downloadOfflineResourceNative = async (
   const path = nativeResourcePath(downloadId, resource.key)
   const temporaryPath = `${path}.part`
 
+  await ensureNativeDirectory(`${nativeDownloadPath(downloadId)}/resources`)
   await Filesystem.deleteFile({ path: temporaryPath, directory: Directory.Data }).catch(() => undefined)
 
   try {
@@ -998,6 +1018,7 @@ export const copyOfflineResources = async (
 export const deleteOfflineDownload = async (downloadId: string) => {
   if (nativeStorageEnabled) {
     nativeManifestCache.delete(downloadId)
+    createdNativeDirectories.delete(`${nativeDownloadPath(downloadId)}/resources`)
     await Filesystem.rmdir({
       path: nativeDownloadPath(downloadId),
       directory: Directory.Data,

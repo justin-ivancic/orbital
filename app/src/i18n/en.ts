@@ -104,6 +104,7 @@ export const en = {
     server: 'Server',
     changeServer: 'Change',
     cantReachServer: 'The server can’t be reached right now.',
+    invalidCredentials: 'That username and password don’t match.',
   },
   connect: {
     title: 'Connect to your library',
@@ -522,7 +523,7 @@ export const en = {
       title: 'Metadata',
       online: 'Look up metadata online',
       onlineHelp:
-        'During scans, titles without embedded details are looked up on Open Library, AniList and Google Books. Their names are sent to these services.',
+        'During scans, titles without embedded details are looked up on AniList and Google Books. Their titles and authors are sent to these services.',
       lockedByServer: 'Set by the server configuration (APP_REMOTE_METADATA).',
       review: 'Needs a look',
       reviewEmpty: 'Nothing needs a look right now.',

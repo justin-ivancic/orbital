@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { useDocumentTitle } from '../app/navigation'
 import { bootSession } from '../app/session'
 import { normalizeServerUrl, setServerUrl } from '../platform'
 import { useT } from '../i18n'
@@ -10,6 +11,7 @@ export function ConnectPage() {
   const [address, setAddress] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [checking, setChecking] = useState(false)
+  useDocumentTitle(t.connect.title)
 
   const connect = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()

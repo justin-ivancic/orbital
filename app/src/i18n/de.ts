@@ -106,6 +106,7 @@ export const de: Strings = {
     server: 'Server',
     changeServer: 'Ändern',
     cantReachServer: 'Der Server ist gerade nicht erreichbar.',
+    invalidCredentials: 'Benutzername oder Passwort stimmen nicht.',
   },
   connect: {
     title: 'Mit deiner Bibliothek verbinden',
@@ -524,7 +525,7 @@ export const de: Strings = {
       title: 'Metadaten',
       online: 'Metadaten online nachschlagen',
       onlineHelp:
-        'Bei Scans werden Titel ohne eingebettete Angaben bei Open Library, AniList und Google Books nachgeschlagen. Die Namen werden an diese Dienste gesendet.',
+        'Bei Scans werden Titel ohne eingebettete Angaben bei AniList und Google Books nachgeschlagen. Titel und Autoren werden an diese Dienste gesendet.',
       lockedByServer: 'Durch die Serverkonfiguration festgelegt (APP_REMOTE_METADATA).',
       review: 'Zu prüfen',
       reviewEmpty: 'Gerade gibt es nichts zu prüfen.',

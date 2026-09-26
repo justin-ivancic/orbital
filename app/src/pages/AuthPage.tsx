@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
-import { isNetworkError } from '../api'
+import { ApiError, isNetworkError } from '../api'
+import { useDocumentTitle } from '../app/navigation'
 import { navigate, useRoute } from '../app/router'
 import { login, useSession } from '../app/session'
 import { preferencesStore, setPreference } from '../app/preferences'
@@ -37,6 +38,7 @@ export function AuthPage() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const shownError = error ?? session.authError
+  useDocumentTitle(mode === 'signup' ? t.auth.signUpTitle : t.auth.signInTitle)
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -55,7 +57,9 @@ export function AuthPage() {
       setError(
         isNetworkError(submitError)
           ? t.auth.cantReachServer
-          : submitError instanceof Error
+          : submitError instanceof ApiError && submitError.status === 401 && mode === 'login'
+            ? t.auth.invalidCredentials
+            : submitError instanceof Error
             ? submitError.message
             : t.common.somethingWentWrong,
       )

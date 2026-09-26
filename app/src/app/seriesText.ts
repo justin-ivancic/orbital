@@ -255,7 +255,10 @@ export const seriesTopics = (series: Pick<SeriesSummary, 'tags' | 'genres' | 'so
       continue
     }
 
-    if (!topics.has(key)) {
+    const existing = topics.get(key)
+
+    // Keep the nicer spelling when the same topic appears twice ("Mathematics" over "mathematics").
+    if (!existing || (existing === existing.toLowerCase() && topic !== topic.toLowerCase())) {
       topics.set(key, topic)
     }
   }
