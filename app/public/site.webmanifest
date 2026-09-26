@@ -1,7 +1,7 @@
 {
-  "name": "Orbital Library",
+  "name": "Orbital",
   "short_name": "Orbital",
-  "description": "Self-hosted anime, manga, novel, and book library.",
+  "description": "Your self-hosted library of books, manga and web novels, made for e-readers.",
   "id": "/",
   "start_url": "/",
   "scope": "/",

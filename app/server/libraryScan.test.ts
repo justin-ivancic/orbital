@@ -6,6 +6,8 @@ import test from 'node:test'
 import JSZip from 'jszip'
 import { openDatabase } from './database'
 import {
+  getAppState,
+  inferEntryUnit,
   resolveEntryMediaFile,
   runScan,
   updateSourceFolderCategory,
@@ -1023,4 +1025,49 @@ test('a series failure is isolated without failing the whole source or deleting 
     database.db.close()
     await fsPromises.rm(directory, { recursive: true, force: true })
   }
+})
+
+test('manga archives named "Vol. N Ch. M" are chapters and series report their unit', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    setSourceCategory(database.db, 'manga')
+    const pages = { '001.png': onePixelPng }
+    await writeZip(path.join(sourcePath, 'Long Road', 'Vol. 04 Ch. 650.cbz'), pages)
+    await writeZip(path.join(sourcePath, 'Long Road', 'Vol. 08 Ch. 080 - The Cross Called Returning Alive.cbz'), pages)
+    await writeZip(path.join(sourcePath, 'Long Road', 'Ch.066.cbz'), pages)
+    await runScan(database.db, config, 'source-1')
+
+    const entries = database.db
+      .prepare(`SELECT label, title FROM entries ORDER BY sort_order`)
+      .all() as Array<{ label: string; title: string }>
+
+    assert.deepEqual(
+      entries.map((entry) => [entry.label, entry.title]),
+      [
+        ['Chapter 66', 'Ch.066'],
+        ['Chapter 80', 'The Cross Called Returning Alive'],
+        ['Chapter 650', 'Vol. 04 Ch. 650'],
+      ],
+    )
+
+    const state = getAppState(database.db, config, { id: 'u', username: 'reader', role: 'member' })
+    assert.equal(state.library[0]?.entryUnit, 'chapter')
+    assert.equal(state.library[0]?.progressLabel, '3 chapters')
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('the entry unit follows the labels of a manga series', () => {
+  assert.equal(inferEntryUnit('manga', ['Volume 01', 'Volume 02', 'Chapter 10']), 'volume')
+  assert.equal(inferEntryUnit('manga', ['Chapter 01', 'Extra 01']), 'chapter')
+  assert.equal(inferEntryUnit('magazines', []), 'issue')
+  assert.equal(inferEntryUnit('books', ['Book 01']), 'book')
 })

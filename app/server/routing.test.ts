@@ -17,11 +17,12 @@ const roundTrip = (route: AppRoute) => {
 }
 
 test('parses the stable top-level routes and normalizes default query state', () => {
-  assert.deepEqual(parseAppRoute({ pathname: '/' }), { name: 'root' })
-  assert.deepEqual(parseAppRoute({ pathname: '/bookmarks/', search: '?scope=manga' }), {
-    name: 'bookmarks',
-    scope: 'manga',
-  })
+  assert.deepEqual(parseAppRoute({ pathname: '/' }), { name: 'home' })
+  // Links saved by earlier versions keep working.
+  assert.deepEqual(parseAppRoute({ pathname: '/bookmarks/', search: '?scope=manga' }), { name: 'home' })
+  assert.deepEqual(parseAppRoute({ pathname: '/profile' }), { name: 'settings' })
+  assert.deepEqual(parseAppRoute({ pathname: '/admin', search: '?tab=users' }), { name: 'admin', tab: 'users' })
+  assert.deepEqual(parseAppRoute({ pathname: '/admin', search: '?tab=nope' }), { name: 'admin', tab: 'library' })
   assert.deepEqual(parseAppRoute({ pathname: '/search', search: '?q=%20Dune%20&scope=books' }), {
     name: 'search',
     query: 'Dune',
@@ -36,14 +37,19 @@ test('parses the stable top-level routes and normalizes default query state', ()
 
 test('round-trips library, series, and exact reader state', () => {
   const routes: AppRoute[] = [
-    { name: 'library', category: 'books', topics: ['History', 'Art & Design'], sort: 'year' },
+    { name: 'library', category: 'books', topics: ['History', 'Art & Design'], sort: 'year', page: 3 },
+    { name: 'library', category: 'manga', topics: [], sort: 'added', page: 1 },
     {
       name: 'series',
       category: 'manga',
       seriesId: 'witch hat atelier-a82f38cc',
       tab: 'comments',
       season: 2,
+      page: 4,
     },
+    { name: 'admin', tab: 'metadata' },
+    { name: 'settings' },
+    { name: 'home' },
     {
       name: 'reader',
       category: 'novels',
@@ -107,7 +113,7 @@ test('keeps reader content mounted when only the URL position changes', () => {
     readerContentSessionKey(readerRoute, 'pdf-variant'),
     readerContentSessionKey(readerRoute, 'alternate-variant'),
   )
-  assert.equal(readerContentSessionKey({ name: 'bookmarks', scope: 'all' }, 'pdf-variant'), null)
+  assert.equal(readerContentSessionKey({ name: 'home' }, 'pdf-variant'), null)
 })
 
 test('starts adjacent reflowable chapters at the beginning without reusing saved progress', () => {
@@ -133,11 +139,11 @@ test('keeps adjacent chapters inside one browser history entry', () => {
 
   assert.equal(shouldReplaceReaderNavigation(firstChapter, secondChapter), true)
   assert.equal(
-    shouldReplaceReaderNavigation(firstChapter, { name: 'bookmarks', scope: 'all' }),
+    shouldReplaceReaderNavigation(firstChapter, { name: 'home' }),
     false,
   )
   assert.equal(
-    shouldReplaceReaderNavigation({ name: 'bookmarks', scope: 'all' }, firstChapter),
+    shouldReplaceReaderNavigation({ name: 'home' }, firstChapter),
     false,
   )
 })
@@ -158,11 +164,12 @@ test('bounds malformed reader and filter state to safe defaults', () => {
       variantId: null,
     },
   )
-  assert.deepEqual(parseAppRoute({ pathname: '/books', search: '?sort=random&topic=&topic=History' }), {
+  assert.deepEqual(parseAppRoute({ pathname: '/books', search: '?sort=random&topic=&topic=History&page=0' }), {
     name: 'library',
     category: 'books',
     topics: ['History'],
     sort: 'title',
+    page: 1,
   })
 })
 

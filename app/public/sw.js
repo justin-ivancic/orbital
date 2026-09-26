@@ -1,5 +1,5 @@
-const SHELL_CACHE = 'orbital-shell-v1'
-const ASSET_CACHE = 'orbital-assets-v1'
+const SHELL_CACHE = 'orbital-shell-v2'
+const ASSET_CACHE = 'orbital-assets-v2'
 const OFFLINE_DB = 'orbital-offline-v1'
 const OFFLINE_DB_VERSION = 3
 const RESOURCES_STORE = 'resources'

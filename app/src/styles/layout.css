@@ -1,0 +1,326 @@
+/* ---------------------------------------------------------------- shell */
+
+.shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.shell__main {
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding-bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px) + var(--space-8));
+}
+
+.shell__main:focus {
+  outline: none;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-5) var(--gutter) 0;
+}
+
+.page--narrow {
+  max-width: 760px;
+}
+
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3) var(--space-4);
+}
+
+.page-head__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.page-head h1 {
+  font-size: var(--text-2xl);
+}
+
+@media (min-width: 900px) {
+  .page-head h1 {
+    font-size: var(--text-3xl);
+  }
+}
+
+.page-head__subtitle {
+  color: var(--ink-2);
+}
+
+/* --------------------------------------------------------------- top bar */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: calc(var(--topbar-height) + env(safe-area-inset-top, 0px));
+  padding: env(safe-area-inset-top, 0px) calc(var(--gutter) - var(--space-2)) 0;
+  border-bottom: var(--border-strong) solid var(--ink);
+  background: var(--paper);
+}
+
+.topbar__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--tap);
+  padding: 0 var(--space-2);
+  color: inherit;
+  text-decoration: none;
+}
+
+.brand__mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: var(--border-strong) solid var(--ink);
+  border-radius: 50%;
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+
+.brand__mark::after {
+  position: relative;
+  top: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ink);
+  content: '';
+}
+
+.brand__name {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* ------------------------------------------------------------ bottom nav */
+
+.bottomnav {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  display: grid;
+  grid-auto-columns: 1fr;
+  grid-auto-flow: column;
+  height: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  border-top: var(--border-strong) solid var(--ink);
+  background: var(--paper);
+}
+
+.bottomnav__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.bottomnav__item svg {
+  width: 24px;
+  height: 24px;
+}
+
+.bottomnav__item[aria-current='page'] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.bottomnav__label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------- sidebar */
+
+.sidebar {
+  display: none;
+}
+
+@media (min-width: 1100px) {
+  .shell {
+    display: grid;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    height: 100vh;
+    height: 100dvh;
+    padding: var(--space-4) var(--space-3);
+    overflow-y: auto;
+    border-right: var(--border-strong) solid var(--ink);
+    background: var(--paper);
+  }
+
+  .shell__main {
+    padding-bottom: var(--space-12);
+  }
+
+  .bottomnav,
+  .topbar--compact-only {
+    display: none;
+  }
+
+  .notices {
+    bottom: var(--space-6);
+    left: calc(var(--sidebar-width) + var(--space-4));
+  }
+}
+
+.sidebar .brand {
+  margin-bottom: var(--space-4);
+}
+
+.sidebar__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar__link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--tap);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius);
+  color: inherit;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.sidebar__link svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+
+.sidebar__link[aria-current='page'] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.sidebar__link:active {
+  outline: 2px solid var(--ink);
+}
+
+.sidebar__sub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 var(--space-2) 34px;
+}
+
+.sidebar__sublink {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 38px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.sidebar__sublink[aria-current='page'] {
+  outline: var(--border-strong) solid var(--ink);
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.sidebar__count {
+  color: var(--ink-3);
+  font-size: var(--text-xs);
+}
+
+.sidebar__footer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule);
+}
+
+/* ----------------------------------------------------------- boot/splash */
+
+.splash {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: var(--space-6);
+}
+
+.splash__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  text-align: center;
+}
+
+.splash .brand__mark {
+  width: 56px;
+  height: 56px;
+  font-size: 1.8rem;
+}
+
+.splash .brand__mark::after {
+  width: 15px;
+  height: 15px;
+}

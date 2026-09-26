@@ -1,0 +1,122 @@
+/*
+ * Orbital design tokens.
+ *
+ * Orbital is read on e-ink as often as on glass, so the palette is built from
+ * paper and ink: solid fills, crisp 1–2 px rules and hard offset shadows that
+ * render without dithering. Motion is off by default. Greys stay dark enough to
+ * survive a 16-level e-ink panel.
+ */
+
+:root {
+  color-scheme: light;
+
+  --paper: #ffffff;
+  --paper-2: #f4f2ee;
+  --ink: #0d0d0d;
+  --ink-2: #2e2e2e;
+  --ink-3: #4f4f4f;
+  --rule: #0d0d0d;
+  --rule-soft: #9a9a9a;
+  --inverse-paper: #0d0d0d;
+  --inverse-ink: #ffffff;
+  --danger: #a3160f;
+  --focus: #0d0d0d;
+  --backdrop: rgb(255 255 255 / 0.72);
+
+  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', 'Helvetica Neue', Arial, sans-serif;
+  --font-display: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', 'Noto Serif', Georgia, serif;
+  --font-reading-serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', 'Noto Serif', Georgia, serif;
+  --font-reading-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Roboto Mono', Menlo, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.25rem;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  --border: 1.5px;
+  --border-strong: 2px;
+  --shadow-hard: 5px 5px 0 var(--ink);
+  --shadow-hard-sm: 3px 3px 0 var(--ink);
+
+  --tap: 44px;
+  --tap-sm: 36px;
+  --gutter: 16px;
+  --content-max: 1240px;
+  --topbar-height: 56px;
+  --bottomnav-height: 64px;
+  --sidebar-width: 236px;
+
+  /* Muted cover palette; each renders as a distinct light grey in monochrome. */
+  --cover-1: #e7ddc9;
+  --cover-2: #cfdde6;
+  --cover-3: #e8d2cf;
+  --cover-4: #d6e2cb;
+  --cover-5: #e9dfb6;
+  --cover-6: #dcd5e8;
+  --cover-7: #cfe3dc;
+  --cover-8: #ead7c3;
+}
+
+@media (pointer: coarse) {
+  :root {
+    --tap: 48px;
+    --tap-sm: 40px;
+  }
+}
+
+@media (min-width: 600px) {
+  :root {
+    --gutter: 24px;
+  }
+}
+
+@media (min-width: 1100px) {
+  :root {
+    --gutter: 32px;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --paper: #0b0b0b;
+  --paper-2: #1b1b1b;
+  --ink: #f2f2f2;
+  --ink-2: #d6d6d6;
+  --ink-3: #b0b0b0;
+  --rule: #f2f2f2;
+  --rule-soft: #707070;
+  --inverse-paper: #f2f2f2;
+  --inverse-ink: #0b0b0b;
+  --danger: #ff8a80;
+  --focus: #f2f2f2;
+  --backdrop: rgb(0 0 0 / 0.72);
+
+  --cover-1: #3b342a;
+  --cover-2: #2b3840;
+  --cover-3: #432f2d;
+  --cover-4: #33402c;
+  --cover-5: #443d20;
+  --cover-6: #37324a;
+  --cover-7: #2b423a;
+  --cover-8: #45362a;
+}

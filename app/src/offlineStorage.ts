@@ -11,6 +11,7 @@ import type {
 } from './appTypes'
 import { getOfflineResourceStorageKey } from './offlineStorageKeys'
 import { isNativeApp, toNativeFileUrl } from './platform'
+import { OfflineResourceIntegrityError } from './offlineDownloads'
 
 const offlineDbName = 'orbital-offline-v1'
 const offlineDbVersion = 3
@@ -48,6 +49,39 @@ const nativeDownloadPath = (downloadId: string) =>
 
 const nativeRecordPath = (downloadId: string) =>
   `${nativeDownloadPath(downloadId)}/record.json`
+
+const nativeManifestPath = (downloadId: string) =>
+  `${nativeDownloadPath(downloadId)}/manifest.json`
+
+const nativeResourceFileName = (resourceKey: string) => `${encodeURIComponent(resourceKey)}.bin`
+
+let nativeDownloadsBaseUri: string | null = null
+
+/**
+ * Resolves the on-device downloads folder once, so resource URLs can be built
+ * without one bridge call per file.
+ */
+export const initNativeOfflineStorage = async () => {
+  if (!nativeStorageEnabled || nativeDownloadsBaseUri) {
+    return
+  }
+
+  await Filesystem.mkdir({ path: nativeDownloadsPath, directory: Directory.Data, recursive: true })
+    .catch(() => undefined)
+  const result = await Filesystem.getUri({ path: nativeDownloadsPath, directory: Directory.Data })
+  nativeDownloadsBaseUri = result.uri.replace(/\/+$/, '')
+}
+
+/** The WebView URL of a downloaded resource (native app only). */
+export const nativeResourceUrl = (downloadId: string, resourceKey: string) => {
+  if (!nativeDownloadsBaseUri) {
+    return null
+  }
+
+  // File names on disk are already URI-encoded, so each segment is encoded again for the URL.
+  const segments = [encodeURIComponent(downloadId), 'resources', nativeResourceFileName(resourceKey)]
+  return toNativeFileUrl(`${nativeDownloadsBaseUri}/${segments.map(encodeURIComponent).join('/')}`)
+}
 
 const nativeResourcePath = (downloadId: string, resourceKey: string) =>
   `${nativeDownloadPath(downloadId)}/resources/${encodeURIComponent(resourceKey)}.bin`
@@ -140,17 +174,6 @@ const blobToBase64 = async (blob: Blob) => {
   return btoa(binary)
 }
 
-const base64ToBlob = (value: string, contentType: string) => {
-  const binary = atob(value)
-  const bytes = new Uint8Array(binary.length)
-
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index)
-  }
-
-  return new Blob([bytes], { type: contentType })
-}
-
 const listNativeDownloadIds = async () => {
   try {
     const result = await Filesystem.readdir({
@@ -166,15 +189,79 @@ const listNativeDownloadIds = async () => {
   }
 }
 
+/**
+ * On the device a download is stored as a small, frequently rewritten
+ * `record.json` (status and counters) plus a `manifest.json` that is written
+ * once. Older builds kept the manifest inside the record; both are read.
+ */
+type NativeRecordHeader = Omit<OfflineDownloadRecord, 'manifest'> & {
+  manifest?: OfflineDownloadManifest
+}
+
+const nativeManifestCache = new Map<string, OfflineDownloadManifest>()
+
+const readNativeManifest = async (downloadId: string) => {
+  const cached = nativeManifestCache.get(downloadId)
+
+  if (cached) {
+    return cached
+  }
+
+  const manifest = await readNativeJson<OfflineDownloadManifest>(nativeManifestPath(downloadId))
+
+  if (manifest) {
+    nativeManifestCache.set(downloadId, manifest)
+  }
+
+  return manifest
+}
+
+const readNativeRecordHeader = (downloadId: string) =>
+  readNativeJson<NativeRecordHeader>(nativeRecordPath(downloadId))
+
+const readNativeRecord = async (downloadId: string): Promise<OfflineDownloadRecord | null> => {
+  const header = await readNativeRecordHeader(downloadId)
+
+  if (!header) {
+    return null
+  }
+
+  if (header.manifest) {
+    nativeManifestCache.set(downloadId, header.manifest)
+    return header as OfflineDownloadRecord
+  }
+
+  const manifest = await readNativeManifest(downloadId)
+  return manifest ? { ...header, manifest } : null
+}
+
+const readAllNativeRecordHeaders = async () => {
+  const ids = await listNativeDownloadIds()
+  const headers = await Promise.all(ids.map((encodedId) =>
+    readNativeRecordHeader(decodeURIComponent(encodedId)).catch(() => null),
+  ))
+
+  return headers.filter((header): header is NativeRecordHeader => Boolean(header))
+}
+
 const readAllNativeRecords = async () => {
   const ids = await listNativeDownloadIds()
   const records = await Promise.all(ids.map((encodedId) =>
-    readNativeJson<OfflineDownloadRecord>(
-      `${nativeDownloadsPath}/${encodedId}/record.json`,
-    ),
+    readNativeRecord(decodeURIComponent(encodedId)).catch(() => null),
   ))
 
   return records.filter((record): record is OfflineDownloadRecord => Boolean(record))
+}
+
+const writeNativeRecord = async (record: OfflineDownloadRecord) => {
+  if (nativeManifestCache.get(record.id) !== record.manifest) {
+    await writeNativeJson(nativeManifestPath(record.id), record.manifest)
+    nativeManifestCache.set(record.id, record.manifest)
+  }
+
+  const { manifest: _manifest, ...header } = record
+  void _manifest
+  await writeNativeJson(nativeRecordPath(record.id), header)
 }
 
 const canUseIndexedDb = () => typeof indexedDB !== 'undefined'
@@ -336,7 +423,7 @@ export const putOfflineDownload = async (record: OfflineDownloadRecord) => {
   }
 
   if (nativeStorageEnabled) {
-    await writeNativeJson(nativeRecordPath(record.id), nextRecord)
+    await writeNativeRecord(nextRecord)
     return
   }
 
@@ -354,7 +441,7 @@ export const putOfflineDownload = async (record: OfflineDownloadRecord) => {
 
 export const getOfflineDownload = async (downloadId: string) => {
   if (nativeStorageEnabled) {
-    return readNativeJson<OfflineDownloadRecord>(nativeRecordPath(downloadId))
+    return readNativeRecord(downloadId)
   }
 
   const db = await openOfflineDb()
@@ -376,17 +463,15 @@ export const getOfflineResourceInventory = async (
   downloadId: string,
 ): Promise<OfflineStoredResource[]> => {
   if (nativeStorageEnabled) {
-    const record = await readNativeJson<OfflineDownloadRecord>(nativeRecordPath(downloadId))
+    const record = await readNativeRecord(downloadId)
 
     if (!record) {
       return []
     }
 
+    await initNativeOfflineStorage()
     const resourcesByFileName = new Map(
-      record.manifest.resources.map((resource) => [
-        `${encodeURIComponent(resource.key)}.bin`,
-        resource,
-      ]),
+      record.manifest.resources.map((resource) => [nativeResourceFileName(resource.key), resource]),
     )
 
     try {
@@ -418,22 +503,16 @@ export const getOfflineResourceInventory = async (
           }
         }
 
-        if (!file || file.type !== 'file') {
+        const url = nativeResourceUrl(downloadId, resource.key)
+
+        if (!file || file.type !== 'file' || !url) {
           continue
         }
 
-        try {
-          const uri = await Filesystem.getUri({
-            path: nativeResourcePath(downloadId, resource.key),
-            directory: Directory.Data,
-          })
-          storedResources.push({
-            resource: { ...resource, url: toNativeFileUrl(uri.uri) },
-            size: Number.isFinite(file.size) ? file.size : 0,
-          })
-        } catch {
-          // If the native URI cannot be resolved, let the downloader repair it.
-        }
+        storedResources.push({
+          resource: { ...resource, url },
+          size: Number.isFinite(file.size) ? file.size : 0,
+        })
       }
 
       return storedResources
@@ -492,7 +571,7 @@ export const listOfflineDownloads = async (ownerUserId: string) => {
 
 export const getLastOfflineProfile = async (): Promise<SessionUser | null> => {
   if (nativeStorageEnabled) {
-    const records = await readAllNativeRecords()
+    const records = await readAllNativeRecordHeaders()
     const latest = records
       .filter((record) => record.ownerUserId && record.ownerUsername)
       .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())[0]
@@ -602,15 +681,11 @@ export const putOfflineResource = async (
       recursive: true,
     })
     await commitNativeResourceFile(path, temporaryPath)
-
-    const uri = await Filesystem.getUri({
-      path,
-      directory: Directory.Data,
-    })
+    await initNativeOfflineStorage()
 
     return {
       ...resource,
-      url: toNativeFileUrl(uri.uri),
+      url: nativeResourceUrl(downloadId, resource.key) ?? resource.url,
     }
   }
 
@@ -636,6 +711,74 @@ export const putOfflineResource = async (
   }
 
   return resource
+}
+
+export class NativeDownloadError extends Error {
+  readonly status: number | null
+
+  constructor(message: string, status: number | null) {
+    super(message)
+    this.name = 'NativeDownloadError'
+    this.status = status
+  }
+}
+
+const nativeErrorStatus = (message: string) => {
+  const code = message.match(/response code:\s*(\d{3})/i)?.[1]
+
+  if (code) {
+    return Number(code)
+  }
+
+  return /FileNotFound/i.test(message) ? 404 : null
+}
+
+/**
+ * Streams one resource straight to disk with the platform HTTP client. This
+ * avoids copying every byte through JavaScript and the base64 bridge, which
+ * made large downloads crawl on e-readers.
+ */
+export const downloadOfflineResourceNative = async (
+  downloadId: string,
+  resource: OfflineDownloadResource,
+  headers: Record<string, string>,
+): Promise<OfflineStoredResource> => {
+  const path = nativeResourcePath(downloadId, resource.key)
+  const temporaryPath = `${path}.part`
+
+  await Filesystem.deleteFile({ path: temporaryPath, directory: Directory.Data }).catch(() => undefined)
+
+  try {
+    await Filesystem.downloadFile({
+      url: resource.url,
+      path: temporaryPath,
+      directory: Directory.Data,
+      headers,
+      recursive: true,
+      progress: resource.kind === 'file',
+      connectTimeout: 20_000,
+      readTimeout: 60_000,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    await Filesystem.deleteFile({ path: temporaryPath, directory: Directory.Data }).catch(() => undefined)
+    throw new NativeDownloadError(message, nativeErrorStatus(message))
+  }
+
+  const stats = await Filesystem.stat({ path: temporaryPath, directory: Directory.Data })
+
+  if (stats.type !== 'file' || stats.size <= 0 || (resource.size > 0 && stats.size !== resource.size)) {
+    await Filesystem.deleteFile({ path: temporaryPath, directory: Directory.Data }).catch(() => undefined)
+    throw new OfflineResourceIntegrityError(resource.label)
+  }
+
+  await commitNativeResourceFile(path, temporaryPath)
+  await initNativeOfflineStorage()
+
+  return {
+    resource: { ...resource, url: nativeResourceUrl(downloadId, resource.key) ?? resource.url },
+    size: stats.size,
+  }
 }
 
 const isReusableOfflineResource = (
@@ -699,10 +842,10 @@ const copyNativeOfflineResource = async (
   }
 
   await commitNativeResourceFile(targetPath, temporaryPath)
-  const uri = await Filesystem.getUri({ path: targetPath, directory: Directory.Data })
+  await initNativeOfflineStorage()
 
   return {
-    resource: { ...resource, url: toNativeFileUrl(uri.uri) },
+    resource: { ...resource, url: nativeResourceUrl(targetDownloadId, resource.key) ?? resource.url },
     size: copiedStats.size,
   }
 }
@@ -733,9 +876,7 @@ export const copyOfflineResources = async (
   }
 
   if (nativeStorageEnabled) {
-    const sourceDownload = await readNativeJson<OfflineDownloadRecord>(
-      nativeRecordPath(sourceDownloadId),
-    )
+    const sourceDownload = await readNativeRecord(sourceDownloadId)
     if (!sourceDownload || sourceDownload.ownerUserId !== ownerUserId) {
       return []
     }
@@ -854,64 +995,9 @@ export const copyOfflineResources = async (
   }
 }
 
-export const getOfflineResource = async (resourceKey: string) => {
-  if (nativeStorageEnabled) {
-    const records = await readAllNativeRecords()
-
-    for (const download of records) {
-      const resource = download.manifest.resources.find((item) => item.key === resourceKey)
-      if (!resource) {
-        continue
-      }
-
-      const path = nativeResourcePath(download.id, resource.key)
-      try {
-        const result = await Filesystem.readFile({
-          path,
-          directory: Directory.Data,
-        })
-        const encoded = typeof result.data === 'string' ? result.data : ''
-        const uri = await Filesystem.getUri({
-          path,
-          directory: Directory.Data,
-        })
-        const blob = base64ToBlob(encoded, resource.contentType)
-
-        return {
-          storageKey: getOfflineResourceStorageKey(download.id, resource.key),
-          key: resource.key,
-          downloadId: download.id,
-          ownerUserId: download.ownerUserId,
-          resource: { ...resource, url: toNativeFileUrl(uri.uri) },
-          blob,
-          size: blob.size,
-          storedAt: download.updatedAt,
-        } satisfies OfflineResourceRecord
-      } catch {
-        return null
-      }
-    }
-
-    return null
-  }
-
-  const db = await openOfflineDb()
-
-  try {
-    const transaction = db.transaction(resourcesStoreName, 'readonly')
-    const done = transactionDone(transaction)
-    const record = await toPromise<OfflineResourceRecord | undefined>(
-      transaction.objectStore(resourcesStoreName).index('resourceKey').get(resourceKey),
-    )
-    await done
-    return record ?? null
-  } finally {
-    db.close()
-  }
-}
-
 export const deleteOfflineDownload = async (downloadId: string) => {
   if (nativeStorageEnabled) {
+    nativeManifestCache.delete(downloadId)
     await Filesystem.rmdir({
       path: nativeDownloadPath(downloadId),
       directory: Directory.Data,
@@ -944,7 +1030,7 @@ export const deleteOfflineDownload = async (downloadId: string) => {
 
 export const deleteAllOfflineDownloadsForUser = async (ownerUserId: string) => {
   if (nativeStorageEnabled) {
-    const records = await readAllNativeRecords()
+    const records = await readAllNativeRecordHeaders()
 
     await Promise.all(
       records
@@ -996,7 +1082,7 @@ export const getOfflineStorageSummary = async (
   knownRecords?: OfflineDownloadRecord[],
 ): Promise<OfflineStorageSummary> => {
   if (nativeStorageEnabled) {
-    const records = (knownRecords ?? await readAllNativeRecords()).filter(
+    const records = (knownRecords ?? await readAllNativeRecordHeaders()).filter(
       (record) => record.ownerUserId === ownerUserId,
     )
 

@@ -266,12 +266,18 @@ export const isRetryableOfflineDownloadError = (error: unknown) => {
     return true
   }
 
-  const status = typeof error === 'object' && error !== null && 'status' in error
-    ? Number((error as { status?: unknown }).status)
+  const rawStatus = typeof error === 'object' && error !== null && 'status' in error
+    ? (error as { status?: unknown }).status
     : null
+  const status = rawStatus == null ? null : Number(rawStatus)
 
   if (status == null || Number.isNaN(status)) {
-    return error instanceof TypeError
+    // No HTTP status means the request never completed: a dropped connection,
+    // a timeout, or a DNS failure. Those are worth retrying.
+    return (
+      error instanceof TypeError ||
+      (error instanceof Error && (error.name === 'ApiError' || error.name === 'NativeDownloadError'))
+    )
   }
 
   return status === 408 || status === 425 || status === 429 || status >= 500

@@ -1,9 +1,12 @@
 import type { CategoryId, EntryFormat, ScopeId, SeriesTabId, ViewId } from './appTypes'
 
-export const libraryRouteCategories = ['manga', 'novels', 'books', 'magazines'] as const
+export const libraryRouteCategories = ['books', 'manga', 'novels', 'magazines'] as const
+export const librarySorts = ['title', 'added', 'year', 'author'] as const
+export const adminTabs = ['library', 'users', 'metadata', 'system'] as const
 
 export type LibraryRouteCategory = (typeof libraryRouteCategories)[number]
-export type LibrarySort = 'title' | 'year'
+export type LibrarySort = (typeof librarySorts)[number]
+export type AdminTab = (typeof adminTabs)[number]
 
 type ReaderLocation = {
   page: number | null
@@ -12,10 +15,9 @@ type ReaderLocation = {
 }
 
 export type AppRoute =
-  | { name: 'root' }
+  | { name: 'home' }
   | { name: 'login'; next: string | null }
   | { name: 'signup' }
-  | { name: 'bookmarks'; scope: ScopeId }
   | { name: 'downloads' }
   | { name: 'search'; query: string; scope: ScopeId }
   | {
@@ -23,6 +25,7 @@ export type AppRoute =
       category: LibraryRouteCategory
       topics: string[]
       sort: LibrarySort
+      page: number
     }
   | {
       name: 'series'
@@ -30,6 +33,7 @@ export type AppRoute =
       seriesId: string
       tab: SeriesTabId
       season: number | null
+      page: number
     }
   | ({
       name: 'reader'
@@ -43,8 +47,8 @@ export type AppRoute =
       entryId: string
     } & ReaderLocation)
   | { name: 'creator'; creatorKey: string }
-  | { name: 'profile' }
-  | { name: 'admin' }
+  | { name: 'settings' }
+  | { name: 'admin'; tab: AdminTab }
   | { name: 'notFound'; path: string }
 
 export type LocationLike = {
@@ -55,6 +59,8 @@ export type LocationLike = {
 const categorySet = new Set<string>(libraryRouteCategories)
 const scopeSet = new Set<string>(['all', ...libraryRouteCategories])
 const tabSet = new Set<string>(['overview', 'entries', 'comments'])
+const sortSet = new Set<string>(librarySorts)
+const adminTabSet = new Set<string>(adminTabs)
 const percentReaderFormats = new Set<EntryFormat>(['epub', 'html', 'md', 'txt'])
 
 export const readerBeginningLocation = (
@@ -63,6 +69,9 @@ export const readerBeginningLocation = (
   format && percentReaderFormats.has(format)
     ? { page: null, percent: 0 }
     : { page: 1, percent: null }
+
+export const isPercentFormat = (format: EntryFormat | null | undefined) =>
+  Boolean(format && percentReaderFormats.has(format))
 
 const decodeSegment = (segment: string) => {
   try {
@@ -120,6 +129,12 @@ const parseCategory = (value: string | null): LibraryRouteCategory | null =>
 const parseTab = (value: string | null): SeriesTabId =>
   value && tabSet.has(value) ? (value as SeriesTabId) : 'entries'
 
+const parseSort = (value: string | null): LibrarySort =>
+  value && sortSet.has(value) ? (value as LibrarySort) : 'title'
+
+const parseAdminTab = (value: string | null): AdminTab =>
+  value && adminTabSet.has(value) ? (value as AdminTab) : 'library'
+
 const parseLocationQuery = (params: URLSearchParams): ReaderLocation => {
   const page = positiveInteger(params.get('page'))
   const percent = page == null ? boundedPercent(params.get('percent')) : null
@@ -152,40 +167,28 @@ export const parseAppRoute = ({ pathname, search = '' }: LocationLike): AppRoute
   const path = normalizedPath(pathname)
   const params = searchParams(search)
 
-  if (path === '/') {
-    return { name: 'root' }
-  }
-
-  if (path === '/login') {
-    return { name: 'login', next: safeInternalDestination(params.get('next')) }
-  }
-
-  if (path === '/signup') {
-    return { name: 'signup' }
-  }
-
-  if (path === '/bookmarks') {
-    return { name: 'bookmarks', scope: parseScope(params.get('scope')) }
-  }
-
-  if (path === '/downloads') {
-    return { name: 'downloads' }
-  }
-
-  if (path === '/search') {
-    return {
-      name: 'search',
-      query: boundedText(params.get('q'), 200),
-      scope: parseScope(params.get('scope')),
-    }
-  }
-
-  if (path === '/profile') {
-    return { name: 'profile' }
-  }
-
-  if (path === '/admin') {
-    return { name: 'admin' }
+  switch (path) {
+    case '/':
+    case '/home':
+    case '/bookmarks':
+      return { name: 'home' }
+    case '/login':
+      return { name: 'login', next: safeInternalDestination(params.get('next')) }
+    case '/signup':
+      return { name: 'signup' }
+    case '/downloads':
+      return { name: 'downloads' }
+    case '/search':
+      return {
+        name: 'search',
+        query: boundedText(params.get('q'), 200),
+        scope: parseScope(params.get('scope')),
+      }
+    case '/settings':
+    case '/profile':
+      return { name: 'settings' }
+    case '/admin':
+      return { name: 'admin', tab: parseAdminTab(params.get('tab')) }
   }
 
   const rawSegments = path.slice(1).split('/')
@@ -233,7 +236,8 @@ export const parseAppRoute = ({ pathname, search = '' }: LocationLike): AppRoute
       name: 'library',
       category,
       topics,
-      sort: params.get('sort') === 'year' ? 'year' : 'title',
+      sort: parseSort(params.get('sort')),
+      page: positiveInteger(params.get('page')) ?? 1,
     }
   }
 
@@ -249,6 +253,7 @@ export const parseAppRoute = ({ pathname, search = '' }: LocationLike): AppRoute
       seriesId,
       tab: parseTab(params.get('tab')),
       season: positiveInteger(params.get('season')),
+      page: positiveInteger(params.get('page')) ?? 1,
     }
   }
 
@@ -292,7 +297,7 @@ export const appRoutePath = (route: AppRoute): string => {
   const params = new URLSearchParams()
 
   switch (route.name) {
-    case 'root':
+    case 'home':
       return '/'
     case 'login':
       if (route.next) {
@@ -301,9 +306,6 @@ export const appRoutePath = (route: AppRoute): string => {
       return withQuery('/login', params)
     case 'signup':
       return '/signup'
-    case 'bookmarks':
-      appendScope(params, route.scope)
-      return withQuery('/bookmarks', params)
     case 'downloads':
       return '/downloads'
     case 'search':
@@ -317,6 +319,9 @@ export const appRoutePath = (route: AppRoute): string => {
       if (route.sort !== 'title') {
         params.set('sort', route.sort)
       }
+      if (route.page > 1) {
+        params.set('page', String(route.page))
+      }
       return withQuery(`/${route.category}`, params)
     case 'series':
       if (route.tab !== 'entries') {
@@ -324,6 +329,9 @@ export const appRoutePath = (route: AppRoute): string => {
       }
       if (route.season != null) {
         params.set('season', String(route.season))
+      }
+      if (route.page > 1) {
+        params.set('page', String(route.page))
       }
       return withQuery(`/${route.category}/${encodeSegment(route.seriesId)}`, params)
     case 'reader':
@@ -340,10 +348,13 @@ export const appRoutePath = (route: AppRoute): string => {
       )
     case 'creator':
       return `/creators/${encodeSegment(route.creatorKey)}`
-    case 'profile':
-      return '/profile'
+    case 'settings':
+      return '/settings'
     case 'admin':
-      return '/admin'
+      if (route.tab !== 'library') {
+        params.set('tab', route.tab)
+      }
+      return withQuery('/admin', params)
     case 'notFound':
       return normalizedPath(route.path)
   }
@@ -351,28 +362,17 @@ export const appRoutePath = (route: AppRoute): string => {
 
 export const routeView = (route: AppRoute): ViewId => {
   switch (route.name) {
-    case 'root':
     case 'login':
     case 'signup':
-      return 'bookmarks'
-    case 'library':
-      return 'library'
-    case 'series':
-      return 'series'
-    case 'reader':
+      return 'home'
     case 'offlineReader':
       return 'reader'
-    case 'creator':
-      return 'creator'
-    case 'notFound':
-      return 'notFound'
     default:
       return route.name
   }
 }
 
-export const isProtectedRoute = (route: AppRoute) =>
-  !['root', 'login', 'signup'].includes(route.name)
+export const isProtectedRoute = (route: AppRoute) => route.name !== 'login' && route.name !== 'signup'
 
 export const isReaderRoute = (
   route: AppRoute,
@@ -414,3 +414,48 @@ export const categoryForRoute = (route: AppRoute): CategoryId | null => {
 
   return null
 }
+
+export const isLibraryRouteCategory = (value: string): value is LibraryRouteCategory =>
+  categorySet.has(value)
+
+export const libraryRoute = (
+  category: LibraryRouteCategory,
+  overrides: Partial<Omit<Extract<AppRoute, { name: 'library' }>, 'name' | 'category'>> = {},
+): AppRoute => ({
+  name: 'library',
+  category,
+  topics: [],
+  sort: 'title',
+  page: 1,
+  ...overrides,
+})
+
+export const seriesRoute = (
+  category: CategoryId,
+  seriesId: string,
+  overrides: Partial<Pick<Extract<AppRoute, { name: 'series' }>, 'tab' | 'season' | 'page'>> = {},
+): AppRoute => ({
+  name: 'series',
+  category: isLibraryRouteCategory(category) ? category : 'books',
+  seriesId,
+  tab: 'entries',
+  season: null,
+  page: 1,
+  ...overrides,
+})
+
+export const readerRoute = (
+  category: CategoryId,
+  seriesId: string,
+  entryId: string,
+  location: Partial<ReaderLocation> = {},
+): AppRoute => ({
+  name: 'reader',
+  category: isLibraryRouteCategory(category) ? category : 'books',
+  seriesId,
+  entryId,
+  page: null,
+  percent: null,
+  variantId: null,
+  ...location,
+})

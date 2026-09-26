@@ -2,7 +2,7 @@ export const categoryOrder = ['anime', 'manga', 'novels', 'books', 'magazines'] 
 
 export type CategoryId = (typeof categoryOrder)[number]
 export type Language = 'en' | 'de'
-export type ViewId = 'bookmarks' | 'library' | 'search' | 'downloads' | 'series' | 'reader' | 'creator' | 'profile' | 'admin' | 'notFound'
+export type ViewId = 'home' | 'library' | 'search' | 'downloads' | 'series' | 'reader' | 'creator' | 'settings' | 'admin' | 'notFound'
 export type SeriesTabId = 'overview' | 'entries' | 'comments'
 export type ScopeId = 'all' | CategoryId
 export type Role = 'admin' | 'member'
@@ -16,6 +16,8 @@ export type ReaderPageOrder = 'archive' | 'filename'
 export type ReaderSpreadAlignment = 'cover-first' | 'straight-pairs'
 export type ReaderFitMode = 'fit-page' | 'fit-width' | 'manual'
 export type MediaTrackKind = 'audio' | 'subtitle'
+/** What a single entry of a series is called (chapter, volume, issue, …). */
+export type EntryUnit = 'chapter' | 'volume' | 'issue' | 'episode' | 'book'
 
 export type ReaderSettings = {
   style: ReadingStyle
@@ -145,6 +147,8 @@ export type SeriesSummary = {
   genres: string[]
   tags: string[]
   stats: LibraryStats
+  /** Added in 2.0; older servers omit it. */
+  entryUnit?: EntryUnit
 }
 
 export type LibraryEntry = {
@@ -165,6 +169,10 @@ export type EntryVariant = {
   storageFile: string
   format: EntryFormat
   details: string
+  /** File size in bytes (2.0+ servers). */
+  size?: number | null
+  /** Page count read from the file, when known (2.0+ servers). */
+  pageCount?: number | null
   fileUrl: string
   downloadUrl: string
   mediaTracks: MediaTrackCollection

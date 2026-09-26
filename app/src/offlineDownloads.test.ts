@@ -414,6 +414,11 @@ test('offline retry classification distinguishes network failures from authoriza
   assert.equal(isRetryableOfflineDownloadError({ status: 503 }), true)
   assert.equal(isRetryableOfflineDownloadError({ status: 401 }), false)
   assert.equal(isRetryableOfflineDownloadError(new OfflineResourceIntegrityError('page 1')), true)
+
+  const nativeTimeout = Object.assign(new Error('timeout'), { name: 'NativeDownloadError', status: null })
+  assert.equal(isRetryableOfflineDownloadError(nativeTimeout), true)
+  const nativeNotFound = Object.assign(new Error('gone'), { name: 'NativeDownloadError', status: 404 })
+  assert.equal(isRetryableOfflineDownloadError(nativeNotFound), false)
 })
 
 test('offline progress counts only completed resources', () => {

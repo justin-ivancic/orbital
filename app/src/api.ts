@@ -1,6 +1,7 @@
 import type {
   AppState,
   AuthPayload,
+  Bookmark,
   BootstrapState,
   CategoryId,
   ChangePasswordPayload,
@@ -19,10 +20,12 @@ import type {
   ReaderPreferenceResponse,
   ReaderSettings,
   ResetPasswordPayload,
+  Role,
   SavedReadingPosition,
   ScopeId,
   ScanStatusResponse,
   SearchResponse,
+  SeriesComment,
   SeriesDetail,
   SeriesResponse,
   SeriesSummary,
@@ -37,6 +40,10 @@ import {
 } from './mobileSession'
 
 let csrfToken: string | null = null
+let knownLibraryRevision: string | null = null
+const unauthorizedListeners = new Set<() => void>()
+
+const defaultTimeoutMs = 25_000
 
 export class ApiError extends Error {
   readonly status: number | null
@@ -48,7 +55,51 @@ export class ApiError extends Error {
   }
 }
 
+// Gateway errors mean the Orbital server itself is unreachable (a reverse proxy
+// or Cloudflare answered instead), which the app treats like being offline.
+const gatewayStatuses = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530])
+
+/** True when the Orbital server could not be reached (offline, DNS, TLS, timeout, proxy error). */
+export const isNetworkError = (error: unknown) =>
+  error instanceof ApiError
+    ? error.status == null || gatewayStatuses.has(error.status)
+    : error instanceof TypeError
+
+export type ProgressSaveResponse = {
+  saved: boolean
+  bookmark: Bookmark | null
+  position: SavedReadingPosition | null
+}
+
+export type ProgressPayload = {
+  seriesId: string
+  entryId: string
+  entryIndex: number
+  category: CategoryId
+  progress: string
+  cue: string
+  position: SavedReadingPosition
+  lastSeen?: string
+}
+
+export type AndroidAppInfo = {
+  available: boolean
+  source: 'uploaded' | 'bundled' | 'external' | null
+  size: number | null
+  updatedAt: string | null
+  versionName: string | null
+  versionCode: number | null
+  downloadUrl: string
+}
+
+export type AdminSettings = {
+  remoteMetadata: { enabled: boolean; lockedByEnvironment: boolean }
+  openSignup: boolean
+  androidApp: AndroidAppInfo
+}
+
 const unsafeHttpMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+const authEndpoints = ['/api/bootstrap', '/api/auth/', '/api/mobile/auth/']
 
 const normalizeUrl = (url: string | null) => (url ? resolveApiUrl(url) : url)
 
@@ -66,6 +117,7 @@ const normalizeMediaTracks = (tracks: MediaTrackCollection): MediaTrackCollectio
 export const normalizeSeriesSummary = (series: SeriesSummary): SeriesSummary => ({
   ...series,
   coverUrl: normalizeUrl(series.coverUrl),
+  coverImageUrl: normalizeUrl(series.coverImageUrl ?? null),
   bannerUrl: normalizeUrl(series.bannerUrl),
 })
 
@@ -104,74 +156,143 @@ const normalizeOfflineManifest = (manifest: OfflineDownloadManifest): OfflineDow
 const isUnsafeRequest = (method: string | undefined) =>
   unsafeHttpMethods.has((method || 'GET').toUpperCase())
 
+/** Headers that authenticate a request made outside `fetch` (native downloads). */
+export const getAuthHeaders = async (): Promise<Record<string, string>> => {
+  await ensureMobileSessionLoaded()
+  const mobileSession = getMobileSession()
+  return mobileSession ? { Authorization: `Bearer ${mobileSession.accessToken}` } : {}
+}
+
 const getRequestHeaders = (init?: RequestInit) => {
   const mobileSession = getMobileSession()
 
   return {
-    ...(init?.body != null ? { 'Content-Type': 'application/json' } : {}),
+    ...(init?.body != null && !(init.body instanceof Blob) ? { 'Content-Type': 'application/json' } : {}),
     ...(isUnsafeRequest(init?.method) && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
     ...(mobileSession ? { Authorization: `Bearer ${mobileSession.accessToken}` } : {}),
   }
 }
 
-const request = async <T,>(input: string, init?: RequestInit) => {
-  await ensureMobileSessionLoaded()
-  const response = await fetch(resolveApiUrl(input), {
-    credentials: isNativeApp ? 'omit' : 'same-origin',
-    headers: {
-      ...getRequestHeaders(init),
-      ...(isUnsafeRequest(init?.method) && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
-      ...(init?.headers || {}),
-    },
-    ...init,
-  })
-
-  if (!response.ok) {
-    const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null
-    throw new ApiError(
-      errorPayload?.error || `Request failed with ${response.status}`,
-      response.status,
-    )
+const notifyUnauthorized = (input: string) => {
+  if (authEndpoints.some((endpoint) => input.startsWith(endpoint))) {
+    return
   }
 
-  return (await response.json()) as T
+  unauthorizedListeners.forEach((listener) => listener())
 }
 
-const fetchResource = async (input: string, signal?: AbortSignal) => {
-  await ensureMobileSessionLoaded()
-  const response = await fetch(resolveApiUrl(input), {
-    credentials: isNativeApp ? 'omit' : 'same-origin',
-    headers: getRequestHeaders(),
-    signal,
-  })
+const withTimeout = (signal: AbortSignal | null | undefined, timeoutMs: number) => {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), timeoutMs)
+  const forwardAbort = () => controller.abort(signal?.reason)
 
-  if (!response.ok) {
-    const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null
-    throw new ApiError(
-      errorPayload?.error || `Request failed with ${response.status}`,
-      response.status,
-    )
+  if (signal?.aborted) {
+    forwardAbort()
+  } else {
+    signal?.addEventListener('abort', forwardAbort, { once: true })
   }
 
-  return response
+  return {
+    signal: controller.signal,
+    // Only the wait for response headers is timed; the caller's signal keeps
+    // cancelling the body (large downloads) after that.
+    done: () => clearTimeout(timer),
+  }
 }
+
+type RequestOptions = RequestInit & { timeoutMs?: number }
+
+const send = async (input: string, init: RequestOptions = {}) => {
+  await ensureMobileSessionLoaded()
+  const { timeoutMs = defaultTimeoutMs, ...requestInit } = init
+  const timeout = withTimeout(requestInit.signal, timeoutMs)
+
+  try {
+    const response = await fetch(resolveApiUrl(input), {
+      credentials: isNativeApp ? 'omit' : 'same-origin',
+      ...requestInit,
+      headers: {
+        ...getRequestHeaders(requestInit),
+        ...(requestInit.headers || {}),
+      },
+      signal: timeout.signal,
+    })
+
+    if (!response.ok) {
+      const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null
+
+      if (response.status === 401) {
+        notifyUnauthorized(input)
+      }
+
+      throw new ApiError(errorPayload?.error || `Request failed with ${response.status}`, response.status)
+    }
+
+    return response
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error
+    }
+
+    if (requestInit.signal?.aborted) {
+      throw error
+    }
+
+    // Network failures and timeouts carry no HTTP status.
+    throw new ApiError(error instanceof Error ? error.message : 'Network request failed.', null)
+  } finally {
+    timeout.done()
+  }
+}
+
+const request = async <T,>(input: string, init?: RequestOptions) => (await (await send(input, init)).json()) as T
+
+const fetchResource = (input: string, signal?: AbortSignal) =>
+  send(input, { signal, timeoutMs: 120_000 })
+
+const withStateQuery = (path: string) => {
+  const params = new URLSearchParams({ compact: '1' })
+
+  if (knownLibraryRevision) {
+    params.set('libraryRevision', knownLibraryRevision)
+  }
+
+  return `${path}${path.includes('?') ? '&' : '?'}${params.toString()}`
+}
+
+const stateRequest = async (path: string, init?: RequestOptions) =>
+  normalizeAppState(await request<AppState>(withStateQuery(path), init))
 
 export const api = {
   fetchResource,
+  onUnauthorized: (listener: () => void) => {
+    unauthorizedListeners.add(listener)
+    return () => {
+      unauthorizedListeners.delete(listener)
+    }
+  },
   setCsrfToken: (token: string | null | undefined) => {
     csrfToken = token || null
   },
-  getBootstrap: () => request<BootstrapState>('/api/bootstrap'),
-  getState: async () => normalizeAppState(await request<AppState>('/api/state')),
+  /**
+   * The library revision this client already holds. State responses omit the
+   * library (and set `libraryUnchanged`) when the server has the same one.
+   */
+  setKnownLibraryRevision: (revision: string | null | undefined) => {
+    knownLibraryRevision = revision || null
+  },
+  getBootstrap: (options?: { signal?: AbortSignal; timeoutMs?: number }) =>
+    request<BootstrapState>('/api/bootstrap', { signal: options?.signal, timeoutMs: options?.timeoutMs ?? 12_000 }),
+  getState: () => stateRequest('/api/state'),
   login: async (payload: AuthPayload) => {
     if (!isNativeApp) {
-      return normalizeAppState(await request<AppState>('/api/auth/login', {
+      return stateRequest('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify(payload),
-      }))
+      })
     }
 
-    const response = await request<MobileAuthResponse>('/api/mobile/auth/login', {
+    const response = await request<MobileAuthResponse>(withStateQuery('/api/mobile/auth/login'), {
       method: 'POST',
       body: JSON.stringify(payload),
     })
@@ -183,37 +304,41 @@ export const api = {
 
     return normalizeAppState(response)
   },
-  signup: async (payload: AuthPayload) =>
-    normalizeAppState(await request<AppState>('/api/auth/signup', {
+  signup: (payload: AuthPayload) =>
+    stateRequest('/api/auth/signup', {
       method: 'POST',
       body: JSON.stringify(payload),
-    })),
+    }),
   logout: async () => {
-    const response = await request<{ ok: true }>('/api/auth/logout', {
-      method: 'POST',
-      body: JSON.stringify({}),
-    })
-
+    try {
+      await request<{ ok: true }>('/api/auth/logout', {
+        method: 'POST',
+        body: JSON.stringify({}),
+        timeoutMs: 8_000,
+      })
+    } finally {
+      if (isNativeApp) {
+        await clearMobileSession()
+      }
+    }
+  },
+  /** Forgets the native session token without contacting the server. */
+  forgetSession: async () => {
     if (isNativeApp) {
       await clearMobileSession()
     }
-
-    return response
   },
-  changePassword: async (payload: ChangePasswordPayload) =>
-    normalizeAppState(await request<AppState>('/api/auth/change-password', {
+  changePassword: (payload: ChangePasswordPayload) =>
+    stateRequest('/api/auth/change-password', {
       method: 'POST',
       body: JSON.stringify(payload),
-    })),
-  getSeries: async (seriesId: string) => {
-    const response = await request<SeriesResponse>(`/api/series/${seriesId}`)
-    return {
-      ...response,
-      series: normalizeSeriesDetail(response.series),
-    }
+    }),
+  getSeries: async (seriesId: string, signal?: AbortSignal) => {
+    const response = await request<SeriesResponse>(`/api/series/${encodeURIComponent(seriesId)}`, { signal })
+    return normalizeSeriesDetail(response.series)
   },
   getEntryTracks: async (entryId: string) => {
-    const response = await request<MediaTracksResponse>(`/api/media-tracks/${entryId}`)
+    const response = await request<MediaTracksResponse>(`/api/media-tracks/${encodeURIComponent(entryId)}`)
     return {
       ...response,
       mediaTracks: normalizeMediaTracks(response.mediaTracks),
@@ -230,118 +355,151 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ target }),
       signal,
+      timeoutMs: 120_000,
     })),
-  search: async (query: string, scope: ScopeId) => {
+  search: async (query: string, scope: ScopeId, signal?: AbortSignal) => {
     const response = await request<SearchResponse>(
       `/api/search?q=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}`,
+      { signal },
     )
-    return {
-      ...response,
-      results: response.results.map(normalizeSeriesSummary),
-    }
+    return response.results.map(normalizeSeriesSummary)
   },
-  setBookmark: (
-    payload: {
-      seriesId: string
-      entryId: string
-      entryIndex: number
-      category: CategoryId
-      progress: string
-      cue: string
-      position: SavedReadingPosition
-      lastSeen?: string
-    },
-    options?: { keepalive?: boolean },
-  ) =>
-    request<Pick<AppState, 'bookmarks' | 'readingPositions'>>('/api/bookmarks', {
+  saveProgress: (payload: ProgressPayload, options?: { keepalive?: boolean }) =>
+    request<ProgressSaveResponse>('/api/bookmarks?compact=1', {
       method: 'POST',
       body: JSON.stringify(payload),
       keepalive: options?.keepalive,
+      timeoutMs: 15_000,
     }),
   removeBookmark: (seriesId: string) =>
-    request<Pick<AppState, 'bookmarks' | 'readingPositions'>>(
-      `/api/bookmarks/${encodeURIComponent(seriesId)}`,
-      {
-        method: 'DELETE',
-      },
-    ),
-  getReaderPreference: (seriesId: string) =>
-    request<ReaderPreferenceResponse>(
-      `/api/reader-preferences/${encodeURIComponent(seriesId)}`,
-    ),
-  setReaderPreference: (
-    seriesId: string,
-    settings: ReaderSettings,
-    options?: { keepalive?: boolean },
-  ) =>
-    request<ReaderPreferenceResponse>(
-      `/api/reader-preferences/${encodeURIComponent(seriesId)}`,
-      {
-        method: 'PUT',
-        body: JSON.stringify({ settings }),
-        keepalive: options?.keepalive,
-      },
-    ),
-  addComment: async (payload: CreateCommentPayload) => {
-    const response = await request<SeriesResponse>('/api/comments', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })
-    return {
-      ...response,
-      series: normalizeSeriesDetail(response.series),
-    }
-  },
-  createRoot: async (payload: CreateRootPayload) =>
-    normalizeAppState(await request<AppState>('/api/admin/roots', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })),
-  deleteRoot: async (rootId: string) =>
-    normalizeAppState(await request<AppState>(`/api/admin/roots/${rootId}`, {
+    request<{ ok: true }>(`/api/bookmarks/${encodeURIComponent(seriesId)}?compact=1`, {
       method: 'DELETE',
-    })),
+    }),
+  getReaderPreference: (seriesId: string) =>
+    request<ReaderPreferenceResponse>(`/api/reader-preferences/${encodeURIComponent(seriesId)}`),
+  setReaderPreference: (seriesId: string, settings: ReaderSettings, options?: { keepalive?: boolean }) =>
+    request<ReaderPreferenceResponse>(`/api/reader-preferences/${encodeURIComponent(seriesId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ settings }),
+      keepalive: options?.keepalive,
+    }),
+  addComment: async (payload: CreateCommentPayload) =>
+    (await request<{ comments: SeriesComment[] }>('/api/comments?compact=1', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })).comments,
+  getAppInfo: () => request<AndroidAppInfo>('/api/mobile/app-info', { timeoutMs: 10_000 }),
+
+  /* ---------------------------------------------------------------- admin -- */
+
+  createRoot: (payload: CreateRootPayload) =>
+    stateRequest('/api/admin/roots', { method: 'POST', body: JSON.stringify(payload) }),
+  deleteRoot: (rootId: string) =>
+    stateRequest(`/api/admin/roots/${encodeURIComponent(rootId)}`, { method: 'DELETE' }),
   listDirectories: (rootId: string, relativePath: string) =>
     request<DirectoryListing>(
       `/api/admin/directories?rootId=${encodeURIComponent(rootId)}&relativePath=${encodeURIComponent(relativePath)}`,
     ),
-  createSource: async (payload: CreateSourcePayload) =>
-    normalizeAppState(await request<AppState>('/api/admin/sources', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })),
-  updateSource: async (sourceId: string, payload: UpdateSourcePayload) =>
-    normalizeAppState(await request<AppState>(`/api/admin/sources/${sourceId}`, {
+  createSource: (payload: CreateSourcePayload) =>
+    stateRequest('/api/admin/sources', { method: 'POST', body: JSON.stringify(payload) }),
+  updateSource: (sourceId: string, payload: UpdateSourcePayload) =>
+    stateRequest(`/api/admin/sources/${encodeURIComponent(sourceId)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
-    })),
-  deleteSource: async (sourceId: string) =>
-    normalizeAppState(await request<AppState>(`/api/admin/sources/${sourceId}`, {
-      method: 'DELETE',
-    })),
-  runScan: async (sourceId?: string) =>
-    normalizeAppState(await request<AppState>('/api/admin/scan', {
+    }),
+  deleteSource: (sourceId: string) =>
+    stateRequest(`/api/admin/sources/${encodeURIComponent(sourceId)}`, { method: 'DELETE' }),
+  runScan: (sourceId?: string) =>
+    stateRequest('/api/admin/scan', {
       method: 'POST',
       body: JSON.stringify(sourceId ? { sourceId } : {}),
-    })),
+    }),
   getScanStatus: () => request<ScanStatusResponse>('/api/admin/scan/status'),
-  resetPassword: async (userId: string, payload: ResetPasswordPayload) =>
-    normalizeAppState(await request<AppState>(`/api/admin/users/${userId}/reset-password`, {
+  createUser: (payload: { username: string; password: string; role: Role }) =>
+    stateRequest('/api/admin/users', { method: 'POST', body: JSON.stringify(payload) }),
+  deleteUser: (userId: string) =>
+    stateRequest(`/api/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
+  resetPassword: (userId: string, payload: ResetPasswordPayload) =>
+    stateRequest(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
       method: 'POST',
       body: JSON.stringify(payload),
-    })),
-  saveMetadataOverride: async (seriesId: string, payload: MetadataOverridePayload) =>
-    normalizeAppState(await request<AppState>(`/api/admin/series/${seriesId}/metadata-override`, {
+    }),
+  getAdminSettings: () => request<AdminSettings>('/api/admin/settings'),
+  updateAdminSettings: (payload: { remoteMetadataEnabled?: boolean }) =>
+    request<AdminSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteAndroidApk: () =>
+    request<{ androidApp: AndroidAppInfo }>('/api/admin/android-app', { method: 'DELETE' }),
+  saveMetadataOverride: (seriesId: string, payload: MetadataOverridePayload) =>
+    stateRequest(`/api/admin/series/${encodeURIComponent(seriesId)}/metadata-override`, {
       method: 'POST',
       body: JSON.stringify(payload),
-    })),
-  clearMetadataOverride: async (seriesId: string) =>
-    normalizeAppState(await request<AppState>(`/api/admin/series/${seriesId}/metadata-override`, {
+      timeoutMs: 60_000,
+    }),
+  clearMetadataOverride: (seriesId: string) =>
+    stateRequest(`/api/admin/series/${encodeURIComponent(seriesId)}/metadata-override`, {
       method: 'DELETE',
-    })),
-  refreshSeriesMetadata: async (seriesId: string) =>
-    normalizeAppState(await request<AppState>(`/api/admin/series/${seriesId}/metadata-refresh`, {
+    }),
+  refreshSeriesMetadata: (seriesId: string) =>
+    stateRequest(`/api/admin/series/${encodeURIComponent(seriesId)}/metadata-refresh`, {
       method: 'POST',
       body: JSON.stringify({}),
-    })),
+      timeoutMs: 60_000,
+    }),
+  /** Streams an APK to the server, reporting upload progress (0–1). */
+  uploadAndroidApk: async (
+    file: File,
+    version: { versionName: string; versionCode: string },
+    onProgress: (fraction: number) => void,
+  ) => {
+    await ensureMobileSessionLoaded()
+    const params = new URLSearchParams()
+
+    if (version.versionName.trim()) {
+      params.set('versionName', version.versionName.trim())
+    }
+
+    if (version.versionCode.trim()) {
+      params.set('versionCode', version.versionCode.trim())
+    }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/vnd.android.package-archive',
+      ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+      ...(await getAuthHeaders()),
+    }
+
+    return new Promise<AndroidAppInfo>((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', resolveApiUrl(`/api/admin/android-app?${params.toString()}`))
+      xhr.withCredentials = !isNativeApp
+      Object.entries(headers).forEach(([name, value]) => xhr.setRequestHeader(name, value))
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onProgress(event.loaded / event.total)
+        }
+      }
+      xhr.onload = () => {
+        let payload: { androidApp?: AndroidAppInfo; error?: string } | null = null
+
+        try {
+          payload = JSON.parse(xhr.responseText)
+        } catch {
+          payload = null
+        }
+
+        if (xhr.status >= 200 && xhr.status < 300 && payload?.androidApp) {
+          resolve(payload.androidApp)
+          return
+        }
+
+        if (xhr.status === 401) {
+          notifyUnauthorized('/api/admin/android-app')
+        }
+
+        reject(new ApiError(payload?.error || `Upload failed with ${xhr.status}`, xhr.status || null))
+      }
+      xhr.onerror = () => reject(new ApiError('The upload was interrupted.', null))
+      xhr.send(file)
+    })
+  },
 }

@@ -72,6 +72,17 @@ export const setServerUrl = (value: string) => {
   return normalized
 }
 
+/** Forgets the server address so the next start asks for it again. */
+export const clearServerUrl = () => {
+  serverUrl = ''
+
+  try {
+    window.localStorage.removeItem(serverUrlStorageKey)
+  } catch {
+    // Nothing stored.
+  }
+}
+
 const localAppResourcePattern = /^(?:blob|capacitor|data|file):/i
 
 export const isLocalAppResourceUrl = (input: string) => {

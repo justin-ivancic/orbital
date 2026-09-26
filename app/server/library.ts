@@ -6,6 +6,7 @@ import type { Database } from 'better-sqlite3'
 import bcrypt from 'bcryptjs'
 import mime from 'mime-types'
 import type {
+  EntryUnit,
   AppState,
   Bookmark,
   CategoryId,
@@ -90,7 +91,8 @@ type SourceFolderRow = {
   root_identity: string | null
 }
 
-const LIBRARY_SCANNER_VERSION = 2
+// Bump when entry parsing changes so every folder is re-parsed on the next scan.
+const LIBRARY_SCANNER_VERSION = 3
 
 const parseCategoryId = (value: unknown): CategoryId => {
   if (typeof value !== 'string' || !categoryOrder.includes(value as CategoryId)) {
@@ -273,6 +275,7 @@ type EntryRow = {
   chapter_number: number | null
   season_number: number | null
   episode_number: number | null
+  page_count?: number | null
 }
 
 type UserRow = {
@@ -603,10 +606,13 @@ const cleanEntryStemTitle = (value: string, prefix?: string) => {
 }
 
 const stripLeadingEntryOrdinal = (value: string) => {
-  const nextValue = compactWhitespace(value.replaceAll('_', ' ')).replace(
-    /^(?:chapter|ch|volume|vol(?:ume)?|episode|ep|book)\s*\d+(?:\.\d+)?(?:\s*[:._-]\s*|\s+)+/i,
-    '',
-  ).trim()
+  const nextValue = compactWhitespace(value.replaceAll('_', ' '))
+    .replace(/^(?:volume|vol|v)\.?\s*\d+(?:\.\d+)?(?:\s*[:._-]\s*|\s+)+(?=(?:chapter|ch)\b)/i, '')
+    .replace(
+      /^(?:chapter|ch|volume|vol(?:ume)?|episode|ep|book)\.?\s*\d+(?:\.\d+)?(?:\s*[:._-]\s*|\s+|$)+/i,
+      '',
+    )
+    .trim()
 
   return nextValue || compactWhitespace(value.replaceAll('_', ' '))
 }
@@ -1239,12 +1245,13 @@ const parseMangaEntry = (file: FileRecord, sourceFolder: SourceFolderRow): Parse
     file,
   )
   const strippedName = stripExtension(file.baseName)
-  const volumeMatch = strippedName.match(/\b(?:v|vol(?:ume)?)\s*(\d{1,4})\b/i)
-  const chapterMatch = strippedName.match(/\b(?:ch|chapter)\s*(\d{1,4}(?:\.\d+)?)(?=\b|[_\s:.-]|$)/i)
-  const sequenceNumber = volumeMatch
-    ? Number(volumeMatch[1])
-    : chapterMatch
-      ? Number(chapterMatch[1])
+  // "Vol. 04 Ch. 650" is chapter 650 (inside volume 4), so a chapter number wins.
+  const chapterMatch = strippedName.match(/\b(?:ch|chapter)\.?\s*(\d{1,4}(?:\.\d+)?)(?=\b|[_\s:.-]|$)/i)
+  const volumeMatch = chapterMatch ? null : strippedName.match(/\b(?:v|vol(?:ume)?)\.?\s*(\d{1,4})\b/i)
+  const sequenceNumber = chapterMatch
+    ? Number(chapterMatch[1])
+    : volumeMatch
+      ? Number(volumeMatch[1])
       : firstNumber(strippedName)
   const supplementalLabel = detectSupplementalLabel(`${nestedSegments.join(' ')} ${strippedName}`)
   const isPrologue = supplementalLabel === 'Prologue'
@@ -1742,6 +1749,8 @@ const buildLogicalEntries = (category: CategoryId, entries: EntryRow[]): Library
         storageFile: variant.storage_file,
         format: variant.format,
         details: variant.details,
+        size: Number.isFinite(variant.size) && variant.size > 0 ? variant.size : null,
+        pageCount: variant.page_count ?? null,
         fileUrl: `/api/media/file/${variant.id}${buildEntryMediaVersionSuffix(variant)}`,
         downloadUrl: `/api/media/file/${variant.id}${buildEntryMediaVersionSuffix(variant)}`,
         mediaTracks: getMediaTracksForEntry(variant.id, variant.format, variant.file_path),
@@ -2559,11 +2568,47 @@ const downloadRemoteAsset = async (
   }
 }
 
+/**
+ * What one entry of a series is called. Manga folders hold either chapters or
+ * whole volumes, so the labels decide.
+ */
+export const inferEntryUnit = (category: CategoryId, labels: string[]): EntryUnit => {
+  switch (category) {
+    case 'anime':
+      return 'episode'
+    case 'magazines':
+      return 'issue'
+    case 'novels':
+      return 'chapter'
+    case 'books':
+      return 'book'
+    case 'manga': {
+      let volumes = 0
+      let chapters = 0
+
+      for (const label of labels) {
+        if (/^volume\b/i.test(label)) {
+          volumes += 1
+        } else if (/^chapter\b/i.test(label)) {
+          chapters += 1
+        }
+      }
+
+      return volumes > chapters ? 'volume' : 'chapter'
+    }
+  }
+}
+
+type EntryStats = {
+  count: number
+  unit: EntryUnit
+}
+
 const getGroupedEntryCountsBySeries = (
   db: Database,
   seriesRows: Array<Pick<SeriesRow, 'id' | 'category'>>,
 ) => {
-  const groupedCounts = new Map<string, number>()
+  const groupedCounts = new Map<string, EntryStats>()
 
   if (seriesRows.length === 0) {
     return groupedCounts
@@ -2593,6 +2638,7 @@ const getGroupedEntryCountsBySeries = (
     >
   const categoryBySeries = new Map(seriesRows.map((series) => [series.id, series.category]))
   const groupedKeysBySeries = new Map<string, Set<string>>()
+  const labelsBySeries = new Map<string, string[]>()
 
   for (const entry of entryRows) {
     const category = categoryBySeries.get(entry.series_id)
@@ -2604,10 +2650,16 @@ const getGroupedEntryCountsBySeries = (
     const groupedKeys = groupedKeysBySeries.get(entry.series_id) ?? new Set<string>()
     groupedKeys.add(buildLogicalEntryKey(category, entry as EntryRow))
     groupedKeysBySeries.set(entry.series_id, groupedKeys)
+    const labels = labelsBySeries.get(entry.series_id) ?? []
+    labels.push(entry.label)
+    labelsBySeries.set(entry.series_id, labels)
   }
 
   for (const series of seriesRows) {
-    groupedCounts.set(series.id, groupedKeysBySeries.get(series.id)?.size ?? 0)
+    groupedCounts.set(series.id, {
+      count: groupedKeysBySeries.get(series.id)?.size ?? 0,
+      unit: inferEntryUnit(series.category, labelsBySeries.get(series.id) ?? []),
+    })
   }
 
   return groupedCounts
@@ -2891,24 +2943,17 @@ const resolveSeriesPresentation = async (options: PresentationOptions): Promise<
   }
 }
 
-const buildProgressLabel = (category: CategoryId, entryCount: number) => {
-  if (category === 'anime') {
-    return `${entryCount} ${entryCount === 1 ? 'episode' : 'episodes'}`
-  }
+const entryUnitNames: Record<EntryUnit, [string, string]> = {
+  chapter: ['chapter', 'chapters'],
+  volume: ['volume', 'volumes'],
+  issue: ['issue', 'issues'],
+  episode: ['episode', 'episodes'],
+  book: ['book file', 'book files'],
+}
 
-  if (category === 'manga') {
-    return `${entryCount} ${entryCount === 1 ? 'volume' : 'volumes'}`
-  }
-
-  if (category === 'novels') {
-    return `${entryCount} ${entryCount === 1 ? 'chapter' : 'chapters'}`
-  }
-
-  if (category === 'magazines') {
-    return `${entryCount} ${entryCount === 1 ? 'issue' : 'issues'}`
-  }
-
-  return `${entryCount} ${entryCount === 1 ? 'book file' : 'book files'}`
+const buildProgressLabel = (unit: EntryUnit, entryCount: number) => {
+  const [singular, plural] = entryUnitNames[unit]
+  return `${entryCount} ${entryCount === 1 ? singular : plural}`
 }
 
 const formatSourceItemCount = (category: CategoryId, count: number) => {
@@ -2994,11 +3039,13 @@ const compactDescription = (value: string) => {
 
 const mapSeriesRowToSummary = (
   series: SeriesRow,
-  entryCount = series.file_count,
+  entryStats: EntryStats | undefined,
   options: { compact?: boolean } = {},
 ): SeriesSummary => {
   const mediaVersion = buildMediaVersionSuffix(series)
   const coverAvailable = hasRealCoverImage(series)
+  const entryCount = entryStats?.count ?? series.file_count
+  const entryUnit = entryStats?.unit ?? inferEntryUnit(series.category, [])
 
   return {
     id: series.id,
@@ -3008,7 +3055,8 @@ const mapSeriesRowToSummary = (
     year: series.year,
     format: series.format,
     status: series.status,
-    progressLabel: buildProgressLabel(series.category, entryCount),
+    progressLabel: buildProgressLabel(entryUnit, entryCount),
+    entryUnit,
     description: options.compact ? compactDescription(series.description) : series.description,
     folder: series.folder_path,
     coverUrl: coverAvailable ? `/api/media/cover/${series.id}${buildCardCoverSuffix(series)}` : null,
@@ -3559,7 +3607,7 @@ export const signupUser = async (db: Database, username: string, password: strin
 }
 
 // Bump when the shape of library summaries changes so clients drop cached copies.
-const libraryPayloadVersion = 2
+const libraryPayloadVersion = 3
 
 /**
  * A cheap fingerprint of everything that appears in library summaries. Clients
@@ -3665,7 +3713,8 @@ export const getSeriesDetail = (db: Database, seriesId: string): SeriesDetail =>
     .prepare(
       `
         SELECT series_id, id, relative_path, label, title, storage_file, format, details,
-               sort_order, chapter_number, season_number, episode_number, file_path, size, mtime_ms
+               sort_order, chapter_number, season_number, episode_number, file_path, size, mtime_ms,
+               page_count
         FROM entries
         WHERE series_id = ?
         ORDER BY sort_order, label, title
@@ -3675,7 +3724,10 @@ export const getSeriesDetail = (db: Database, seriesId: string): SeriesDetail =>
   const logicalEntries = buildLogicalEntries(series.category, entries)
 
   return {
-    ...mapSeriesRowToSummary(series, logicalEntries.length),
+    ...mapSeriesRowToSummary(series, {
+      count: logicalEntries.length,
+      unit: inferEntryUnit(series.category, entries.map((entry) => entry.label)),
+    }),
     entries: logicalEntries,
     comments: getSeriesComments(db, seriesId),
   }
