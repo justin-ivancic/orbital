@@ -1,7 +1,24 @@
 # Future Library Metadata Notes
 
 This note captures follow-up ideas for richer book metadata, AI-assisted tagging,
-and creator/source pages. These are not implemented yet.
+and creator/source pages.
+
+## Status
+
+Already in Orbital:
+
+- Embedded metadata from EPUB (OPF), PDF (document info) and CBZ (`ComicInfo.xml`):
+  title, authors, subjects, description, year and language, plus page counts for
+  PDF and CBZ.
+- Manual admin overrides for title, year, author, description, source page and
+  cover, which later scans do not overwrite.
+- Opt-in online lookups (AniList, Google Books), off by default.
+- Topics built from genres and subjects, with a topic filter per library section.
+- Author pages at `/creators/:creatorKey` that group titles across sections.
+- Sorting by title, recently added, year and author.
+
+Still open: write-back to files, sidecar files, AI tagging, studios, publishers
+and translators as separate entities, and alias merging.
 
 ## Goals
 

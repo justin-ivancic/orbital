@@ -1,180 +1,279 @@
 # Orbital
 
-Orbital is a self-hosted media library for browsing, reading, and watching files that stay on your own machine or server. It is designed for personal archives where the app should index local folders, preserve reader progress, and serve media through a private web interface without uploading the library anywhere else.
+Orbital is a self-hosted reading library. Point it at folders of books, manga, web
+novels and magazines on your server or NAS, and read them in any browser or in
+the Android app, with your place kept across devices.
 
-The repository ships as an empty library app. It does not include personal media, databases, logs, generated builds, local environment files, or sample archives.
+The interface is designed for e-ink first: paper-and-ink colours, no animation,
+large touch targets, and page turns by tapping or swiping. It works just as well
+on a phone, tablet or desktop browser.
+
+Your files stay where they are. Orbital indexes them, streams pages on demand
+and keeps its own data (users, progress, comments, covers) in a local SQLite
+database. Nothing is sent to outside services unless an administrator turns on
+online metadata lookups.
 
 ## Features
 
-- React web app with an Express API
-- SQLite persistence for users, sessions, bookmarks, comments, scans, and metadata
-- Admin-managed source roots and media folders
-- Authenticated file streaming from mounted local folders
-- Reader and player support for books, novels, manga, magazines, and video
-- Bookmark and reading-position tracking per user
-- Device-local offline downloads for chapters, books, and series through the PWA
-- Installable Android app with app-private offline storage for downloaded content
-- Downloads screen with estimated size, verified local bytes, browser quota, repair, and delete controls
-- Series comments and basic account management
-- Optional metadata refresh through remote providers
-- Docker-friendly deployment with bind-mounted media and app data
+- **Readers for every format.** Paged EPUB with typography controls, PDF with
+  streaming and pre-rendered neighbouring pages, CBZ with read-ahead, and
+  paginated HTML, Markdown and plain-text chapters.
+- **Made for e-ink.** Light, dark and system themes, adjustable text size, font,
+  spacing and margins, two tap layouts (edges, or mostly forward), and page
+  turns with no motion.
+- **Continue where you left off.** Progress saves on the device first and syncs
+  in the background, so reading works on flaky connections, and the most recent
+  position wins across devices.
+- **Offline downloads.** Download a book, a chapter or a whole series and read it
+  without a connection, in the Android app (app-private storage) or a browser
+  (installed web app).
+- **A library that sorts itself.** Series grouping, volume and chapter detection,
+  covers from the files themselves, embedded EPUB, PDF and ComicInfo metadata,
+  topics, author pages, sorting and instant search.
+- **Simple administration.** Add a media folder in three steps, watch scans live,
+  fix titles and covers, manage readers, and share the Android app from your own
+  server.
+- **English and German interface.**
 
-## Supported Media
+## Supported files
 
-Orbital scans linked folders into these library sections:
+Every media folder you add gets a type. The type decides how files are grouped
+and which formats are picked up.
 
-| Section | Formats |
-| --- | --- |
-| Anime | `mkv`, `mp4`, `avi`, `m4v`, `mov` |
-| Manga | `cbz`, `pdf`, `epub` |
-| Novels | `html`, `htm`, `md`, `pdf`, `epub`, `txt` |
-| Books | `pdf`, `epub`, `mobi`, `azw3`, `txt`, `md`, `html`, `htm` |
-| Magazines | `pdf`, `cbz`, `epub` |
+| Type | Formats | Grouping |
+| --- | --- | --- |
+| Books | `epub`, `pdf`, `txt`, `md`, `html`, `htm` (`mobi`, `azw3` and `azw` are listed, and a browser can download the original, but the app can't open them) | Each file is a title unless a folder groups several files |
+| Manga | `cbz`, `pdf`, `epub` | Each folder is a series; each file is a chapter or volume |
+| Novels | `html`, `htm`, `md`, `txt`, `epub`, `pdf` | One folder per novel, one file per chapter |
+| Magazines | `pdf`, `cbz`, `epub`, `html`, `htm`, `md`, `txt` | One folder per magazine, one file per issue |
 
-## Quick Start
+## Quick start (Docker)
 
-The app lives in [`app/`](app/).
+You need Docker with the Compose plugin.
 
 ```bash
-cd app
+git clone <this repository> orbital
+cd orbital/app
 cp .env.example .env
 mkdir -p data library
 ```
 
-Edit `.env` and set at least:
+Open `.env` and set a strong admin password:
 
 ```bash
-APP_ADMIN_PASSWORD=change-this-password
+APP_ADMIN_PASSWORD=choose-a-long-password
 ```
 
-Then start with Docker:
+Put your files in `app/library`, one subfolder per type (for example
+`library/books` and `library/manga`), or point `MEDIA_HOST_DIR` at an existing
+folder. Then start Orbital:
 
 ```bash
 docker compose up -d --build
 ```
 
-By default:
+Open `http://localhost:4310` and sign in as `admin` with the password you set.
 
-- app data is stored in `app/data`
-- media is mounted from `app/library`
-- the web app is available at `http://localhost:4310`
-- the bootstrap admin username is `admin`
+### First run
 
-After signing in, open `Admin`, browse the mounted library root, link media subfolders to sections, and run a scan.
+1. Open **Admin → Library** and choose **Add folder**.
+2. Pick what the folder contains (books, manga, novels or magazines).
+3. Browse to the folder inside your storage and choose **Use this folder**, then
+   **Add and scan**.
 
-## Local Development
+The first scan reads covers and embedded metadata, so a large library takes a
+while. You can start reading as soon as titles appear. Later scans only look at
+what changed. Use **Scan for changes** after adding files, or **Rescan** on a
+single folder.
 
-```bash
-cd app
-cp .env.example .env
-npm install
-npm run dev
-```
+The admin account is created on the first start. Changing
+`APP_ADMIN_PASSWORD` afterwards does not change the password of an existing
+account. Change it in **Settings** instead.
 
-Set `APP_ADMIN_PASSWORD` in `.env` before starting the server.
+### Media on a NAS
 
-Development services:
-
-- frontend: `http://127.0.0.1:5173`
-- backend: `http://127.0.0.1:4300`
-
-Useful scripts:
+Mount the share on the Docker host and set `MEDIA_HOST_DIR` to the mount point.
+Or let Docker mount it over SMB with the NAS override file:
 
 ```bash
-npm run dev
-npm run build
-npm run lint
-npm run start
-npm run mobile:assemble
+docker compose -f compose.yaml -f compose.nas.yaml up -d --build
 ```
 
-### Android app
+Set `NAS_SHARE`, `NAS_USERNAME`, `NAS_PASSWORD` and the other `NAS_*` values
+in `.env` (see [`app/.env.example`](app/.env.example)). Orbital only needs read
+access; the media is mounted read-only.
 
-Orbital includes a Capacitor Android target. The APK bundles the web interface
-locally, while the existing Express server and NAS-backed media library remain
-the source of truth. Sign in while online, download books or series from the
-Downloads screen, and the installed app can open those copies without a network
-connection. The downloaded files live in the app's private Android storage and
-are separate from browser/PWA storage.
+## Running on a public address
 
-Build a debug APK from `app/`:
+Orbital is meant to sit behind a reverse proxy that terminates HTTPS, such as
+Caddy, nginx, Traefik or a platform like Coolify. Set these variables when it
+does:
 
 ```bash
-npm run mobile:assemble
+APP_COOKIE_SECURE=1   # session cookies only over HTTPS
+APP_TRUST_PROXY=1     # read the client address from the proxy (hop count)
+APP_ENABLE_HSTS=1     # optional, once HTTPS works everywhere
 ```
 
-The result is `app/android/app/build/outputs/apk/debug/app-debug.apk`. Transfer
-that file to the Boox and install it, then sign in and download the content you
-want before leaving connectivity. To make the current APK available from
-Orbital’s Profile page, run `npm run mobile:publish` from `app/`; it copies the
-APK to `app/mobile-distribution/orbital-android.apk` and serves it at
-`/api/mobile/app.apk`.
+- Keep `HOST_BIND_ADDR=127.0.0.1` when the proxy runs on the same machine, so
+  the plain HTTP port is not reachable from outside.
+- Use `/healthz` for health checks. It is cheap and does not touch the media
+  mount. `/readyz` checks the database, data folder and media root, and is meant
+  for diagnostics.
+- Back up the data directory (`app/data` by default). It holds the database,
+  generated covers and the uploaded Android app.
 
-On first launch the app asks for your server address (for example
-`https://library.example.com`). Set `VITE_ORBITAL_API_BASE_URL` at build time
-if you want to bake a default address into your own APK.
+### Coolify
+
+1. Create a resource from this repository and pick the **Dockerfile** build pack
+   with `app` as the base directory. The Dockerfile listens on port `4300`.
+2. Add a persistent volume at `/app/data`.
+3. Mount your media into the container, for example a host folder or a CIFS
+   volume at `/media/library`, and set `APP_MEDIA_ROOT_PATH=/media/library`.
+4. Set `APP_ADMIN_PASSWORD`, `APP_COOKIE_SECURE=1` and `APP_TRUST_PROXY=1`.
+5. Set the health check path to `/healthz`.
+
+With automatic deployment on, every push to the tracked branch goes live.
+
+### Cloudflare and other CDNs
+
+- Do not cache `/api/*`. Covers, pages and downloads are private to each account.
+  Cache only the built assets under `/assets/*`.
+- Media responses are sent as `private, no-transform`. Don't add rules that
+  override this, or byte ranges and download size checks can break.
+- Keep verification challenges away from `/api/*`. The Android app cannot solve
+  a browser challenge and would treat the server as offline.
+- Orbital treats gateway errors (502, 503, 504 and Cloudflare 52x) as "offline",
+  keeps showing the cached library and retries on its own.
+
+## Android app
+
+The Android app bundles the interface, stores downloads in app-private storage
+and opens straight into your library when you are offline.
+
+**Installing.** On the device, open Orbital in the browser, go to **Settings**
+and tap **Android app** to download the APK from your server. An administrator
+makes it available first, in one of these ways (checked in this order):
+
+1. Upload an APK in **Admin → System**.
+2. Place an APK at `app/mobile-distribution/orbital-android.apk` before building
+   the image yourself. The repository never contains APKs.
+3. Set `APP_ANDROID_APK_URL` to an HTTPS download address.
+
+On first launch the app asks for your server address. It must be an `https://`
+address. The app remembers it. **Change**, next to the address on the sign-in
+screen, resets it.
+
+**Updates.** **Settings → App** shows the installed version and offers an
+update when the server has a newer version code. Android only updates
+an app in place when the new APK is signed with the same key. A different key
+means uninstalling first, which deletes downloads. See
+[`app/README.md`](app/README.md#android-app) for building and signing.
 
 ## Configuration
 
-The most important environment variables are:
+Set these in `app/.env` for Docker Compose, or as environment variables anywhere
+else.
+
+### Server
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `APP_ADMIN_PASSWORD` | (required) | Password for the first admin account. The server does not start without it. |
+| `APP_ADMIN_USERNAME` | `admin` | Username of the first admin account. |
+| `APP_NAME` | `Orbital Library` | Name shown on the sign-in screen and in the browser tab. |
+| `APP_OPEN_SIGNUP` | `0` in production | `1` lets anyone who can reach the server create a reader account. |
+| `PORT` | `4300` | Port the server listens on inside the container. |
+| `APP_DATA_DIR` | `/app/data` in Docker, `./data` otherwise | Database, covers, thumbnails and the uploaded APK. |
+| `APP_COOKIE_SECURE` | `1` in production, `0` in the Compose file | Send session cookies over HTTPS only. Set `1` behind HTTPS. |
+| `APP_TRUST_PROXY` | off | `1` (or another hop count) behind a reverse proxy. Also accepts an Express "trust proxy" value such as `loopback`. |
+| `APP_ENABLE_HSTS` | `0` | `1` sends `Strict-Transport-Security`. Only enable once HTTPS is permanent. |
+| `APP_MOBILE_ORIGINS` | `https://localhost,capacitor://localhost` | Origins the Android app may call the API from. |
+| `APP_REMOTE_METADATA` | unset | Unset lets an admin decide in **Admin → Metadata** (off by default). `1` or `0` forces lookups on or off. |
+| `APP_ANDROID_APK_URL` | unset | HTTPS address of an APK, used when none is uploaded or bundled. |
+
+### Media
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MEDIA_HOST_DIR` | `./library` | Folder on the Docker host that holds your media (Compose). |
+| `APP_MEDIA_ROOT_PATH` | `/media/library` in Compose | Where the media is mounted inside the container. It appears in **Admin → Library** as storage from the server configuration. |
+| `APP_MEDIA_ROOT_LABEL` | the folder name | Name of that storage in the admin screens. |
+| `APP_MEDIA_ROOT_DISPLAY_PATH` | `MEDIA_HOST_DIR` | Path shown to admins, for example the NAS share. |
+
+### Docker Compose only
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HOST_BIND_ADDR` | `127.0.0.1` | Host address the port is published on. Use `0.0.0.0` only behind a firewall or proxy. |
+| `HOST_PORT` | `4310` | Host port. |
+| `APP_DATA_HOST_DIR` | `./data` | Host folder for the data directory. |
+| `NAS_*` | | SMB settings for `compose.nas.yaml`, see `.env.example`. |
+
+### Tuning (optional)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `APP_CBZ_PAGE_CACHE_MB` | `96` | Memory for recently read CBZ pages. |
+| `APP_CBZ_READ_AHEAD_PAGES` | `4` | CBZ pages prepared ahead of the reader. |
+| `APP_CBZ_MANIFEST_CACHE_ENTRIES` | `128` | CBZ archive indexes kept in memory. |
+| `APP_CBZ_MAX_PAGES` | `5000` | Largest page count accepted per archive. |
+| `APP_CBZ_MAX_ENTRIES` | `20000` | Largest number of files accepted per archive. |
+| `APP_CBZ_MAX_PAGE_BYTES` | `83886080` (80 MB) | Largest single page accepted. |
+| `APP_CBZ_MAX_CENTRAL_DIRECTORY_BYTES` | `67108864` (64 MB) | Largest archive index accepted. |
+
+### Build time
 
 | Variable | Purpose |
 | --- | --- |
-| `HOST_BIND_ADDR` | Host interface for Docker port binding. Defaults to `127.0.0.1`; set to `0.0.0.0` only when a proxy/firewall protects it. |
-| `APP_ADMIN_USERNAME` | Bootstrap admin username. Defaults to `admin`. |
-| `APP_ADMIN_PASSWORD` | Required bootstrap admin password. |
-| `APP_OPEN_SIGNUP` | Set to `1` only when you intentionally want public self-signup. Production Docker defaults to `0`. |
-| `APP_DATA_HOST_DIR` | Host directory for persistent Docker app data. |
-| `MEDIA_HOST_DIR` | Host folder or mounted share containing media files. |
-| `APP_MEDIA_ROOT_LABEL` | Display name for the mounted media root. |
-| `APP_COOKIE_SECURE` | Set to `1` when serving behind HTTPS. |
-| `APP_ENABLE_HSTS` | Set to `1` only after HTTPS is confirmed. |
-| `APP_TRUST_PROXY` | Set to `1` only when Orbital is behind a trusted reverse proxy. |
-| `APP_MOBILE_ORIGINS` | Comma-separated Capacitor origins allowed to call the bearer-token mobile API. The default is `https://localhost,capacitor://localhost`. |
+| `VITE_ORBITAL_API_BASE_URL` | Pre-fills a server address in a self-built Android APK. Without it the app asks on first launch. |
 
-See [`app/.env.example`](app/.env.example) for the full example.
+## Privacy and security
 
-## Privacy Model
+- Media files are never modified, and are mounted read-only in the provided
+  Compose setup.
+- Everything Orbital stores lives in the data directory on your server.
+- Online metadata is off by default. When an admin enables it, titles and
+  authors of items without embedded details are sent to AniList and Google
+  Books during scans.
+- Passwords are hashed with bcrypt. Sign-in, sign-up and password changes are
+  rate limited. Browser sessions use `HttpOnly`, `SameSite=Strict` cookies with
+  CSRF tokens. The Android app keeps its sign-in token encrypted with a key from
+  the Android Keystore.
+- Offline downloads are tied to the account that made them and hidden from
+  other accounts on the same device. They are not encrypted, so treat an
+  unlocked device like an open book.
+- Account signup is closed unless you set `APP_OPEN_SIGNUP=1`. Admins add readers
+  in **Admin → Users**.
 
-Orbital is built around local ownership:
+## Development
 
-- media files remain in your mounted folder
-- SQLite data stays in the configured app data directory
-- offline downloads are explicit per-device browser storage, scoped to the signed-in Orbital user
-- `.env`, databases, generated builds, logs, test artifacts, and media folders are ignored by Git
-- demo seeding is disabled unless explicitly configured with `APP_ENABLE_DEMO_SEED=1`
+```bash
+cd app
+cp .env.example .env    # set APP_ADMIN_PASSWORD
+npm install
+npm run dev             # frontend on :5173, server on :4300
+```
 
-Metadata refresh can call external providers for lookup data. Keep that feature disabled or avoid using it if your library titles should never leave the server.
+See [`app/README.md`](app/README.md) for scripts, tests, the Android build and
+how the code is organised.
 
-## Repository Layout
+## Repository layout
 
 ```text
 app/
-  server/       Express API, SQLite persistence, scanning, metadata, streaming
-  src/          React frontend
-  public/       Static assets and PDF.js runtime assets
-  scripts/      Build support scripts
+  server/        Express API, SQLite, library scanner, metadata, media streaming
+  src/           React interface, readers and offline storage
+  android/       Capacitor Android project
+  public/        Static files, service worker, PDF.js assets
+  scripts/       Build helpers
+  docs/          Design notes
 ```
 
-## Production Notes
+## Status and license
 
-- Always set a strong `APP_ADMIN_PASSWORD`.
-- Use `APP_COOKIE_SECURE=1` behind HTTPS.
-- Leave `APP_OPEN_SIGNUP=0` unless you intentionally want new people to self-register.
-- Mount media read-only when possible.
-- Keep the default localhost Docker bind unless a reverse proxy or firewall protects the app.
-- Use `/healthz` for container and reverse-proxy health checks.
-- Serve `/sw.js` with `Service-Worker-Allowed: /` and `Cache-Control: no-cache`; the bundled server does this automatically.
-- Do not edge-cache `/api/*`, `/api/media/*`, `/api/offline/*`, or other authenticated media routes. Cache only immutable built assets such as `/assets/*`.
-- If Cloudflare applies a verification challenge globally, exclude the authenticated API and media paths used by the Android client; the native app cannot complete an interactive browser challenge for background API and download requests.
-- Keep proxy compression/transforms off for media responses so range requests and offline byte verification remain stable.
-- Keep `data/` backed up if bookmarks, users, comments, and scan state matter.
-- Do not commit `.env`, local databases, media folders, or generated builds.
+Orbital is young and changes often. Back up your data directory before
+upgrading.
 
-## Project Status
-
-Orbital is an early self-hosted app. The core local-library workflow is present, but the project should still be treated as actively evolving.
-
-## License
-
-No open-source license has been selected yet.
+No open-source license has been chosen yet. Until one is, all rights are
+reserved by the authors.

@@ -1,207 +1,188 @@
-# Orbital Library App
+# Orbital app
 
-Orbital Library is a self-hosted media library for browsing and reading locally mounted files.
+This folder holds the whole application: the Express server, the React
+interface and the Capacitor Android project. Deployment and configuration are
+described in the [main README](../README.md). This file is for working on the
+code.
 
-## What is included
+## Getting started
 
-- React frontend
-- Express backend with SQLite persistence
-- Bootstrap admin account through environment variables
-- Optional open signup for regular users
-- Manual bookmarks with per-user saved reader position
-- Series-level comments
-- Admin UI for linking mounted folders
-- Incremental scanning for anime, manga, novels, books, and magazines; bounded parallel inventory checks reuse unchanged entries, detected moves preserve IDs, durable per-series checkpoints resume interrupted work without restarting completed items, large series commit in safe batches, risky PDF/CBZ cover extraction runs in isolated workers, and incomplete source scans preserve existing records
-- Authenticated local media serving
-- Local cover fallbacks for folders, PDFs, CBZ files, and generated placeholders
-- PWA app shell with explicit offline downloads for chapters, books, and series
-- Installable Capacitor Android app with app-private offline storage
-- Downloads management with estimated size, verified local bytes, browser quota, repair, and delete controls
-- Naturally loaded cover images are stored in the same verified app-private filesystem used by Android downloads, with cover storage accounting, an on-device self-test, and cleanup controls in Downloads
-- Direct Android APK download from the authenticated Profile page
-
-The repository does not include personal media, databases, logs, or local environment files. It includes the current debug APK in `mobile-distribution/` so the deployed Profile page can provide a direct device download.
-
-## Local Development
+Requires Node.js 20.19+ or 22.12+.
 
 ```bash
-cp .env.example .env
+cp .env.example .env     # set APP_ADMIN_PASSWORD
 npm install
 npm run dev
 ```
 
-Set `APP_ADMIN_PASSWORD` in `.env` before starting the server.
+- Interface: `http://127.0.0.1:5173` (Vite, proxies `/api` to the server)
+- Server: `http://127.0.0.1:4300`
 
-- Frontend: `http://127.0.0.1:5173`
-- Backend: `http://127.0.0.1:4300`
+`npm run dev` reads `.env`. Variables already set in your shell take precedence.
+To browse a local media folder, start the server with
+`APP_MEDIA_ROOT_PATH=./library`, or add the folder as storage in
+**Admin → Library**. Leave `APP_MEDIA_ROOT_PATH` out of `.env` if you also use
+Docker Compose, which sets it for the container.
 
-The default bootstrap admin username is `admin` unless `APP_ADMIN_USERNAME` is set.
+`APP_ENABLE_DEMO_SEED=1` with `APP_DEMO_FILES_ROOT=<folder>` fills an empty
+database with demo folders from that directory, for local testing only.
 
-Demo seeding is disabled by default. To seed demo files in a local-only environment, set `APP_ENABLE_DEMO_SEED=1` and provide `APP_DEMO_FILES_ROOT`.
+## Scripts
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Server with reload, plus the Vite dev server |
+| `npm run build` | Type-checks everything and builds the interface into `dist/` |
+| `npm run start` | Runs the server, which also serves the built interface from `dist/` |
+| `npm test` | All `node:test` suites (server and interface logic) |
+| `npm run lint` | ESLint, including the React Compiler rules |
+| `npm run mobile:build` | Builds the interface and copies it into the Android project |
+| `npm run mobile:assemble` | `mobile:build`, then a debug APK |
+| `npm run mobile:publish` | `mobile:assemble`, then copies the APK to `mobile-distribution/` |
+| `npm run mobile:open` | Opens the Android project in Android Studio |
+
+Before sending changes, run `npm test`, `npm run lint` and `npx tsc -b`. The last
+one also type-checks the server, which `tsx` does not do at runtime.
+
+## How the code is organised
+
+### Server (`server/`)
+
+| File | Role |
+| --- | --- |
+| `index.ts` | Configuration, security headers, sessions and every HTTP route |
+| `library.ts` | Folder scanning, title and chapter parsing, grouping, library payloads |
+| `database.ts` | SQLite schema and migrations |
+| `localMetadata.ts`, `mediaWorker*.ts` | Embedded EPUB, PDF and ComicInfo metadata, and cover extraction, in worker threads |
+| `metadata.ts` | Optional online lookups (AniList, Google Books) |
+| `cbzArchive.ts`, `zipArchive.ts` | Reading CBZ pages with ranged reads, page cache and read-ahead |
+| `mediaResponses.ts`, `mediaVersion.ts` | Streaming with byte ranges and version-stamped URLs |
+| `offline.ts` | Download manifests for the offline feature |
+| `coverThumbnails.ts` | Card-sized cover thumbnails |
+| `androidApp.ts` | APK upload and download |
+| `appSettings.ts`, `rateLimit.ts`, `readerPreferences.ts` | Settings stored in the database, rate limits, per-series reader settings |
+
+The scanner reuses unchanged entries, keeps IDs when files move, commits large
+series in batches and resumes interrupted scans. Raising
+`LIBRARY_SCANNER_VERSION` in `library.ts` makes the next scan reparse every
+folder. Raise it when parsing rules change.
+
+### Interface (`src/`)
+
+- `app/`: application state. Small external stores (`store.ts`) for the router,
+  session, library, downloads, series details, preferences and notices, read
+  with `useStore(store, selector)`.
+- `pages/`: one component per screen, `pages/admin/` for the admin tabs.
+- `readers/`: `EpubReader`, `PdfReader`, `CbzReader` and `FlowReader` (HTML,
+  Markdown, text), sharing `TapSurface` for taps, swipes and keys.
+- `shell/`, `ui/`: navigation, top bar, notices, and shared pieces such as
+  covers, sheets and title cards.
+- `styles/`: design tokens and CSS. `i18n/`: English and German strings.
+- `api.ts`, `platform.ts`: the HTTP client, and web versus Android differences.
+- `offlineStorage.ts`, `offlineDownloads.ts`: download storage in IndexedDB on
+  the web and in app-private files on Android.
+
+Reading progress is local-first. `app/progress.ts` records every page turn on the
+device and syncs one pending position per title with retries. A newer position
+from another device wins. The library, reading list and series details are
+cached in IndexedDB, so the app starts instantly and keeps working offline.
+Downloads are described in [`docs/offline-downloads.md`](docs/offline-downloads.md).
+
+### Designing for e-ink
+
+The interface targets a 10" colour e-ink tablet first:
+
+- Paper and ink colour tokens with strong contrast. No transitions or
+  animation, since every frame is a screen refresh.
+- Touch targets of at least 44px. Hard outlines and offset shadows instead of
+  soft shading.
+- Pages turn by whole screens. Nothing scrolls continuously while reading.
+
+Check changes at 930×1240 (e-reader), 390×844 (phone) and 1440×900 (desktop).
 
 ## Android app
 
-The Android target packages the Orbital interface inside an installable APK.
-The server, SQLite database, and NAS-backed media remain unchanged. After
-installing, sign in while online and download the books or series you want from
-`Downloads`; those copies are stored in Android app-private storage and remain
-readable without Wi-Fi. Cover images that become visible while browsing are
-stored separately in the same app-private area, so cached bookmarks and library
-sections can retain their covers offline. Offline startup uses the local profile
-and does not require another login.
+The app id is `app.orbital.library`. The APK contains the built interface and
+talks to the server set on first launch.
 
-> **Future APK release note:** The Capacitor Filesystem plugin requires JDK 21;
-> JDK 17 is not sufficient. The Android build also needs Android SDK platform
-> 36 and build-tools 36.0.0. If the build machine has no Java or Android SDK,
-> install those tools in a temporary or developer-local location first, then
-> run the commands below from this directory. The pinned Gradle wrapper is
-> downloaded automatically when needed.
+### Building
 
-Before each release, increment `versionCode` and `versionName` in
-`android/app/build.gradle`, and `androidAppVersionCode` and
-`androidAppVersionName` in `src/platform.ts`.
-Keeping the version code higher than the installed APK lets Android update the
-app in place without requiring an uninstall, which preserves downloaded books
-and series.
-
-Build the debug APK from this directory:
+You need JDK 21 (JDK 17 is too old for the Capacitor Filesystem plugin) and the
+Android SDK with platform 36 and build-tools 36.0.0. The Gradle wrapper
+downloads Gradle itself.
 
 ```bash
 npm run mobile:assemble
 ```
 
-The APK is written to
-`android/app/build/outputs/apk/debug/app-debug.apk`. On first launch the app
-asks for your server address; set `VITE_ORBITAL_API_BASE_URL` before building
-to bake in a default. Android cover storage uses the app-private
-`Directory.Data` filesystem as its canonical store, so covers remain available
-after the app process is closed. IndexedDB is retained only as a compatibility
-fallback for older covers. The Android UI renders verified cached covers through
-direct app-private file URLs instead of rebuilding base64 images in JavaScript.
-The server also creates bounded card thumbnails on first use, and the Downloads
-page reports recent cover-loading and page-switching timings for device-level
-performance checks.
+The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-The header and Profile page include a manual refresh action for reconnecting
-after offline use. Series downloads are incremental: verified unchanged files
-are copied locally with the native filesystem, interrupted replacements remain
-resumable, and the previous complete package is kept until its replacement is
-fully ready.
+### Versions and signing
 
-Small offline resources download with bounded concurrency. Progress records are
-checkpointed periodically instead of rebuilding storage totals after every
-chapter, which keeps library scrolling responsive while a series downloads.
+Before each release, raise the version in both places, keeping them equal:
 
-To rebuild and publish the APK that the hosted Profile page serves, run:
+- `versionCode` and `versionName` in `android/app/build.gradle`
+- `androidAppVersionCode` and `androidAppVersionName` in `src/platform.ts`
 
-```bash
-npm run mobile:publish
-```
+The interface compares its version code with the one on the server and offers
+the update in **Settings**.
 
-This rebuilds the Android app and copies the result to
-`mobile-distribution/orbital-android.apk`. The production server serves that
-file at `/api/mobile/app.apk`; keep the route reachable for the browser and
-native client. Push the updated APK in the same deployment as the server so the
-authenticated Profile page offers the new build directly to the e-reader.
+Android installs an update over an existing app only when both are signed with
+the same key. Debug builds use `~/.android/debug.keystore` of the machine that
+builds them. Build from the same machine (or keep a copy of that keystore), or
+set up a release keystore. Switching keys means uninstalling, which deletes all
+downloads on the device.
 
-The server accepts the native bearer-token client from the origins in
-`APP_MOBILE_ORIGINS` (default: `https://localhost,capacitor://localhost`). If a
-Cloudflare verification challenge is enabled for the whole site, exempt the
-authenticated API, offline manifest, and media download paths so the installed
-client can make non-interactive requests.
+### Distributing
 
-## Production Build
+Upload the APK in **Admin → System** (with its version name and code). Readers
+then get it from **Settings** in the browser, at `/api/mobile/app.apk`. The
+server looks for an APK in this order:
 
-```bash
-npm install
-npm run build
-npm run start
-```
+1. The upload, stored in the data directory (`android/orbital-android.apk`).
+2. `mobile-distribution/orbital-android.apk` in the image, which
+   `npm run mobile:publish` writes. APKs are never committed.
+3. The address in `APP_ANDROID_APK_URL`.
 
-The app serves the built frontend from the same Node server in production mode.
+## URLs
 
-## Stable URLs
+Every screen has a stable address that survives a refresh and can be shared:
 
-Orbital uses refresh-safe, shareable paths for every primary screen:
+| Path | Screen |
+| --- | --- |
+| `/` | Home: continue reading and shelves |
+| `/books`, `/manga`, `/novels`, `/magazines` | Library sections (`?sort=`, `?topic=`, `?page=`) |
+| `/:section/:seriesId` | A title (`?tab=overview`, `?tab=comments`) |
+| `/:section/:seriesId/read/:entryId` | The reader, with the position in the query |
+| `/downloads/:downloadId/read/entry/:entryId` | Reading a download |
+| `/search?q=` | Search |
+| `/creators/:creatorKey` | An author's titles |
+| `/downloads`, `/settings`, `/admin?tab=` | Downloads, settings, admin |
+| `/login?next=` | Sign in, then return to `next` |
 
-- `/login`, `/signup`, `/bookmarks`, `/downloads`, `/search`, `/profile`, and `/admin`
-- `/manga`, `/novels`, `/books`, and `/magazines`
-- `/:category/:seriesId` for a series
-- `/:category/:seriesId/read/:entryId` for a reader
-- `/creators/:creatorKey` for a creator
-- `/login?next=...` to return to a protected page after signing in
+Older paths (`/bookmarks`, `/profile`) redirect to their new screens.
 
-Search scope, shelf filters and sort order live in the query string. Reader URLs
-also keep the selected edition and exact page or percentage so a refresh returns
-to the same place. Links are ordinary browser links, so copy link, open in a new
-tab, Back, and Forward work normally.
+## Serving behind a proxy
 
-The bundled Express production server already returns the app shell for
-non-API routes. If another reverse proxy serves the frontend directly, configure
-that proxy to fall back to `index.html` for unknown document requests while
-leaving `/api/*`, `/assets/*`, `/sw.js`, and media responses untouched.
+The server returns the app for every non-API path, so the bundled server needs
+no extra rules. If another proxy serves `dist/` itself:
 
-## Docker
+- Fall back to `index.html` for unknown paths. Leave `/api/*`, `/assets/*`
+  and `/sw.js` alone.
+- Serve `/sw.js` with `Service-Worker-Allowed: /` and
+  `Cache-Control: no-cache`.
+- Cache `/assets/*` for a long time; the file names change with every build.
 
-Copy the example environment file and set a real admin password before starting the container:
+Health endpoints:
 
-```bash
-cp .env.example .env
-mkdir -p data library
-docker compose up -d --build
-```
+- `GET /healthz` (also `/api/health`): cheap liveness check, used by the Docker
+  health check.
+- `GET /readyz` (also `/api/ready`): checks the database, the data and cover
+  folders, and the media root. Use it for diagnostics, not for routing
+  decisions, so a slow NAS never takes the app offline.
 
-By default, Docker stores app state in `./data` and mounts local media from `./library`.
+## Data
 
-Common environment variables:
-
-- `HOST_BIND_ADDR`: host interface for Docker port binding; defaults to `127.0.0.1`
-- `APP_ADMIN_USERNAME`: bootstrap admin username
-- `APP_ADMIN_PASSWORD`: required in production
-- `APP_OPEN_SIGNUP`: set to `1` only when you intentionally want public self-signup
-- `APP_DATA_HOST_DIR`: host directory for SQLite data
-- `MEDIA_HOST_DIR`: host directory or mounted share containing media
-- `APP_MEDIA_ROOT_LABEL`: display label for the mounted media root
-- `APP_COOKIE_SECURE`: set to `1` when serving behind HTTPS
-- `APP_ENABLE_HSTS`: set to `1` only after HTTPS is confirmed
-- `APP_TRUST_PROXY`: set to `1` only when Orbital is behind a trusted reverse proxy
-- `APP_MOBILE_ORIGINS`: comma-separated Capacitor origins allowed for the native client
-
-After the container starts:
-
-1. Sign in as the bootstrap admin.
-2. Open `Admin`.
-3. Browse the mounted library root.
-4. Link subfolders to `Novels`, `Books`, `Manga`, `Anime`, or `Magazines`.
-5. Run scans from the admin page when you want to refresh the library.
-
-Container health:
-
-- `GET /healthz` returns a cheap DB-backed liveness payload for container and router health checks.
-- `GET /readyz` checks DB access, app data write access, cover cache write access, and the configured media root for admin diagnostics.
-- `GET /api/health` is kept for compatibility.
-- `GET /api/ready` is kept for environments that prefer API-prefixed probes.
-- the Docker image includes a healthcheck against `/healthz`; keep stricter readiness checks out of Docker routing so a slow or temporarily unavailable media mount does not make the app disappear for new clients.
-- the container entrypoint repairs `/app/data` ownership for existing persistent volumes, then runs the app as the non-root `node` user when possible.
-- the provided Compose file drops Linux capabilities and defaults to localhost-only port binding.
-
-PWA and offline download routing:
-
-- `/sw.js` is served from the site root with `Service-Worker-Allowed: /` and `Cache-Control: no-cache`.
-- `/api/offline/capabilities`, `/api/offline/estimate`, and `/api/offline/manifests` describe authenticated download packages without creating server-side archives.
-- `/api/offline/manifests/:manifestId/resources/:resourceKey` streams versioned package resources with private immutable headers.
-- The browser stores downloaded package metadata and blobs in IndexedDB. Server files, bookmarks, users, and scans are not changed by deleting a device download.
-- Reverse proxies and Cloudflare rules should bypass cache for `/api/*`, `/api/media/*`, and `/api/offline/*`. Cache only built static assets such as `/assets/*`.
-
-## Persistence
-
-All app data is stored under `APP_DATA_DIR`:
-
-- SQLite database
-- generated covers
-- user accounts
-- bookmarks
-- comments
-- scan state
-
-Media files remain in the mounted media folder and are streamed on demand.
+Everything lives in `APP_DATA_DIR`: the SQLite database (users, sessions,
+progress, comments, folders, scan state, metadata), generated covers and
+thumbnails, and the uploaded APK. Media folders are only read.

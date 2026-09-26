@@ -11,17 +11,19 @@ Orbital offline downloads are explicit device-local packages. Normal browsing ca
 - The browser stores package records and resource blobs in IndexedDB.
 - The Android app stores package records and resource files in app-private native storage.
 - The service worker serves local bytes through `/__orbital_offline/resources/:resourceKey`.
-- The Downloads tab is the source of truth for local package state, size, repair, and delete actions.
-- A download continues while Orbital stays open, even if you navigate to another tab or open another reader.
-- Download records are persisted after each verified resource, so reopening Orbital resumes queued, interrupted, or partial downloads.
+- The Downloads screen is the source of truth for local package state, size, repair and delete actions. Series pages show per-chapter download state and a download button for the whole series.
+- Resources download a few at a time: four in the browser; on Android, six for CBZ pages and three for whole files.
+- On Android, files are written straight to disk by the native HTTP client, with the sign-in token sent as a header. Nothing large passes through JavaScript.
+- A download continues while Orbital stays open, even if you move to another screen or open a reader.
+- Progress is saved every few seconds and after each finished package. Reopening Orbital, coming back online, or returning to the app resumes queued, interrupted or partial downloads.
 
 ## Privacy And Account Scope
 
 - Every package record includes the Orbital user id, username, server instance id, manifest id, and media versions.
-- The Downloads tab only lists packages for the active user id.
+- The Downloads screen only lists packages for the active user id.
 - Logging out does not delete downloads, but they are hidden until that user is active again.
-- Deleting downloads removes browser-local blobs and package records only. Server media, bookmarks, users, comments, and scans stay unchanged.
-- This is not DRM. Anyone with access to the unlocked browser profile/device may be able to inspect browser storage.
+- Deleting downloads removes the local copies and package records only. Server media, bookmarks, users, comments, and scans stay unchanged.
+- This is not DRM. Anyone with access to the unlocked device or browser profile may be able to read the stored files.
 
 ## Deployment Rules
 
@@ -36,10 +38,10 @@ Orbital offline downloads are explicit device-local packages. Normal browsing ca
 ## Failure Recovery
 
 - `ready`: all manifest resources are downloaded and size-verified.
-- `downloading`: resources are being fetched one at a time.
+- `downloading`: resources are being fetched.
 - `queued`: a transient failure is waiting for an automatic retry.
 - `partial`: at least one resource exists locally, but the package did not finish.
-- `paused`: the user cancelled the current attempt; completed resources remain available for repair.
+- `paused`: the reader paused the download; completed resources stay and it continues from there.
 - `failed`: no usable resource completed.
 - `stale`: the server media version changed before the package could be repaired or redownloaded.
 
@@ -49,4 +51,4 @@ If the server copy changes, Orbital creates a replacement package beside the old
 
 On Android, cover images that have been viewed online are also retained in a durable per-user device cache for up to 90 days, subject to a 1,024-image and 256 MB limit. Covers are cached on demand rather than prefetched in bulk.
 
-Use the Downloads tab to cancel, retry or repair, download again, delete one package, clear all packages for the active user, or request persistent browser storage.
+Use the Downloads screen to pause, resume, retry, update a download to the server's current version, remove one download or all of them, and, in a browser, ask for persistent storage so the browser does not evict downloads when space runs low.

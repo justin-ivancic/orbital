@@ -1,6 +1,16 @@
 node_modules
 dist
 data
+library
+.local
 .playwright-cli
-npm-debug.log
+test-artifacts
+*.log
 
+# Secrets stay out of the image
+.env
+.env.*
+!.env.example
+
+# Android sources and builds are not part of the server image
+android

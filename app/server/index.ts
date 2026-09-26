@@ -1,3 +1,4 @@
+import './loadEnv'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -208,9 +209,9 @@ const mobileOrigins = new Set(
 const app = express()
 app.disable('x-powered-by')
 
-if (process.env.APP_TRUST_PROXY) {
-  const trustProxy = process.env.APP_TRUST_PROXY.trim()
-  app.set('trust proxy', trustProxy === '1' ? 1 : trustProxy)
+const trustProxy = process.env.APP_TRUST_PROXY?.trim()
+if (trustProxy && trustProxy !== '0') {
+  app.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy)
 }
 
 app.use((request, response, next) => {
