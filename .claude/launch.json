@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "orbital-sandbox",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && APP_ADMIN_PASSWORD=\"$(cat .local/sandbox/data/.admin-password)\" APP_ADMIN_USERNAME=admin APP_DATA_DIR=\"$PWD/.local/sandbox/data\" APP_ENABLE_DEMO_SEED=1 APP_DEMO_FILES_ROOT=\"$PWD/.local/sandbox/library\" APP_OPEN_SIGNUP=0 APP_COOKIE_SECURE=0 PORT=4300 node node_modules/concurrently/dist/bin/concurrently.js -k -n server,client \"node node_modules/tsx/dist/cli.mjs server/index.ts\" \"node node_modules/vite/bin/vite.js --port 5173 --strictPort\""
+      ],
+      "port": 5173
+    }
+  ]
+}
