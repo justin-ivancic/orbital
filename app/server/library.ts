@@ -2,8 +2,6 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import crypto from 'node:crypto'
 import path from 'node:path'
-import { fork } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
 import type { Database } from 'better-sqlite3'
 import bcrypt from 'bcryptjs'
 import mime from 'mime-types'
@@ -38,12 +36,13 @@ import type {
 } from '../src/appTypes.ts'
 import { categoryOrder } from '../src/appTypes.ts'
 import { fileExists } from './database'
+import { isRemoteMetadataEnabled } from './appSettings'
+import { extractLocalMedia, supportsLocalMedia } from './localMetadata'
 import { fetchRemoteMetadata } from './metadata'
 import {
   compactWhitespace,
   createId,
   createSecretToken,
-  escapeHtml,
   firstNumber,
   hashString,
   inferYear,
@@ -230,6 +229,8 @@ type SeriesRow = {
   last_scan_at: string | null
   tags_json: string
   metadata_refreshed_at: string | null
+  created_at?: string | null
+  local_metadata_version?: number | null
 }
 
 type MetadataOverrideRow = {
@@ -384,7 +385,7 @@ type ExistingEntrySnapshot = {
 
 type ScanEventLevel = ScanLogEntry['level']
 
-type ScanReporter = {
+export type ScanReporter = {
   onRunStarted?: (payload: {
     runId: string
     startedAt: string
@@ -432,7 +433,8 @@ type SeriesPresentation = {
 const animeExtensions = new Set(['.mkv', '.mp4', '.avi', '.m4v', '.mov'])
 const mangaExtensions = new Set(['.cbz', '.pdf', '.epub'])
 const novelExtensions = new Set(['.html', '.htm', '.md', '.pdf', '.epub', '.txt'])
-const bookExtensions = new Set(['.pdf', '.epub', '.mobi', '.azw3', '.txt', '.md', '.html', '.htm'])
+const bookExtensions = new Set(['.pdf', '.epub', '.mobi', '.azw3', '.azw', '.txt', '.md', '.html', '.htm'])
+const kindleExtensions = new Set(['.mobi', '.azw3', '.azw'])
 const magazineExtensions = new Set(['.pdf', '.epub', '.cbz', '.txt', '.md', '.html', '.htm'])
 const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 const subtitleTrackExtensions = new Set(['.vtt', '.srt', '.ass', '.ssa'])
@@ -455,7 +457,6 @@ const SCAN_FILESYSTEM_CONCURRENCY = 16
 const SCAN_SERIES_CHECKPOINT_INTERVAL = 25
 const SCAN_ENTRY_COMMIT_BATCH_SIZE = 250
 const SCAN_SERIES_HARD_FAILURE_LIMIT = 2
-const SCAN_COVER_WORKER_TIMEOUT_MS = 60_000
 
 const emptyMediaTracks = (): MediaTrackCollection => ({
   audio: [],
@@ -526,6 +527,7 @@ const entryVariantPriority: Record<CategoryId, Partial<Record<EntryFormat, numbe
     txt: 4,
     video: 5,
     cbz: 6,
+    mobi: 7,
   },
   magazines: {
     pdf: 0,
@@ -865,7 +867,7 @@ const buildResolvedMediaTracks = (entryId: string, filePath?: string | null): Re
   return fs
     .readdirSync(videoDirectory, { withFileTypes: true })
     .filter((directoryEntry) => directoryEntry.isFile())
-    .map((directoryEntry) => {
+    .flatMap((directoryEntry): ResolvedMediaTrack[] => {
       const extension = path.extname(directoryEntry.name).toLowerCase()
       const kind: MediaTrackKind | null = subtitleTrackExtensions.has(extension)
         ? 'subtitle'
@@ -874,12 +876,12 @@ const buildResolvedMediaTracks = (entryId: string, filePath?: string | null): Re
           : null
 
       if (!kind) {
-        return null
+        return []
       }
 
       const candidateBaseName = stripExtension(directoryEntry.name)
       if (!isMatchingSidecarTrack(videoBaseName, candidateBaseName)) {
-        return null
+        return []
       }
 
       const rawSuffix = candidateBaseName
@@ -898,7 +900,7 @@ const buildResolvedMediaTracks = (entryId: string, filePath?: string | null): Re
               ? 'SRT subtitle converted for the browser player'
               : 'ASS subtitle converted for the browser player'
 
-      return {
+      return [{
         id: buildTrackId(kind, fileName),
         kind,
         label,
@@ -908,9 +910,8 @@ const buildResolvedMediaTracks = (entryId: string, filePath?: string | null): Re
         supported: true,
         note,
         filePath: path.join(videoDirectory, fileName),
-      } satisfies ResolvedMediaTrack
+      }]
     })
-    .filter((track): track is ResolvedMediaTrack => Boolean(track))
     .sort((left, right) => naturalCompare(left.fileName, right.fileName))
 }
 
@@ -942,13 +943,13 @@ const getMediaTracksForEntry = (
   }
 }
 
-const resolveMediaTrackForEntry = (
+const resolveMediaTrackForEntry = async (
   db: Database,
   entryId: string,
   kind: MediaTrackKind,
   trackId: string,
 ) => {
-  const entry = resolveEntryMediaFile(db, entryId)
+  const entry = await resolveEntryMediaFile(db, entryId)
 
   const tracks = buildResolvedMediaTracks(entry.entryId, entry.filePath)
   const matchingTrack = tracks.find((track) => track.kind === kind && track.id === trackId)
@@ -1385,7 +1386,7 @@ const parseBookEntry = (file: FileRecord, sourceFolder: SourceFolderRow): Parsed
   const titlePart = separatorIndex >= 0 ? strippedName.slice(separatorIndex + 3).trim() : strippedName
   const title = compactWhitespace(titlePart.replace(/\s+\(\d{4}\)\s*$/, ''))
   const year = inferYear(strippedName)
-  const format =
+  const format: EntryFormat =
     file.extension === '.pdf'
       ? 'pdf'
       : file.extension === '.epub'
@@ -1394,7 +1395,9 @@ const parseBookEntry = (file: FileRecord, sourceFolder: SourceFolderRow): Parsed
           ? 'md'
           : file.extension === '.html' || file.extension === '.htm'
             ? 'html'
-            : 'txt'
+            : kindleExtensions.has(file.extension)
+              ? 'mobi'
+              : 'txt'
 
   return {
     file,
@@ -1779,13 +1782,6 @@ const parseStoredJsonArray = (value: string | null | undefined) => {
     return [] as string[]
   }
 }
-
-const fallbackCoverSources = new Set([
-  'Pending cover generation',
-  'PDF first-page fallback',
-  'CBZ first-page fallback',
-  'Generated fallback cover',
-])
 
 const yieldToEventLoop = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
@@ -2285,6 +2281,7 @@ const persistSeriesPresentation = (
   title: string,
   titleShort: string,
   presentation: SeriesPresentation,
+  options: { localMetadataVersion?: number } = {},
 ) => {
   db.prepare(
     `
@@ -2332,6 +2329,13 @@ const persistSeriesPresentation = (
     nowIso(),
     seriesId,
   )
+
+  if (options.localMetadataVersion != null) {
+    db.prepare(`UPDATE series SET local_metadata_version = ? WHERE id = ?`).run(
+      options.localMetadataVersion,
+      seriesId,
+    )
+  }
 
   refreshSeriesSearchDocument(db, seriesId)
 }
@@ -2609,176 +2613,129 @@ const getGroupedEntryCountsBySeries = (
   return groupedCounts
 }
 
-type CoverWorkerRequest =
-  | { kind: 'pdf'; inputPath: string; outputPath: string }
-  | { kind: 'cbz'; inputPath: string; outputBasePath: string }
+// Bump to re-read embedded metadata (authors, subjects, page counts) for every
+// series once, without reparsing entries or regenerating existing covers.
+const LOCAL_METADATA_VERSION = 1
 
-type CoverWorkerResult =
-  | { ok: true; outputPath: string; mimeType: string }
-  | { ok: false; error: string }
+type ExistingPresentationRow = Pick<
+  SeriesRow,
+  | 'year'
+  | 'description'
+  | 'cover_path'
+  | 'cover_mime'
+  | 'banner_path'
+  | 'banner_mime'
+  | 'cover_source'
+  | 'metadata_source'
+  | 'remote_provider'
+  | 'remote_id'
+  | 'external_url'
+  | 'source_name'
+  | 'source_role'
+  | 'genres_json'
+  | 'tags_json'
+  | 'metadata_refreshed_at'
+> & { local_metadata_version?: number | null }
 
-const runCoverWorker = (request: CoverWorkerRequest) =>
-  new Promise<{ outputPath: string; mimeType: string }>((resolve, reject) => {
-    const workerPath = fileURLToPath(new URL('./scanCoverWorker.ts', import.meta.url))
-    const workerExecArguments = process.execArgv.filter(
-      (argument) => argument !== '--test' && argument !== '--eval' && argument !== '-e',
-    )
-    const worker = fork(workerPath, [], {
-      execArgv: ['--max-old-space-size=192', ...workerExecArguments],
-      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-    })
-    let settled = false
-    let stderr = ''
-    let timeout: NodeJS.Timeout | null = null
-
-    const finish = (error?: Error, result?: { outputPath: string; mimeType: string }) => {
-      if (settled) {
-        return
-      }
-      settled = true
-      if (timeout) {
-        clearTimeout(timeout)
-      }
-      worker.removeAllListeners()
-      if (worker.connected) {
-        worker.disconnect()
-      }
-      if (error) {
-        reject(error)
-      } else if (result) {
-        resolve(result)
-      }
-    }
-
-    worker.stderr?.on('data', (chunk: Buffer) => {
-      if (stderr.length < 4_000) {
-        stderr += chunk.toString('utf8').slice(0, 4_000 - stderr.length)
-      }
-    })
-    worker.once('error', (error) => finish(error))
-    worker.once('exit', (code, signal) => {
-      if (!settled) {
-        const detail = stderr.trim() || `exit ${code ?? 'unknown'}${signal ? ` (${signal})` : ''}`
-        finish(new Error(`Cover worker stopped unexpectedly: ${detail}`))
-      }
-    })
-    worker.once('message', (message: CoverWorkerResult) => {
-      if (message.ok) {
-        finish(undefined, { outputPath: message.outputPath, mimeType: message.mimeType })
-      } else {
-        finish(new Error(message.error))
-      }
-    })
-
-    timeout = setTimeout(() => {
-      worker.kill('SIGKILL')
-      finish(new Error('Cover extraction exceeded 60 seconds and was stopped.'))
-    }, SCAN_COVER_WORKER_TIMEOUT_MS)
-
-    worker.send(request)
-  })
-
-const writeFallbackCover = async (
-  category: CategoryId,
-  title: string,
-  subtitle: string,
-  outputPath: string,
-) => {
-  const categoryLabel = category.toUpperCase()
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="840" height="1200" viewBox="0 0 840 1200">
-  <defs>
-    <linearGradient id="bg" x1="0%" x2="100%" y1="0%" y2="100%">
-      <stop offset="0%" stop-color="#111a27"/>
-      <stop offset="100%" stop-color="#050912"/>
-    </linearGradient>
-    <linearGradient id="line" x1="0%" x2="100%" y1="0%" y2="0%">
-      <stop offset="0%" stop-color="#59d7ff"/>
-      <stop offset="100%" stop-color="#ffd27a"/>
-    </linearGradient>
-  </defs>
-  <rect width="840" height="1200" rx="42" fill="url(#bg)"/>
-  <rect x="56" y="56" width="728" height="1088" rx="34" fill="none" stroke="rgba(255,255,255,0.08)"/>
-  <rect x="92" y="112" width="220" height="58" rx="29" fill="none" stroke="url(#line)" stroke-width="2"/>
-  <text x="202" y="149" text-anchor="middle" fill="#70d8ff" font-size="28" font-family="Arial, sans-serif" letter-spacing="5">${escapeHtml(categoryLabel)}</text>
-  <text x="92" y="334" fill="#f3f7ff" font-size="72" font-family="Arial, sans-serif" font-weight="700">${escapeHtml(title)}</text>
-  <text x="92" y="406" fill="#95a8c2" font-size="32" font-family="Arial, sans-serif">${escapeHtml(subtitle)}</text>
-  <line x1="92" y1="460" x2="748" y2="460" stroke="url(#line)" stroke-width="3"/>
-  <text x="92" y="1036" fill="#7a8ea9" font-size="26" font-family="Arial, sans-serif">Generated local fallback cover</text>
-</svg>`
-
-  await fsPromises.writeFile(outputPath, svg)
+type PresentationOptions = {
+  seriesId: string
+  series: SeriesSpec
+  existingSeries?: ExistingPresentationRow
+  coversDirectory: string
+  db?: Database
+  reporter?: ScanReporter
+  scanRunId?: string
+  metadataOverride?: MetadataOverrideRow
+  /** Explicit admin refresh: fetch online metadata and re-read the file. */
+  forceRefresh?: boolean
+  remoteMetadataEnabled: boolean
+  knownLocalDirectoryCover?: string | null
 }
 
-const resolveSeriesPresentation = async (
-  seriesId: string,
-  series: SeriesSpec,
-  existingSeries:
-    | Pick<
-        SeriesRow,
-        | 'year'
-        | 'description'
-        | 'cover_path'
-        | 'cover_mime'
-        | 'banner_path'
-        | 'banner_mime'
-        | 'cover_source'
-        | 'metadata_source'
-        | 'remote_provider'
-        | 'remote_id'
-        | 'external_url'
-        | 'source_name'
-        | 'source_role'
-        | 'genres_json'
-        | 'tags_json'
-        | 'metadata_refreshed_at'
-      >
-    | undefined,
-  seriesChanged: boolean,
-  coversDirectory: string,
-  reporter?: ScanReporter,
-  scanRunId?: string,
-  db?: Database,
-  metadataOverride?: MetadataOverrideRow,
-  forceRemoteRefresh = false,
-  knownLocalDirectoryCover?: string | null,
-): Promise<SeriesPresentation> => {
-  const localDirectoryCover = knownLocalDirectoryCover === undefined
+type PresentationResult = {
+  presentation: SeriesPresentation
+  firstEntryPageCount: number | null
+}
+
+const defaultTagSets = new Set([
+  JSON.stringify(['Local book']),
+  JSON.stringify(['Local library', 'Plex scan']),
+  JSON.stringify(['Local archive', 'Reader ready']),
+  JSON.stringify(['Local text library', 'Responsive reader']),
+  JSON.stringify(['Local magazine', 'Reader ready']),
+])
+
+const hasDefaultTags = (tags: string[], series: SeriesSpec) =>
+  tags.length === 0 ||
+  defaultTagSets.has(JSON.stringify(tags)) ||
+  JSON.stringify(tags) === JSON.stringify(series.tags) ||
+  (tags[0] === 'Local book' && tags.length <= 2)
+
+const isUsableCoverFile = (coverPath: string | null | undefined, coverSource?: string | null) =>
+  Boolean(coverPath) &&
+  !coverPath?.toLowerCase().endsWith('.svg') &&
+  coverSource !== 'Generated fallback cover' &&
+  fileExists(coverPath)
+
+const reportScanEvent = (
+  options: Pick<PresentationOptions, 'db' | 'scanRunId' | 'reporter'>,
+  level: ScanEventLevel,
+  message: string,
+) => {
+  if (options.db && options.scanRunId) {
+    appendScanEvent(options.db, options.scanRunId, level, message, options.reporter)
+  }
+}
+
+/**
+ * Decides title-adjacent metadata and the cover for a series. Precedence:
+ * admin override > folder cover image > online match (opt-in) > embedded file
+ * metadata > folder/file names. Covers the file cannot provide are drawn by
+ * the client as typographic covers instead of generated images.
+ */
+const resolveSeriesPresentation = async (options: PresentationOptions): Promise<PresentationResult> => {
+  const { seriesId, series, existingSeries, coversDirectory, metadataOverride } = options
+  const localDirectoryCover = options.knownLocalDirectoryCover === undefined
     ? localCoverForDirectory(series.folderPath)
-    : knownLocalDirectoryCover
+    : options.knownLocalDirectoryCover
   const existingGenres = parseStoredJsonArray(existingSeries?.genres_json)
   const existingTags = parseStoredJsonArray(existingSeries?.tags_json)
-  const existingBannerIsUsable =
-    Boolean(existingSeries?.banner_path) && fileExists(existingSeries?.banner_path)
-  const existingCoverIsUsable =
-    Boolean(existingSeries?.cover_path) && fileExists(existingSeries?.cover_path)
+  const existingCoverIsUsable = isUsableCoverFile(existingSeries?.cover_path, existingSeries?.cover_source)
+  const existingBannerIsUsable = Boolean(existingSeries?.banner_path) && fileExists(existingSeries?.banner_path)
+  const usesBanners = series.category === 'anime' || series.category === 'manga'
   const hasMeaningfulRemoteMetadata =
     Boolean(existingSeries?.remote_provider) &&
     !isDefaultSeriesDescription(series, existingSeries?.description) &&
     (existingGenres.length > 0 || Boolean(existingSeries?.source_name) || Boolean(existingSeries?.external_url))
 
-  let resolvedDescription = existingSeries?.description || series.description
-  let resolvedYear = existingSeries?.year ?? series.year
-  let resolvedMetadataSource = existingSeries?.metadata_source || 'Folder-derived metadata'
-  let resolvedRemoteProvider = existingSeries?.remote_provider || null
-  let resolvedRemoteId = existingSeries?.remote_id || null
-  let resolvedExternalUrl = existingSeries?.external_url || null
-  let resolvedSourceName = existingSeries?.source_name || null
-  let resolvedSourceRole = existingSeries?.source_role || null
-  let resolvedGenres = existingGenres
-  let resolvedTags = existingTags.length > 0 ? existingTags : series.tags
-  let resolvedMetadataRefreshedAt = existingSeries?.metadata_refreshed_at || null
-  let resolvedBannerPath = existingSeries?.banner_path || null
-  let resolvedBannerMime = existingSeries?.banner_mime || null
+  const presentation: SeriesPresentation = {
+    year: existingSeries?.year ?? series.year,
+    description: existingSeries?.description || series.description,
+    coverPath: null,
+    coverMime: null,
+    bannerPath: existingBannerIsUsable ? existingSeries?.banner_path ?? null : null,
+    bannerMime: existingBannerIsUsable ? existingSeries?.banner_mime ?? null : null,
+    coverSource: 'No cover image',
+    metadataSource: stripAdminOverrideSuffix(existingSeries?.metadata_source || 'Folder-derived metadata'),
+    remoteProvider: existingSeries?.remote_provider || null,
+    remoteId: existingSeries?.remote_id || null,
+    externalUrl: existingSeries?.external_url || null,
+    sourceName: existingSeries?.source_name || null,
+    sourceRole: existingSeries?.source_role || null,
+    genres: existingGenres,
+    tags: existingTags.length > 0 ? existingTags : series.tags,
+    metadataRefreshedAt: existingSeries?.metadata_refreshed_at || null,
+  }
 
+  let remoteCover: { filePath: string; mimeType: string } | null = null
   const shouldFetchRemoteMetadata =
     series.category !== 'novels' &&
     series.category !== 'magazines' &&
-    (forceRemoteRefresh ||
-      !hasMeaningfulRemoteMetadata ||
-      !existingBannerIsUsable ||
-      (!localDirectoryCover &&
-        (!existingCoverIsUsable || fallbackCoverSources.has(existingSeries?.cover_source || ''))))
+    (options.forceRefresh ||
+      (options.remoteMetadataEnabled &&
+        (!hasMeaningfulRemoteMetadata ||
+          (usesBanners && !existingBannerIsUsable) ||
+          (!localDirectoryCover && !existingCoverIsUsable))))
 
   if (shouldFetchRemoteMetadata) {
     try {
@@ -2790,67 +2747,39 @@ const resolveSeriesPresentation = async (
       })
 
       if (remoteMetadata) {
-        if (db && scanRunId) {
-          appendScanEvent(
-            db,
-            scanRunId,
-            'info',
-            `Matched ${remoteMetadata.provider} metadata for ${series.title}`,
-            reporter,
-          )
-        }
+        reportScanEvent(options, 'info', `Matched ${remoteMetadata.provider} metadata for ${series.title}`)
 
         if (remoteMetadata.description) {
-          resolvedDescription = sanitizeRemoteDescription(remoteMetadata.description)
+          presentation.description = sanitizeRemoteDescription(remoteMetadata.description)
+        }
+        if (presentation.year == null && remoteMetadata.year != null) {
+          presentation.year = remoteMetadata.year
         }
 
-        if (resolvedYear == null && remoteMetadata.year != null) {
-          resolvedYear = remoteMetadata.year
-        }
-
-        resolvedMetadataSource = `${remoteMetadata.provider} match`
-        resolvedRemoteProvider = remoteMetadata.provider
-        resolvedRemoteId = remoteMetadata.providerId
-        resolvedExternalUrl = remoteMetadata.externalUrl
-        resolvedSourceName = remoteMetadata.sourceName
-        resolvedSourceRole = remoteMetadata.sourceRole
-        resolvedGenres = remoteMetadata.genres
-        resolvedTags = remoteMetadata.tags.length > 0 ? remoteMetadata.tags : resolvedTags
-        resolvedMetadataRefreshedAt = nowIso()
+        presentation.metadataSource = `${remoteMetadata.provider} match`
+        presentation.remoteProvider = remoteMetadata.provider
+        presentation.remoteId = remoteMetadata.providerId
+        presentation.externalUrl = remoteMetadata.externalUrl
+        presentation.sourceName = remoteMetadata.sourceName ?? presentation.sourceName
+        presentation.sourceRole = remoteMetadata.sourceName ? remoteMetadata.sourceRole : presentation.sourceRole
+        presentation.genres = remoteMetadata.genres
+        presentation.tags = remoteMetadata.tags.length > 0 ? remoteMetadata.tags : presentation.tags
+        presentation.metadataRefreshedAt = nowIso()
 
         if (remoteMetadata.bannerImageUrl) {
           const bannerAsset = await downloadRemoteAsset(
             remoteMetadata.bannerImageUrl,
             path.join(coversDirectory, `${seriesId}-banner`),
           )
-          resolvedBannerPath = bannerAsset.filePath
-          resolvedBannerMime = bannerAsset.mimeType
+          presentation.bannerPath = bannerAsset.filePath
+          presentation.bannerMime = bannerAsset.mimeType
         }
 
         if (!localDirectoryCover && remoteMetadata.coverImageUrl) {
-          const coverAsset = await downloadRemoteAsset(
+          remoteCover = await downloadRemoteAsset(
             remoteMetadata.coverImageUrl,
             path.join(coversDirectory, `${seriesId}-remote-cover`),
           )
-
-          return applyMetadataOverrideToPresentation({
-            year: resolvedYear,
-            description: resolvedDescription,
-            coverPath: coverAsset.filePath,
-            coverMime: coverAsset.mimeType,
-            bannerPath: resolvedBannerPath,
-            bannerMime: resolvedBannerMime,
-            coverSource: `${remoteMetadata.provider} cover cache`,
-            metadataSource: resolvedMetadataSource,
-            remoteProvider: resolvedRemoteProvider,
-            remoteId: resolvedRemoteId,
-            externalUrl: resolvedExternalUrl,
-            sourceName: resolvedSourceName,
-            sourceRole: resolvedSourceRole,
-            genres: resolvedGenres,
-            tags: resolvedTags,
-            metadataRefreshedAt: resolvedMetadataRefreshedAt,
-          }, metadataOverride)
         }
       }
     } catch {
@@ -2858,129 +2787,108 @@ const resolveSeriesPresentation = async (
     }
   }
 
-  if (localDirectoryCover) {
-    return applyMetadataOverrideToPresentation({
-      year: resolvedYear,
-      description: resolvedDescription,
-      coverPath: localDirectoryCover,
-      coverMime: mime.lookup(localDirectoryCover) || null,
-      bannerPath: resolvedBannerPath,
-      bannerMime: resolvedBannerMime,
-      coverSource: 'Local image cover',
-      metadataSource: resolvedMetadataSource,
-      remoteProvider: resolvedRemoteProvider,
-      remoteId: resolvedRemoteId,
-      externalUrl: resolvedExternalUrl,
-      sourceName: resolvedSourceName,
-      sourceRole: resolvedSourceRole,
-      genres: resolvedGenres,
-      tags: resolvedTags,
-      metadataRefreshedAt: resolvedMetadataRefreshedAt,
-    }, metadataOverride)
-  }
-
-  if (existingCoverIsUsable) {
-    return applyMetadataOverrideToPresentation({
-      year: resolvedYear,
-      description: resolvedDescription,
-      coverPath: existingSeries?.cover_path || null,
-      coverMime: existingSeries?.cover_mime || mime.lookup(existingSeries?.cover_path || '') || null,
-      bannerPath: resolvedBannerPath,
-      bannerMime: resolvedBannerMime,
-      coverSource: existingSeries?.cover_path?.endsWith('.svg')
-        ? 'Generated fallback cover'
-        : existingSeries?.cover_source || 'Cached local cover',
-      metadataSource: resolvedMetadataSource,
-      remoteProvider: resolvedRemoteProvider,
-      remoteId: resolvedRemoteId,
-      externalUrl: resolvedExternalUrl,
-      sourceName: resolvedSourceName,
-      sourceRole: resolvedSourceRole,
-      genres: resolvedGenres,
-      tags: resolvedTags,
-      metadataRefreshedAt: resolvedMetadataRefreshedAt,
-    }, metadataOverride)
-  }
-
   const firstEntry = series.entries[0]
-  const outputBasePath = path.join(coversDirectory, seriesId)
+  const needsExtractedCover = !localDirectoryCover && !remoteCover && !existingCoverIsUsable
+  const wantsLocalMetadata =
+    Boolean(options.forceRefresh) ||
+    !existingSeries ||
+    (existingSeries.local_metadata_version ?? 0) < LOCAL_METADATA_VERSION
+  let firstEntryPageCount: number | null = null
 
-  try {
-    if (firstEntry && firstEntry.format === 'pdf') {
-      const outputPath = `${outputBasePath}.png`
-      await runCoverWorker({ kind: 'pdf', inputPath: firstEntry.file.path, outputPath })
-
-      return applyMetadataOverrideToPresentation({
-        year: resolvedYear,
-        description: resolvedDescription,
-        coverPath: outputPath,
-        coverMime: 'image/png',
-        bannerPath: resolvedBannerPath,
-        bannerMime: resolvedBannerMime,
-        coverSource: 'PDF first-page fallback',
-        metadataSource: resolvedMetadataSource,
-        remoteProvider: resolvedRemoteProvider,
-        remoteId: resolvedRemoteId,
-        externalUrl: resolvedExternalUrl,
-        sourceName: resolvedSourceName,
-        sourceRole: resolvedSourceRole,
-        genres: resolvedGenres,
-        tags: resolvedTags,
-        metadataRefreshedAt: resolvedMetadataRefreshedAt,
-      }, metadataOverride)
-    }
-
-    if (firstEntry && firstEntry.format === 'cbz') {
-      const archiveCover = await runCoverWorker({
-        kind: 'cbz',
-        inputPath: firstEntry.file.path,
-        outputBasePath,
+  if (firstEntry && supportsLocalMedia(firstEntry.format) && (needsExtractedCover || wantsLocalMetadata)) {
+    try {
+      const local = await extractLocalMedia(firstEntry.file.path, firstEntry.format, {
+        coverOutputBasePath: needsExtractedCover ? path.join(coversDirectory, seriesId) : null,
+        wantMetadata: wantsLocalMetadata,
       })
 
-      return applyMetadataOverrideToPresentation({
-        year: resolvedYear,
-        description: resolvedDescription,
-        coverPath: archiveCover.outputPath,
-        coverMime: archiveCover.mimeType.toString(),
-        bannerPath: resolvedBannerPath,
-        bannerMime: resolvedBannerMime,
-        coverSource: 'CBZ first-page fallback',
-        metadataSource: resolvedMetadataSource,
-        remoteProvider: resolvedRemoteProvider,
-        remoteId: resolvedRemoteId,
-        externalUrl: resolvedExternalUrl,
-        sourceName: resolvedSourceName,
-        sourceRole: resolvedSourceRole,
-        genres: resolvedGenres,
-        tags: resolvedTags,
-        metadataRefreshedAt: resolvedMetadataRefreshedAt,
-      }, metadataOverride)
+      if (local?.cover) {
+        presentation.coverPath = local.cover.outputPath
+        presentation.coverMime = local.cover.mimeType
+        presentation.coverSource =
+          firstEntry.format === 'pdf'
+            ? 'PDF first-page cover'
+            : firstEntry.format === 'cbz'
+              ? 'CBZ first-page cover'
+              : 'EPUB embedded cover'
+      }
+
+      firstEntryPageCount = local?.pageCount ?? null
+
+      const metadata = local?.metadata
+      if (metadata) {
+        let applied = false
+        const author = metadata.authors[0]
+
+        if (author && !presentation.sourceName) {
+          presentation.sourceName = metadata.authors.slice(0, 2).join(' & ')
+          presentation.sourceRole = series.category === 'manga' ? 'Writer' : 'Author'
+          applied = true
+        }
+
+        if (metadata.subjects.length > 0 && hasDefaultTags(presentation.tags, series)) {
+          presentation.tags = metadata.subjects
+          applied = true
+        }
+
+        if (metadata.description && isDefaultSeriesDescription(series, presentation.description)) {
+          presentation.description = metadata.description
+          applied = true
+        }
+
+        if (presentation.year == null && metadata.year != null) {
+          presentation.year = metadata.year
+          applied = true
+        }
+
+        if (applied && presentation.metadataSource === 'Folder-derived metadata') {
+          presentation.metadataSource = 'Embedded metadata'
+        }
+      }
+    } catch (error) {
+      // A broken covers directory is a server problem, not a bad file: fail the
+      // series so the scan retries it instead of settling without a cover.
+      if (error instanceof Error && error.message.includes(path.resolve(coversDirectory))) {
+        throw error
+      }
+
+      reportScanEvent(
+        options,
+        'error',
+        `Could not read ${firstEntry.format.toUpperCase()} details for ${series.title}: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      )
     }
-  } catch {
-    // Fall back to generated SVG below.
   }
 
-  const svgPath = `${outputBasePath}.svg`
-  await writeFallbackCover(series.category, series.title, series.format, svgPath)
+  // A bare author name in the file name is still better than nothing.
+  if (!presentation.sourceName && series.category === 'books') {
+    const authorHint = extractBookAuthorHint(series)
+    if (authorHint) {
+      presentation.sourceName = authorHint
+      presentation.sourceRole = 'Author'
+    }
+  }
 
-  return applyMetadataOverrideToPresentation({
-    year: resolvedYear,
-    description: resolvedDescription,
-    coverPath: svgPath,
-    coverMime: 'image/svg+xml',
-    bannerPath: resolvedBannerPath,
-    bannerMime: resolvedBannerMime,
-    coverSource: 'Generated fallback cover',
-    metadataSource: resolvedMetadataSource,
-    remoteProvider: resolvedRemoteProvider,
-    remoteId: resolvedRemoteId,
-    externalUrl: resolvedExternalUrl,
-    sourceName: resolvedSourceName,
-    sourceRole: resolvedSourceRole,
-    genres: resolvedGenres,
-    tags: resolvedTags,
-    metadataRefreshedAt: resolvedMetadataRefreshedAt,
-  }, metadataOverride)
+  if (localDirectoryCover) {
+    presentation.coverPath = localDirectoryCover
+    presentation.coverMime = mime.lookup(localDirectoryCover) || null
+    presentation.coverSource = 'Local image cover'
+  } else if (remoteCover) {
+    presentation.coverPath = remoteCover.filePath
+    presentation.coverMime = remoteCover.mimeType
+    presentation.coverSource = `${presentation.remoteProvider ?? 'Online'} cover cache`
+  } else if (!presentation.coverPath && existingCoverIsUsable) {
+    presentation.coverPath = existingSeries?.cover_path ?? null
+    presentation.coverMime = existingSeries?.cover_mime || mime.lookup(existingSeries?.cover_path || '') || null
+    presentation.coverSource = existingSeries?.cover_source || 'Cached local cover'
+  }
+
+  return {
+    presentation: applyMetadataOverrideToPresentation(presentation, metadataOverride),
+    firstEntryPageCount,
+  }
 }
 
 const buildProgressLabel = (category: CategoryId, entryCount: number) => {
@@ -3064,11 +2972,33 @@ const buildCardCoverSuffix = (
   return versionSuffix ? `${versionSuffix}&variant=card&cardv=2` : '?variant=card&cardv=2'
 }
 
+// Generated SVG covers are replaced by typographic covers drawn by the client,
+// which stay sharp on e-ink and need no server-side fonts.
+const hasRealCoverImage = (series: Pick<SeriesRow, 'cover_path' | 'cover_source'>) =>
+  Boolean(series.cover_path) &&
+  series.cover_source !== 'Generated fallback cover' &&
+  !series.cover_path?.toLowerCase().endsWith('.svg')
+
+const compactDescriptionLength = 280
+
+const compactDescription = (value: string) => {
+  const text = compactWhitespace(value)
+  if (text.length <= compactDescriptionLength) {
+    return text
+  }
+
+  const cut = text.slice(0, compactDescriptionLength)
+  const lastSpace = cut.lastIndexOf(' ')
+  return `${(lastSpace > 180 ? cut.slice(0, lastSpace) : cut).replace(/[,;:.\s]+$/, '')}…`
+}
+
 const mapSeriesRowToSummary = (
   series: SeriesRow,
   entryCount = series.file_count,
+  options: { compact?: boolean } = {},
 ): SeriesSummary => {
   const mediaVersion = buildMediaVersionSuffix(series)
+  const coverAvailable = hasRealCoverImage(series)
 
   return {
     id: series.id,
@@ -3079,9 +3009,11 @@ const mapSeriesRowToSummary = (
     format: series.format,
     status: series.status,
     progressLabel: buildProgressLabel(series.category, entryCount),
-    description: series.description,
+    description: options.compact ? compactDescription(series.description) : series.description,
     folder: series.folder_path,
-    coverUrl: series.cover_path ? `/api/media/cover/${series.id}${buildCardCoverSuffix(series)}` : null,
+    coverUrl: coverAvailable ? `/api/media/cover/${series.id}${buildCardCoverSuffix(series)}` : null,
+    coverImageUrl: coverAvailable ? `/api/media/cover/${series.id}${mediaVersion}` : null,
+    addedAt: series.created_at ?? null,
     bannerUrl: series.banner_path ? `/api/media/banner/${series.id}${mediaVersion}` : null,
     coverSource: series.cover_source,
     metadataSource: series.metadata_source,
@@ -3146,17 +3078,90 @@ const getUserSummaries = (db: Database): UserSummary[] =>
   (db
     .prepare(
       `
-        SELECT id, username, role
-        FROM users
-        ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, username COLLATE NOCASE
+        SELECT u.id, u.username, u.role, u.created_at,
+               (SELECT MAX(b.last_seen) FROM bookmarks b WHERE b.user_id = u.id) AS last_read_at
+        FROM users u
+        ORDER BY CASE u.role WHEN 'admin' THEN 0 ELSE 1 END, u.username COLLATE NOCASE
       `,
     )
-    .all() as UserRow[]).map((user) => ({
+    .all() as Array<UserRow & { created_at: string | null; last_read_at: string | null }>).map((user) => ({
     id: user.id,
     name: user.username,
     role: user.role === 'admin' ? 'Admin' : 'Member',
+    roleId: user.role,
     status: user.role === 'admin' ? 'Protected' : 'Active',
+    createdAt: user.created_at,
+    lastReadAt: user.last_read_at,
   }))
+
+const usernamePattern = /^[\p{L}\p{N}][\p{L}\p{N} ._@-]{0,62}[\p{L}\p{N}]$/u
+
+const assertValidNewAccount = (username: string, password: string) => {
+  if (username.length < 2 || username.length > 64 || !usernamePattern.test(username)) {
+    throw new Error('Usernames need 2-64 letters or numbers (spaces, dots, dashes and underscores are fine inside).')
+  }
+
+  if (password.length < 8) {
+    throw new Error('Passwords need at least 8 characters.')
+  }
+}
+
+/** Lets an administrator add accounts even when open signup is disabled. */
+export const createUserAccount = async (
+  db: Database,
+  payload: { username: string; password: string; role?: string },
+) => {
+  const username = compactWhitespace(String(payload.username || ''))
+  const password = String(payload.password || '')
+  const role = payload.role === 'admin' ? 'admin' : 'member'
+  assertValidNewAccount(username, password)
+
+  const existingUser = db
+    .prepare(`SELECT id FROM users WHERE lower(username) = lower(?) LIMIT 1`)
+    .get(username) as { id: string } | undefined
+
+  if (existingUser) {
+    throw new Error('That username already exists.')
+  }
+
+  const now = nowIso()
+  db.prepare(
+    `
+      INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `,
+  ).run(createId('user'), username, await bcrypt.hash(password, 10), role, now, now)
+}
+
+/**
+ * Removes an account together with its sessions, bookmarks, reading positions,
+ * preferences and comments. The configured bootstrap admin and the acting
+ * administrator cannot be removed, so the server always keeps an admin.
+ */
+export const deleteUserAccount = (
+  db: Database,
+  config: AppConfig,
+  actingUser: SessionUser,
+  userId: string,
+) => {
+  const user = db
+    .prepare(`SELECT id, username, role FROM users WHERE id = ? LIMIT 1`)
+    .get(userId) as Pick<UserRow, 'id' | 'username' | 'role'> | undefined
+
+  if (!user) {
+    throw new Error('User account not found.')
+  }
+
+  if (user.id === actingUser.id) {
+    throw new Error('You cannot remove your own account while signed in with it.')
+  }
+
+  if (user.username.toLowerCase() === config.bootstrapAdmin.toLowerCase()) {
+    throw new Error('The bootstrap administrator from the server configuration cannot be removed.')
+  }
+
+  db.prepare(`DELETE FROM users WHERE id = ?`).run(user.id)
+}
 
 const getMetadataQueue = (db: Database): MetadataQueueItem[] =>
   (db
@@ -3296,16 +3301,16 @@ const getBookmarks = (db: Database, userId: string): Bookmark[] =>
     lastSeen: bookmark.last_seen,
   }))
 
-const getReadingPositions = (db: Database, userId: string) => {
+const getReadingPositions = (db: Database, userId: string, entryId?: string) => {
   const readingPositions = db
     .prepare(
       `
-        SELECT entry_id, page, total_pages, view_mode, location_type, progress_label, cue_label
+        SELECT entry_id, page, total_pages, view_mode, location_type, progress_label, cue_label, locator
         FROM reading_positions
-        WHERE user_id = ?
+        WHERE user_id = ?${entryId ? ' AND entry_id = ?' : ''}
       `,
     )
-    .all(userId) as Array<{
+    .all(...(entryId ? [userId, entryId] : [userId])) as Array<{
     entry_id: string
     page: number
     total_pages: number | null
@@ -3313,6 +3318,7 @@ const getReadingPositions = (db: Database, userId: string) => {
     location_type: SavedReadingPosition['locationType']
     progress_label: string | null
     cue_label: string | null
+    locator: string | null
   }>
 
   return readingPositions.reduce<Record<string, SavedReadingPosition>>((accumulator, position) => {
@@ -3323,6 +3329,7 @@ const getReadingPositions = (db: Database, userId: string) => {
       locationType: position.location_type ?? undefined,
       progressLabel: position.progress_label ?? undefined,
       cueLabel: position.cue_label ?? undefined,
+      ...(position.locator ? { locator: position.locator } : {}),
     }
 
     return accumulator
@@ -3430,7 +3437,9 @@ export const findSessionContext = (db: Database, sessionId: string | null | unde
     resolvedSession.id = storedSessionId
   }
 
-  if (resolvedSession.expires_at <= Date.now()) {
+  const now = Date.now()
+
+  if (resolvedSession.expires_at <= now) {
     db.prepare(`DELETE FROM sessions WHERE id = ?`).run(resolvedSession.id)
     return null
   }
@@ -3441,9 +3450,23 @@ export const findSessionContext = (db: Database, sessionId: string | null | unde
     db.prepare(`UPDATE sessions SET csrf_token = ? WHERE id = ?`).run(csrfToken, resolvedSession.id)
   }
 
+  // Sliding expiry: a session that is still in use is extended once it has
+  // used up half of its lifetime, so a regularly used e-reader never gets
+  // logged out, while idle sessions still expire.
+  let expiresAt = resolvedSession.expires_at
+  let renewed = false
+
+  if (expiresAt - now < SESSION_TTL_MS / 2) {
+    expiresAt = now + SESSION_TTL_MS
+    renewed = true
+    db.prepare(`UPDATE sessions SET expires_at = ? WHERE id = ?`).run(expiresAt, resolvedSession.id)
+  }
+
   return {
     sessionId,
     csrfToken,
+    expiresAt,
+    renewed,
     user: {
       id: resolvedSession.user_id,
       username: resolvedSession.username,
@@ -3535,13 +3558,52 @@ export const signupUser = async (db: Database, username: string, password: strin
   } satisfies SessionUser
 }
 
+// Bump when the shape of library summaries changes so clients drop cached copies.
+const libraryPayloadVersion = 2
+
+/**
+ * A cheap fingerprint of everything that appears in library summaries. Clients
+ * send the revision they already have and skip re-downloading the catalogue
+ * when nothing changed.
+ */
+export const getLibraryRevision = (db: Database) => {
+  const series = db
+    .prepare(
+      `
+        SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS updated_at,
+               COALESCE(MAX(last_scan_at), '') AS last_scan_at
+        FROM series
+      `,
+    )
+    .get() as { count: number; updated_at: string; last_scan_at: string }
+  const overrides = db
+    .prepare(`SELECT COALESCE(MAX(updated_at), '') AS updated_at FROM metadata_overrides`)
+    .get() as { updated_at: string }
+
+  return hashString(
+    `${libraryPayloadVersion}|${series.count}|${series.updated_at}|${series.last_scan_at}|${overrides.updated_at}`,
+  )
+}
+
+export type AppStateOptions = {
+  /** Shorter descriptions in summaries; full text comes with the series detail. */
+  compact?: boolean
+  /** When it matches the current revision, the library is omitted. */
+  knownLibraryRevision?: string | null
+}
+
 export const getAppState = (
   db: Database,
   config: AppConfig,
   user: SessionUser | null,
   liveScanStatus?: ScanStatus | null,
+  options: AppStateOptions = {},
 ): AppState => {
-  const seriesRows = user
+  const libraryRevision = user ? getLibraryRevision(db) : null
+  const libraryUnchanged = Boolean(
+    user && options.knownLibraryRevision && options.knownLibraryRevision === libraryRevision,
+  )
+  const seriesRows = user && !libraryUnchanged
     ? db
         .prepare(
           `
@@ -3549,7 +3611,7 @@ export const getAppState = (
                    description, folder_path, cover_source, metadata_source, cover_path, cover_mime,
                    banner_path, banner_mime, remote_provider, remote_id, external_url,
                    source_name, source_role, genres_json, file_count, last_scan_at, tags_json,
-                   metadata_refreshed_at
+                   metadata_refreshed_at, created_at
             FROM series
             ORDER BY category, CASE WHEN year IS NULL THEN 999999 ELSE year END, title COLLATE NOCASE
           `,
@@ -3566,7 +3628,11 @@ export const getAppState = (
     csrfToken: null,
     scanSummary: getScanSummary(db),
     scanStatus: liveScanStatus ?? getStoredScanStatus(db),
-    library: seriesRows.map((series) => mapSeriesRowToSummary(series, groupedEntryCounts.get(series.id))),
+    library: seriesRows.map((series) =>
+      mapSeriesRowToSummary(series, groupedEntryCounts.get(series.id), { compact: options.compact }),
+    ),
+    libraryRevision,
+    libraryUnchanged,
     bookmarks: user ? getBookmarks(db, user.id) : [],
     readingPositions: user ? getReadingPositions(db, user.id) : {},
     sourceRoots: user?.role === 'admin' ? getSourceRoots(db, config) : [],
@@ -3584,7 +3650,7 @@ export const getSeriesDetail = (db: Database, seriesId: string): SeriesDetail =>
                description, folder_path, cover_source, metadata_source, cover_path, cover_mime,
                banner_path, banner_mime, remote_provider, remote_id, external_url,
                source_name, source_role, genres_json, file_count, last_scan_at, tags_json,
-               metadata_refreshed_at
+               metadata_refreshed_at, created_at
         FROM series
         WHERE id = ?
       `,
@@ -3608,34 +3674,10 @@ export const getSeriesDetail = (db: Database, seriesId: string): SeriesDetail =>
     .all(seriesId) as EntryRow[]
   const logicalEntries = buildLogicalEntries(series.category, entries)
 
-  const comments = db
-    .prepare(
-      `
-        SELECT c.id, u.username, c.text, c.created_at
-        FROM comments c
-        INNER JOIN users u ON u.id = c.user_id
-        WHERE c.series_id = ?
-        ORDER BY c.created_at DESC
-      `,
-    )
-    .all(seriesId) as Array<{
-    id: string
-    username: string
-    text: string
-    created_at: string
-  }>
-
   return {
     ...mapSeriesRowToSummary(series, logicalEntries.length),
     entries: logicalEntries,
-    comments: comments.map(
-      (comment): SeriesComment => ({
-        id: comment.id,
-        user: comment.username,
-        text: comment.text,
-        when: comment.created_at,
-      }),
-    ),
+    comments: getSeriesComments(db, seriesId),
   }
 }
 
@@ -3879,20 +3921,23 @@ export const refreshSeriesMetadata = async (
   const metadataOverride = getMetadataOverride(db, seriesId)
   const seriesSpec = buildSeriesSpecFromStoredSeries(series, entries, preferredTitle)
   const effectiveSeries = applyMetadataOverrideToSeriesSpec(seriesSpec, metadataOverride)
-  const presentation = await resolveSeriesPresentation(
+  const { presentation, firstEntryPageCount } = await resolveSeriesPresentation({
     seriesId,
-    effectiveSeries,
-    series,
-    true,
-    config.coversDirectory,
-    undefined,
-    undefined,
+    series: effectiveSeries,
+    existingSeries: series,
+    coversDirectory: config.coversDirectory,
     db,
     metadataOverride,
-    true,
-  )
+    forceRefresh: true,
+    remoteMetadataEnabled: isRemoteMetadataEnabled(db),
+  })
 
-  persistSeriesPresentation(db, seriesId, effectiveSeries.title, effectiveSeries.titleShort, presentation)
+  persistSeriesPresentation(db, seriesId, effectiveSeries.title, effectiveSeries.titleShort, presentation, {
+    localMetadataVersion: LOCAL_METADATA_VERSION,
+  })
+  if (entries[0] && firstEntryPageCount != null) {
+    db.prepare(`UPDATE entries SET page_count = ? WHERE id = ?`).run(firstEntryPageCount, entries[0].id)
+  }
 }
 
 const getSearchTokens = (query: string) =>
@@ -4037,88 +4082,225 @@ export const searchSeries = (db: Database, query: string, scope: 'all' | Categor
   }
 }
 
-export const addComment = (
-  db: Database,
-  user: SessionUser,
-  payload: CreateCommentPayload,
-) => {
-  const now = nowIso()
+const maxCommentLength = 4000
+
+export const getSeriesComments = (db: Database, seriesId: string): SeriesComment[] =>
+  (db
+    .prepare(
+      `
+        SELECT c.id, u.username, c.text, c.created_at
+        FROM comments c
+        INNER JOIN users u ON u.id = c.user_id
+        WHERE c.series_id = ?
+        ORDER BY c.created_at DESC
+      `,
+    )
+    .all(seriesId) as Array<{ id: string; username: string; text: string; created_at: string }>)
+    .map((comment) => ({
+      id: comment.id,
+      user: comment.username,
+      text: comment.text,
+      when: comment.created_at,
+    }))
+
+const insertComment = (db: Database, user: SessionUser, payload: CreateCommentPayload) => {
+  const text = String(payload.text || '').trim()
+
+  if (!text) {
+    throw new Error('Write a comment before posting it.')
+  }
+
+  if (text.length > maxCommentLength) {
+    throw new Error(`Comments can be at most ${maxCommentLength} characters long.`)
+  }
+
+  const series = db.prepare(`SELECT id FROM series WHERE id = ? LIMIT 1`).get(payload.seriesId)
+  if (!series) {
+    throw new Error('Series not found.')
+  }
+
   db.prepare(
     `
       INSERT INTO comments (id, series_id, user_id, text, created_at)
       VALUES (?, ?, ?, ?, ?)
     `,
-  ).run(createId('comment'), payload.seriesId, user.id, payload.text.trim(), now)
+  ).run(createId('comment'), payload.seriesId, user.id, text, nowIso())
+}
 
+/** Legacy response: the full series detail (used by app versions up to 1.23). */
+export const addComment = (db: Database, user: SessionUser, payload: CreateCommentPayload) => {
+  insertComment(db, user, payload)
   return getSeriesDetail(db, payload.seriesId)
 }
 
-export const saveBookmark = (
+export const addCommentCompact = (db: Database, user: SessionUser, payload: CreateCommentPayload) => {
+  insertComment(db, user, payload)
+  return getSeriesComments(db, payload.seriesId)
+}
+
+const readerViewModes = new Set<string>(['single', 'spread'])
+const readerLocationTypes = new Set<string>(['page', 'percent'])
+
+const boundedPositionText = (value: unknown, maxLength: number) =>
+  typeof value === 'string' && value.trim() ? compactWhitespace(value).slice(0, maxLength) : undefined
+
+export const normalizeSavedPosition = (value: unknown): SavedReadingPosition => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Reading position is missing.')
+  }
+
+  const candidate = value as Record<string, unknown>
+  const page = Number(candidate.page)
+
+  if (!Number.isFinite(page) || page < 0 || page > 10_000_000) {
+    throw new Error('Reading position is invalid.')
+  }
+
+  const totalPages = candidate.totalPages == null ? Number.NaN : Number(candidate.totalPages)
+  const locator = typeof candidate.locator === 'string' && candidate.locator.length <= 2000
+    ? candidate.locator
+    : undefined
+
+  return {
+    page: Math.round(page),
+    totalPages: Number.isFinite(totalPages) && totalPages > 0 ? Math.round(totalPages) : undefined,
+    viewMode: readerViewModes.has(String(candidate.viewMode))
+      ? candidate.viewMode as SavedReadingPosition['viewMode']
+      : undefined,
+    locationType: readerLocationTypes.has(String(candidate.locationType))
+      ? candidate.locationType as SavedReadingPosition['locationType']
+      : undefined,
+    progressLabel: boundedPositionText(candidate.progressLabel, 240),
+    cueLabel: boundedPositionText(candidate.cueLabel, 240),
+    locator,
+  }
+}
+
+const getBookmarkForSeries = (db: Database, userId: string, seriesId: string): Bookmark | null => {
+  const bookmark = db
+    .prepare(
+      `
+        SELECT b.series_id, b.category, b.entry_id, b.entry_index, b.progress, b.cue, b.last_seen,
+               e.label AS entry_label, e.title AS entry_title
+        FROM bookmarks b
+        INNER JOIN entries e ON e.id = b.entry_id
+        WHERE b.user_id = ? AND b.series_id = ?
+        LIMIT 1
+      `,
+    )
+    .get(userId, seriesId) as
+    | {
+        series_id: string
+        category: CategoryId
+        entry_id: string
+        entry_index: number
+        progress: string
+        cue: string
+        last_seen: string
+        entry_label: string
+        entry_title: string
+      }
+    | undefined
+
+  return bookmark
+    ? {
+        seriesId: bookmark.series_id,
+        category: bookmark.category,
+        entryId: bookmark.entry_id,
+        entryIndex: bookmark.entry_index,
+        entryLabel: bookmark.entry_label,
+        entryTitle: bookmark.entry_title,
+        progress: bookmark.progress,
+        cue: bookmark.cue,
+        lastSeen: bookmark.last_seen,
+      }
+    : null
+}
+
+const getReadingPositionForEntry = (db: Database, userId: string, entryId: string) =>
+  getReadingPositions(db, userId, entryId)[entryId] ?? null
+
+export type ReadingProgressPayload = {
+  seriesId: string
+  entryId: string
+  entryIndex: number
+  category?: CategoryId
+  progress: string
+  cue: string
+  position: unknown
+  lastSeen?: string
+}
+
+/**
+ * Stores reading progress for one series. Progress is last-writer-wins by the
+ * client's `lastSeen` time, so an older offline copy can never overwrite newer
+ * progress from another device. Returns only what changed.
+ */
+export const saveReadingProgress = (
   db: Database,
   user: SessionUser,
-  payload: {
-    seriesId: string
-    entryId: string
-    entryIndex: number
-    category: CategoryId
-    progress: string
-    cue: string
-    position: SavedReadingPosition
-    lastSeen?: string
-  },
+  payload: ReadingProgressPayload,
 ) => {
   const entry = db
     .prepare(
       `
-        SELECT id, series_id
-        FROM entries
-        WHERE id = ?
+        SELECT e.id, e.series_id, s.category
+        FROM entries e
+        INNER JOIN series s ON s.id = e.series_id
+        WHERE e.id = ?
       `,
     )
-    .get(payload.entryId) as { id: string; series_id: string } | undefined
+    .get(payload.entryId) as { id: string; series_id: string; category: CategoryId } | undefined
 
   if (!entry || entry.series_id !== payload.seriesId) {
     throw new Error('Bookmark target entry was not found.')
   }
 
+  const position = normalizeSavedPosition(payload.position)
+  const entryIndex = Number.isInteger(payload.entryIndex) && payload.entryIndex >= 0 ? payload.entryIndex : 0
+  const progress = compactWhitespace(String(payload.progress || position.progressLabel || '')).slice(0, 240)
+  const cue = compactWhitespace(String(payload.cue || position.cueLabel || '')).slice(0, 240)
   const requestedLastSeen = payload.lastSeen ? Date.parse(payload.lastSeen) : Number.NaN
-  const now = Number.isFinite(requestedLastSeen)
+  const lastSeen = Number.isFinite(requestedLastSeen)
     ? new Date(Math.min(requestedLastSeen, Date.now())).toISOString()
     : nowIso()
-  const persistBookmark = db.transaction(() => {
+  let saved = false
+
+  const persist = db.transaction(() => {
     const existingBookmark = db
       .prepare(`SELECT last_seen FROM bookmarks WHERE user_id = ? AND series_id = ? LIMIT 1`)
       .get(user.id, payload.seriesId) as { last_seen: string } | undefined
     const existingTimestamp = existingBookmark ? Date.parse(existingBookmark.last_seen) : Number.NaN
-    const incomingTimestamp = Date.parse(now)
 
-    if (Number.isFinite(existingTimestamp) && existingTimestamp > incomingTimestamp) {
+    if (Number.isFinite(existingTimestamp) && existingTimestamp > Date.parse(lastSeen)) {
       return
     }
 
     db.prepare(
       `
         INSERT INTO reading_positions (
-          user_id, entry_id, page, total_pages, view_mode, location_type, progress_label, cue_label
+          user_id, entry_id, page, total_pages, view_mode, location_type, progress_label, cue_label, locator
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, entry_id) DO UPDATE SET
           page = excluded.page,
           total_pages = excluded.total_pages,
           view_mode = excluded.view_mode,
           location_type = excluded.location_type,
           progress_label = excluded.progress_label,
-          cue_label = excluded.cue_label
+          cue_label = excluded.cue_label,
+          locator = excluded.locator
       `,
     ).run(
       user.id,
       payload.entryId,
-      payload.position.page,
-      payload.position.totalPages ?? null,
-      payload.position.viewMode ?? null,
-      payload.position.locationType ?? null,
-      payload.position.progressLabel ?? null,
-      payload.position.cueLabel ?? null,
+      position.page,
+      position.totalPages ?? null,
+      position.viewMode ?? null,
+      position.locationType ?? null,
+      position.progressLabel ?? null,
+      position.cueLabel ?? null,
+      position.locator ?? null,
     )
 
     db.prepare(
@@ -4135,19 +4317,22 @@ export const saveBookmark = (
           cue = excluded.cue,
           last_seen = excluded.last_seen
       `,
-    ).run(
-      user.id,
-      payload.seriesId,
-      payload.entryId,
-      payload.entryIndex,
-      payload.category,
-      payload.progress,
-      payload.cue,
-      now,
-    )
+    ).run(user.id, payload.seriesId, payload.entryId, entryIndex, entry.category, progress, cue, lastSeen)
+    saved = true
   })
 
-  persistBookmark()
+  persist()
+
+  return {
+    saved,
+    bookmark: getBookmarkForSeries(db, user.id, payload.seriesId),
+    position: getReadingPositionForEntry(db, user.id, payload.entryId),
+  }
+}
+
+/** Legacy response: every bookmark and position (used by app versions up to 1.23). */
+export const saveBookmark = (db: Database, user: SessionUser, payload: ReadingProgressPayload) => {
+  saveReadingProgress(db, user, payload)
 
   return {
     bookmarks: getBookmarks(db, user.id),
@@ -4524,9 +4709,12 @@ const upsertSeries = async (
         fileExists(existingCoverPath)
       ),
   )
+  // "No cover image" is a settled state (the client draws a typographic
+  // cover); only a cover file that disappeared or a new folder image needs work.
+  const hasSettledMissingCover = !existingCoverPath && existingSeries?.cover_source === 'No cover image'
   const needsCoverRepair = Boolean(
     existingSeries &&
-      (!existingCoverIsUsable ||
+      ((!existingCoverIsUsable && !hasSettledMissingCover) ||
         (localDirectoryCover && localDirectoryCover !== existingSeries.cover_path)),
   )
   const allEntriesUnchanged = !forceReparse &&
@@ -4544,7 +4732,34 @@ const upsertSeries = async (
       )
     })
 
-  if (allEntriesUnchanged) {
+  if (allEntriesUnchanged && existingSeries) {
+    if ((existingSeries.local_metadata_version ?? 0) < LOCAL_METADATA_VERSION) {
+      // One-time, read-only pass: embedded authors, subjects, page counts and
+      // real covers for formats that carry one. Entries are left untouched.
+      const metadataOverride = getMetadataOverride(db, seriesId)
+      const { presentation, firstEntryPageCount } = await resolveSeriesPresentation({
+        seriesId,
+        series: applyMetadataOverrideToSeriesSpec(series, metadataOverride),
+        existingSeries,
+        coversDirectory: config.coversDirectory,
+        db,
+        reporter,
+        scanRunId,
+        metadataOverride,
+        remoteMetadataEnabled: false,
+        knownLocalDirectoryCover: localDirectoryCover,
+      })
+
+      persistSeriesPresentation(db, seriesId, existingSeries.title, existingSeries.title_short, presentation, {
+        localMetadataVersion: LOCAL_METADATA_VERSION,
+      })
+
+      const firstEntryId = series.entries[0] ? existingEntriesByPath.get(series.entries[0].file.path)?.id : null
+      if (firstEntryId && firstEntryPageCount != null) {
+        db.prepare(`UPDATE entries SET page_count = ? WHERE id = ?`).run(firstEntryPageCount, firstEntryId)
+      }
+    }
+
     return {
       seriesId,
       changedFiles: 0,
@@ -4566,19 +4781,18 @@ const upsertSeries = async (
   let deletedFiles = 0
   let movedFiles = 0
 
-  const presentation = await resolveSeriesPresentation(
+  const { presentation, firstEntryPageCount } = await resolveSeriesPresentation({
     seriesId,
-    effectiveSeries,
+    series: effectiveSeries,
     existingSeries,
-    true,
-    config.coversDirectory,
+    coversDirectory: config.coversDirectory,
+    db,
     reporter,
     scanRunId,
-    db,
     metadataOverride,
-    false,
-    localDirectoryCover,
-  )
+    remoteMetadataEnabled: isRemoteMetadataEnabled(db),
+    knownLocalDirectoryCover: localDirectoryCover,
+  })
 
   const persistSeriesShell = db.transaction(() => {
     if (existingSeries && existingSeries.series_key !== series.key) {
@@ -4920,6 +5134,13 @@ const upsertSeries = async (
     now,
   )
 
+  db.prepare(`UPDATE series SET local_metadata_version = ? WHERE id = ?`).run(LOCAL_METADATA_VERSION, seriesId)
+
+  const firstEntryPath = effectiveSeries.entries[0]?.file.path
+  if (firstEntryPath && firstEntryPageCount != null) {
+    db.prepare(`UPDATE entries SET page_count = ? WHERE file_path = ?`).run(firstEntryPageCount, firstEntryPath)
+  }
+
   refreshSeriesSearchDocument(db, seriesId)
 
   })
@@ -5136,7 +5357,7 @@ export const runScan = async (
                    description, folder_path, cover_source, metadata_source, cover_path, cover_mime,
                    banner_path, banner_mime, remote_provider, remote_id, external_url,
                    source_name, source_role, genres_json, file_count, last_scan_at, tags_json,
-                   metadata_refreshed_at, series_key
+                   metadata_refreshed_at, series_key, local_metadata_version
             FROM series
             WHERE source_folder_id = ?
           `,
@@ -5819,7 +6040,7 @@ const convertAssToVtt = (input: string) => {
   return `WEBVTT\n\n${cues.join('\n\n')}`.trim()
 }
 
-export const resolveEntryTrack = (
+export const resolveEntryTrack = async (
   db: Database,
   entryId: string,
   kind: MediaTrackKind,
@@ -5846,7 +6067,7 @@ export const renderSubtitleTrackForBrowser = async (
   entryId: string,
   trackId: string,
 ) => {
-  const track = resolveMediaTrackForEntry(db, entryId, 'subtitle', trackId)
+  const track = await resolveMediaTrackForEntry(db, entryId, 'subtitle', trackId)
   const input = await fsPromises.readFile(track.filePath, 'utf8')
   const extension = path.extname(track.filePath).toLowerCase()
 
@@ -5861,11 +6082,37 @@ export const renderSubtitleTrackForBrowser = async (
   return convertAssToVtt(input)
 }
 
-export const resolveEntryFilePath = (db: Database, entryId: string) => {
-  return resolveEntryMediaFile(db, entryId).filePath
+export const resolveEntryFilePath = async (db: Database, entryId: string) =>
+  (await resolveEntryMediaFile(db, entryId)).filePath
+
+// Directory realpaths are cached briefly: on a network mount every realpath is
+// a round-trip, while the directories themselves change very rarely.
+const directoryRealpathTtlMs = 60_000
+const directoryRealpathCache = new Map<string, { realPath: string; expiresAt: number }>()
+
+const cachedDirectoryRealpath = async (directoryPath: string) => {
+  const now = Date.now()
+  const cached = directoryRealpathCache.get(directoryPath)
+
+  if (cached && cached.expiresAt > now) {
+    return cached.realPath
+  }
+
+  const realPath = await fsPromises.realpath(directoryPath)
+  directoryRealpathCache.set(directoryPath, { realPath, expiresAt: now + directoryRealpathTtlMs })
+
+  if (directoryRealpathCache.size > 2048) {
+    for (const [key, value] of directoryRealpathCache) {
+      if (value.expiresAt <= now || directoryRealpathCache.size > 1024) {
+        directoryRealpathCache.delete(key)
+      }
+    }
+  }
+
+  return realPath
 }
 
-export const resolveEntryMediaFile = (db: Database, entryId: string) => {
+export const resolveEntryMediaFile = async (db: Database, entryId: string) => {
   const entry = db
     .prepare(
       `
@@ -5891,10 +6138,15 @@ export const resolveEntryMediaFile = (db: Database, entryId: string) => {
     throw new Error('Requested media file was not found.')
   }
 
+  let fileStats: fs.Stats
+
   try {
-    const sourceRealPath = fs.realpathSync(entry.source_path)
-    const fileStats = fs.lstatSync(entry.file_path)
-    const fileRealPath = fs.realpathSync(entry.file_path)
+    const [sourceRealPath, stats, directoryRealPath] = await Promise.all([
+      cachedDirectoryRealpath(entry.source_path),
+      fsPromises.lstat(entry.file_path),
+      cachedDirectoryRealpath(path.dirname(entry.file_path)),
+    ])
+    const fileRealPath = path.join(directoryRealPath, path.basename(entry.file_path))
     const relativeFilePath = path.relative(sourceRealPath, fileRealPath)
     const isInsideSource =
       relativeFilePath.length > 0 &&
@@ -5902,9 +6154,11 @@ export const resolveEntryMediaFile = (db: Database, entryId: string) => {
       relativeFilePath !== '..' &&
       !path.isAbsolute(relativeFilePath)
 
-    if (!fileStats.isFile() || fileStats.isSymbolicLink() || !isInsideSource) {
+    if (!stats.isFile() || stats.isSymbolicLink() || !isInsideSource) {
       throw new Error('Unsafe media path.')
     }
+
+    fileStats = stats
   } catch {
     throw new Error('Requested media file was not found.')
   }
@@ -5915,6 +6169,7 @@ export const resolveEntryMediaFile = (db: Database, entryId: string) => {
     format: entry.format,
     size: entry.size,
     mtimeMs: entry.mtime_ms,
+    stats: fileStats,
   }
 }
 
@@ -5948,13 +6203,14 @@ export const resolveSeriesBannerPath = (db: Database, seriesId: string) => {
   }
 }
 
+/** Links demo folders when enabled; returns true when a scan should follow. */
 export const maybeSeedDemoContent = async (db: Database, config: AppConfig) => {
   if (!config.enableDemoSeed) {
-    return
+    return false
   }
 
   if (!fileExists(config.demoFilesRoot)) {
-    return
+    return false
   }
 
   const potentialSources: Array<{ category: CategoryId; relativePath: string }> = [
@@ -5988,14 +6244,14 @@ export const maybeSeedDemoContent = async (db: Database, config: AppConfig) => {
     existingScanCount.count > 0
 
   if (existingRoot) {
-    return
+    return false
   }
 
   if (hasExistingLibrarySetup) {
-    return
+    return false
   }
 
-  const rootId = existingRoot?.id ?? createId('root')
+  const rootId = createId('root')
 
   if (!existingRoot) {
     db.prepare(
@@ -6049,7 +6305,5 @@ export const maybeSeedDemoContent = async (db: Database, config: AppConfig) => {
     .prepare(`SELECT id FROM scan_runs WHERE status = 'success' LIMIT 1`)
     .get() as { id: string } | undefined
 
-  if (addedSource || libraryCount.count === 0 || !successfulScan) {
-    await runScan(db, config)
-  }
+  return addedSource || libraryCount.count === 0 || !successfulScan
 }

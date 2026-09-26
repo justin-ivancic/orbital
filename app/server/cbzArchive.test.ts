@@ -6,8 +6,11 @@ import test from 'node:test'
 import JSZip from 'jszip'
 import {
   getCbzMediaVersion,
+  getCbzPageCacheStats,
   loadCbzArchiveManifest,
   openCbzPageImageStream,
+  readCbzPage,
+  selectCbzCoverPage,
 } from './cbzArchive.ts'
 
 const onePixelPng = Buffer.from(
@@ -92,6 +95,51 @@ test('CBZ manifest rejects path traversal image entries', async () => {
       loadCbzArchiveManifest(archivePath, stats),
       /path traversal entries/,
     )
+  } finally {
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('CBZ pages are read once, cached, and the following pages are read ahead', async () => {
+  const directory = await createTempDirectory()
+
+  try {
+    const pages = Object.fromEntries(
+      Array.from({ length: 6 }, (_, index) => [`${String(index + 1).padStart(3, '0')}.png`, onePixelPng]),
+    )
+    const archivePath = await writeZip(directory, pages)
+    const stats = await fsPromises.stat(archivePath)
+    const manifest = await loadCbzArchiveManifest(archivePath, stats)
+    const before = getCbzPageCacheStats().pages
+
+    const firstPage = await readCbzPage(archivePath, stats, manifest, manifest.pages[0], { readAhead: 3 })
+    assert.deepEqual(firstPage, onePixelPng)
+
+    // Read-ahead runs in the background; give it a moment to land in the cache.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(getCbzPageCacheStats().pages - before, 4)
+
+    const cachedSecondPage = await readCbzPage(archivePath, stats, manifest, manifest.pages[1], { readAhead: 0 })
+    assert.deepEqual(cachedSecondPage, onePixelPng)
+    assert.equal(getCbzPageCacheStats().pages - before, 4)
+  } finally {
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('CBZ covers use the first page by natural file name order', async () => {
+  const directory = await createTempDirectory()
+
+  try {
+    const archivePath = await writeZip(directory, {
+      'page10.png': onePixelPng,
+      'page2.png': onePixelPng,
+      'page1.png': onePixelPng,
+    })
+    const stats = await fsPromises.stat(archivePath)
+    const manifest = await loadCbzArchiveManifest(archivePath, stats)
+
+    assert.equal(selectCbzCoverPage(manifest)?.name, 'page1.png')
   } finally {
     await fsPromises.rm(directory, { recursive: true, force: true })
   }

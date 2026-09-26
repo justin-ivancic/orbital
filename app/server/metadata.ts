@@ -361,7 +361,8 @@ const fetchGoogleBooksMetadata = async (
     const candidateTitles = [volumeInfo.title, volumeInfo.subtitle].filter(Boolean) as string[]
     let score = scoreTitleMatch(candidateTitles, input.title, input.year)
 
-    if (input.authorHint && volumeInfo.authors?.some((author) => normalizeTitle(author) === normalizeTitle(input.authorHint))) {
+    const authorHint = input.authorHint
+    if (authorHint && volumeInfo.authors?.some((author) => normalizeTitle(author) === normalizeTitle(authorHint))) {
       score += 15
     }
 

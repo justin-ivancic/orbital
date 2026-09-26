@@ -3,6 +3,7 @@ import fsPromises from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import JSZip from 'jszip'
 import { openDatabase } from './database'
 import {
   resolveEntryMediaFile,
@@ -45,6 +46,26 @@ const createSource = (
       ) VALUES (?, ?, ?, ?, ?, 1, 0, NULL, NULL, ?, ?)
     `,
   ).run('source-1', 'root-1', 'novels', relativePath, sourcePath, now, now)
+}
+
+const onePixelPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
+  'base64',
+)
+
+const writeZip = async (filePath: string, entries: Record<string, Buffer | string>) => {
+  const zip = new JSZip()
+  Object.entries(entries).forEach(([name, content]) => zip.file(name, content))
+  await fsPromises.mkdir(path.dirname(filePath), { recursive: true })
+  await fsPromises.writeFile(filePath, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))
+  return filePath
+}
+
+const setSourceCategory = (
+  db: ReturnType<typeof openDatabase>['db'],
+  category: 'manga' | 'books' | 'novels',
+) => {
+  db.prepare(`UPDATE source_folders SET category = ? WHERE id = 'source-1'`).run(category)
 }
 
 const writeNovel = async (sourcePath: string, fileName: string, content: string) => {
@@ -252,7 +273,7 @@ test('media access rejects a scanned file replaced by an escaping symlink', asyn
     await fsPromises.unlink(scannedFilePath)
     await fsPromises.symlink(outsideFilePath, scannedFilePath)
 
-    assert.throws(() => resolveEntryMediaFile(database.db, entry.id), /not found/i)
+    await assert.rejects(resolveEntryMediaFile(database.db, entry.id), /not found/i)
   } finally {
     database.db.close()
     await fsPromises.rm(directory, { recursive: true, force: true })
@@ -689,12 +710,17 @@ test('library scans regenerate a missing derived cover for an unchanged series',
 
   try {
     createSource(database.db, sourcePath)
-    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    setSourceCategory(database.db, 'manga')
+    await writeZip(path.join(sourcePath, 'Cover Series', 'Cover Series - Chapter 1.cbz'), {
+      '001.png': onePixelPng,
+      '002.png': onePixelPng,
+    })
     await runScan(database.db, config, 'source-1')
 
     const originalSeries = database.db
-      .prepare(`SELECT id, cover_path FROM series WHERE source_folder_id = ?`)
-      .get('source-1') as { id: string; cover_path: string }
+      .prepare(`SELECT id, cover_path, cover_source FROM series WHERE source_folder_id = ?`)
+      .get('source-1') as { id: string; cover_path: string; cover_source: string }
+    assert.equal(originalSeries.cover_source, 'CBZ first-page cover')
     await fsPromises.rm(originalSeries.cover_path, { force: true })
 
     const scan = await runScan(database.db, config, 'source-1')
@@ -704,7 +730,34 @@ test('library scans regenerate a missing derived cover for an unchanged series',
 
     assert.equal(scan.metrics.processedSeries, 1)
     assert.equal(repairedSeries.id, originalSeries.id)
-    assert.equal(await fsPromises.stat(repairedSeries.cover_path).then(() => true), true)
+    assert.deepEqual(await fsPromises.readFile(repairedSeries.cover_path), onePixelPng)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('series without a cover image settle and are not reprocessed on every scan', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    await writeNovel(sourcePath, 'Chapter 1 - Opening.txt', 'opening')
+    await runScan(database.db, config, 'source-1')
+
+    const series = database.db
+      .prepare(`SELECT cover_path, cover_source FROM series WHERE source_folder_id = ?`)
+      .get('source-1') as { cover_path: string | null; cover_source: string }
+    assert.equal(series.cover_path, null)
+    assert.equal(series.cover_source, 'No cover image')
+
+    const secondScan = await runScan(database.db, config, 'source-1')
+    assert.equal(secondScan.metrics.processedSeries, 0)
+    assert.equal(secondScan.metrics.unchangedFiles, 1)
   } finally {
     database.db.close()
     await fsPromises.rm(directory, { recursive: true, force: true })
@@ -727,12 +780,180 @@ test('invalid PDF cover extraction is isolated and falls back without failing th
     const scan = await runScan(database.db, config, 'source-1')
     const series = database.db
       .prepare(`SELECT cover_path, cover_source FROM series WHERE source_folder_id = ? LIMIT 1`)
-      .get('source-1') as { cover_path: string; cover_source: string }
+      .get('source-1') as { cover_path: string | null; cover_source: string }
+    const events = database.db
+      .prepare(`SELECT message FROM scan_events WHERE scan_run_id = ?`)
+      .all(scan.scanRunId) as Array<{ message: string }>
 
     assert.equal(scan.scannedSourceIds.includes('source-1'), true)
-    assert.equal(series.cover_source, 'Generated fallback cover')
-    assert.match(series.cover_path, /\.svg$/)
-    assert.equal(await fsPromises.stat(series.cover_path).then(() => true), true)
+    assert.equal(series.cover_source, 'No cover image')
+    assert.equal(series.cover_path, null)
+    assert.equal(events.some((event) => /Could not read PDF details/.test(event.message)), true)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('CBZ series take their cover from the first page and details from ComicInfo.xml', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    setSourceCategory(database.db, 'manga')
+    await writeZip(path.join(sourcePath, 'Harbor Lights', 'Harbor Lights - Chapter 1.cbz'), {
+      'ComicInfo.xml': `<?xml version="1.0"?>
+        <ComicInfo>
+          <Series>Harbor Lights</Series>
+          <Writer>Mori, Aki</Writer>
+          <Genre>Slice of Life, Drama</Genre>
+          <Summary>A quiet story about the people who keep a harbour town running through a long winter.</Summary>
+          <Year>2019</Year>
+        </ComicInfo>`,
+      '002.png': onePixelPng,
+      '001.png': onePixelPng,
+    })
+    await runScan(database.db, config, 'source-1')
+
+    const series = database.db
+      .prepare(`SELECT source_name, source_role, tags_json, description, year, cover_source FROM series`)
+      .get() as {
+        source_name: string
+        source_role: string
+        tags_json: string
+        description: string
+        year: number
+        cover_source: string
+      }
+    const entry = database.db.prepare(`SELECT page_count FROM entries`).get() as { page_count: number }
+
+    assert.equal(series.cover_source, 'CBZ first-page cover')
+    assert.equal(series.source_name, 'Aki Mori')
+    assert.equal(series.source_role, 'Writer')
+    assert.deepEqual(JSON.parse(series.tags_json), ['Slice of Life', 'Drama'])
+    assert.match(series.description, /harbour town/)
+    assert.equal(series.year, 2019)
+    assert.equal(entry.page_count, 2)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('EPUB books read their author, subjects, description and embedded cover', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    setSourceCategory(database.db, 'books')
+    await writeZip(path.join(sourcePath, 'The Lighthouse Ledger.epub'), {
+      mimetype: 'application/epub+zip',
+      'META-INF/container.xml':
+        '<container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+      'OEBPS/content.opf': `<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+        <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+          <dc:title>The Lighthouse Ledger</dc:title>
+          <dc:creator>Ada Sample</dc:creator>
+          <dc:subject>Maritime history</dc:subject>
+          <dc:subject>Economics</dc:subject>
+          <dc:description>&lt;p&gt;An account of the ledgers kept by lighthouse keepers along a northern coast.&lt;/p&gt;</dc:description>
+          <dc:date>1987-03-01</dc:date>
+        </metadata>
+        <manifest>
+          <item id="cover" href="images/cover.png" media-type="image/png" properties="cover-image"/>
+        </manifest>
+      </package>`,
+      'OEBPS/images/cover.png': onePixelPng,
+    })
+    await runScan(database.db, config, 'source-1')
+
+    const series = database.db
+      .prepare(`SELECT source_name, tags_json, description, year, cover_source, cover_path FROM series`)
+      .get() as {
+        source_name: string
+        tags_json: string
+        description: string
+        year: number
+        cover_source: string
+        cover_path: string
+      }
+
+    assert.equal(series.source_name, 'Ada Sample')
+    assert.deepEqual(JSON.parse(series.tags_json), ['Maritime history', 'Economics'])
+    assert.equal(series.description, 'An account of the ledgers kept by lighthouse keepers along a northern coast.')
+    assert.equal(series.year, 1987)
+    assert.equal(series.cover_source, 'EPUB embedded cover')
+    assert.deepEqual(await fsPromises.readFile(series.cover_path), onePixelPng)
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('Kindle books are indexed as their own format instead of plain text', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    setSourceCategory(database.db, 'books')
+    await fsPromises.writeFile(path.join(sourcePath, 'Some Author - A Kindle Book.azw3'), Buffer.from('BOOKMOBI'))
+    await runScan(database.db, config, 'source-1')
+
+    const entry = database.db.prepare(`SELECT format FROM entries`).get() as { format: string }
+    const series = database.db.prepare(`SELECT source_name FROM series`).get() as { source_name: string }
+    assert.equal(entry.format, 'mobi')
+    assert.equal(series.source_name, 'Some Author')
+  } finally {
+    database.db.close()
+    await fsPromises.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('unchanged series read embedded details once without reprocessing entries', async () => {
+  const directory = await createTempDirectory()
+  const sourcePath = path.join(directory, 'library')
+  await fsPromises.mkdir(sourcePath, { recursive: true })
+  const database = openDatabase(path.join(directory, 'data'))
+  const config = makeConfig(directory)
+
+  try {
+    createSource(database.db, sourcePath)
+    setSourceCategory(database.db, 'manga')
+    await writeZip(path.join(sourcePath, 'Backfill Series', 'Backfill Series - Chapter 1.cbz'), {
+      'ComicInfo.xml': '<ComicInfo><Writer>Rin Example</Writer></ComicInfo>',
+      '001.png': onePixelPng,
+    })
+    await runScan(database.db, config, 'source-1')
+
+    // Simulate a library indexed before embedded details existed.
+    database.db.prepare(`UPDATE series SET source_name = NULL, source_role = NULL, local_metadata_version = 0`).run()
+    const entryBefore = database.db.prepare(`SELECT id, updated_at FROM entries`).get() as { id: string; updated_at: string }
+
+    const scan = await runScan(database.db, config, 'source-1')
+    const series = database.db
+      .prepare(`SELECT source_name, local_metadata_version FROM series`)
+      .get() as { source_name: string; local_metadata_version: number }
+    const entryAfter = database.db.prepare(`SELECT id, updated_at FROM entries`).get() as { id: string; updated_at: string }
+
+    assert.equal(scan.metrics.processedSeries, 0)
+    assert.equal(series.source_name, 'Rin Example')
+    assert.equal(series.local_metadata_version, 1)
+    assert.deepEqual(entryAfter, entryBefore)
+
+    const thirdScan = await runScan(database.db, config, 'source-1')
+    assert.equal(thirdScan.metrics.unchangedFiles, 1)
   } finally {
     database.db.close()
     await fsPromises.rm(directory, { recursive: true, force: true })
@@ -747,13 +968,12 @@ test('a series failure is isolated without failing the whole source or deleting 
   const config = makeConfig(directory)
 
   try {
-    createSource(database.db, sourcePath, 'novels')
+    createSource(database.db, sourcePath, 'manga')
+    setSourceCategory(database.db, 'manga')
     const retainedSeriesPath = path.join(sourcePath, 'Retained Series')
     const removedSeriesPath = path.join(sourcePath, 'Removed Series')
-    await fsPromises.mkdir(retainedSeriesPath, { recursive: true })
-    await fsPromises.mkdir(removedSeriesPath, { recursive: true })
-    await fsPromises.writeFile(path.join(retainedSeriesPath, 'Chapter 1.txt'), 'retained')
-    await fsPromises.writeFile(path.join(removedSeriesPath, 'Chapter 1.txt'), 'removed')
+    await writeZip(path.join(retainedSeriesPath, 'Retained Series - Chapter 1.cbz'), { '001.png': onePixelPng })
+    await writeZip(path.join(removedSeriesPath, 'Removed Series - Chapter 1.cbz'), { '001.png': onePixelPng })
     await runScan(database.db, config, 'source-1')
 
     const retainedCover = database.db

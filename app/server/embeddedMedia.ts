@@ -1,7 +1,8 @@
 import { execFile, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import { promisify } from 'node:util'
-import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { ChildProcessByStdio } from 'node:child_process'
+import type { Readable } from 'node:stream'
 import type { Database } from 'better-sqlite3'
 import ffmpegPath from 'ffmpeg-static'
 // @ts-expect-error ffprobe-static ships without TypeScript types.
@@ -279,7 +280,7 @@ export const streamEmbeddedAudioTrack = async (
   entryId: string,
   trackId: string,
 ): Promise<{
-  process: ChildProcessWithoutNullStreams
+  process: ChildProcessByStdio<null, Readable, Readable>
   contentType: string
 }> => {
   const resolution = await resolveEmbeddedTrack(db, entryId, 'audio', trackId)

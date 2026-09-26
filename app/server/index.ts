@@ -1,24 +1,33 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
-import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import { parse as parseCookie, serialize as serializeCookie } from 'cookie'
 import express, { type NextFunction, type Request, type Response } from 'express'
-import mime from 'mime-types'
-import type { ScanLogEntry, ScanStatus } from '../src/appTypes.ts'
+import type { ScanLogEntry, ScanStatus, SessionUser } from '../src/appTypes.ts'
+import {
+  deleteUploadedAndroidApk,
+  getAndroidApkLocations,
+  getAndroidAppInfo,
+  resolveAndroidApk,
+  saveUploadedAndroidApk,
+} from './androidApp'
+import { getRemoteMetadataSetting, setRemoteMetadataEnabled } from './appSettings'
 import {
   getCbzMediaVersion,
   loadCbzArchiveManifest,
-  sendCbzPageImage,
+  readCbzPage,
+  sendCbzPageBytes,
 } from './cbzArchive'
 import { resolveCardCoverPath } from './coverThumbnails'
 import { getEntryEmbeddedMediaTracks, renderEmbeddedSubtitleTrack, streamEmbeddedAudioTrack } from './embeddedMedia'
 import { openDatabase } from './database'
+import { isClientAbortError, sendMediaFile } from './mediaResponses'
 import {
   buildVersionedMediaPath,
   isCurrentMediaVersion,
   isStaleMediaVersion,
 } from './mediaVersion'
+import { shutdownMediaWorker } from './mediaWorkerPool'
 import {
   buildOfflineEstimate,
   buildOfflineManifest,
@@ -38,14 +47,17 @@ import {
 } from './rateLimit'
 import {
   addComment,
+  addCommentCompact,
   bootstrapAdminUser,
   changeUserPassword,
+  clearMetadataOverride,
   clearSession,
   createSession,
   createSourceFolder,
   createSourceRoot,
+  createUserAccount,
+  deleteUserAccount,
   ensureConfiguredSourceRoot,
-  findSessionUser,
   findSessionContext,
   getAppState,
   getEntrySidecarMediaTracks,
@@ -55,29 +67,30 @@ import {
   loginUser,
   markInterruptedScans,
   maybeSeedDemoContent,
-  clearMetadataOverride,
-  removeBookmark,
-  removeSourceRoot,
-  removeSourceFolder,
   refreshSeriesMetadata,
+  removeBookmark,
+  removeSourceFolder,
+  removeSourceRoot,
   renderSubtitleTrackForBrowser,
   resetUserPassword,
-  resolveEntryFilePath,
   resolveEntryMediaFile,
-  resolveSeriesBannerPath,
   resolveEntryTrack,
+  resolveSeriesBannerPath,
   resolveSeriesCoverPath,
   runScan,
-  saveMetadataOverride,
   saveBookmark,
+  saveMetadataOverride,
+  saveReadingProgress,
   searchSeries,
   signupUser,
   updateSourceFolderCategory,
+  type ReadingProgressPayload,
+  type ScanReporter,
 } from './library'
 import { SESSION_COOKIE_NAME } from './utils'
 
 type RequestWithUser = Request & {
-  sessionUser: ReturnType<typeof findSessionUser>
+  sessionUser: SessionUser | null
   sessionId: string | null
   sessionCsrfToken: string | null
   authMode: 'browser' | 'mobile'
@@ -91,7 +104,7 @@ const dataDirectory = process.env.APP_DATA_DIR
 const demoFilesRoot = process.env.APP_DEMO_FILES_ROOT
   ? path.resolve(process.env.APP_DEMO_FILES_ROOT)
   : ''
-const androidApkPath = path.join(appRoot, 'mobile-distribution', 'orbital-android.apk')
+const androidApkLocations = getAndroidApkLocations(dataDirectory, appRoot)
 const {
   db,
   coversDirectory,
@@ -131,6 +144,7 @@ const adminResetPolicy = {
   windowMs: hours(1),
   blockMs: hours(1),
 } satisfies RateLimitPolicy
+
 const configuredBootstrapPassword = process.env.APP_ADMIN_PASSWORD?.trim() || ''
 const configuredManagedSourceRootPath = process.env.APP_MEDIA_ROOT_PATH?.trim() || ''
 const configuredManagedSourceRootDisplayPath =
@@ -192,6 +206,7 @@ const mobileOrigins = new Set(
 )
 
 const app = express()
+app.disable('x-powered-by')
 
 if (process.env.APP_TRUST_PROXY) {
   const trustProxy = process.env.APP_TRUST_PROXY.trim()
@@ -241,7 +256,36 @@ app.use('/api', (request, response, next) => {
   next()
 })
 
-app.use(express.json({ limit: '2mb' }))
+// The APK upload streams its own body; everything else is small JSON.
+app.use((request, response, next) => {
+  if (request.path === '/api/admin/android-app') {
+    next()
+    return
+  }
+
+  express.json({ limit: '2mb' })(request, response, next)
+})
+
+/** Express 5 types route params as string | string[]; routes here only use plain segments. */
+const routeParam = (request: Request, name: string) => {
+  const value = request.params[name]
+  return Array.isArray(value) ? value[0] ?? '' : value ?? ''
+}
+
+const queryText = (request: Request, name: string) => {
+  const value = request.query[name]
+  return typeof value === 'string' ? value : Array.isArray(value) && typeof value[0] === 'string' ? value[0] : ''
+}
+
+const isCompactRequest = (request: Request) => queryText(request, 'compact') === '1'
+
+const currentUser = (request: Request) => {
+  const user = (request as RequestWithUser).sessionUser
+  if (!user) {
+    throw new Error('You need to sign in first.')
+  }
+  return user
+}
 
 let activeScanStatus: ScanStatus | null = null
 let activeScanPromise: Promise<void> | null = null
@@ -275,12 +319,34 @@ const broadcastScanStatus = () => {
   broadcastScanStreamEvent('status', getCurrentScanStatus())
 }
 
-const getStatePayload = (user: RequestWithUser['sessionUser'], csrfToken?: string | null) => ({
-  ...getAppState(db, config, user, activeScanStatus),
-  csrfToken: user ? csrfToken ?? null : null,
+const emptyScanStatus = (overrides: Partial<ScanStatus> = {}): ScanStatus => ({
+  active: false,
+  runId: null,
+  startedAt: new Date().toISOString(),
+  finishedAt: null,
+  totalSources: 0,
+  completedSources: 0,
+  currentSource: null,
+  currentSourceFilesDiscovered: null,
+  currentSourceSeriesTotal: null,
+  currentSourceSeriesCompleted: 0,
+  currentSeries: null,
+  summary: null,
+  events: [],
+  ...overrides,
 })
 
-const getBootstrapPayload = (user: RequestWithUser['sessionUser'], csrfToken?: string | null) => ({
+const statePayloadOptions = (request: Request) => ({
+  compact: isCompactRequest(request),
+  knownLibraryRevision: queryText(request, 'libraryRevision') || null,
+})
+
+const getStatePayload = (request: Request, user: SessionUser | null) => ({
+  ...getAppState(db, config, user, activeScanStatus, statePayloadOptions(request)),
+  csrfToken: user ? (request as RequestWithUser).sessionCsrfToken ?? null : null,
+})
+
+const getBootstrapPayload = (user: SessionUser | null, csrfToken?: string | null) => ({
   appName: config.appName,
   bootstrapAdmin: config.bootstrapAdmin,
   openSignup: config.openSignup,
@@ -296,37 +362,16 @@ const startBackgroundScan = (
     return activeScanPromise
   }
 
-  activeScanStatus = {
+  activeScanStatus = emptyScanStatus({
     active: true,
-    runId: null,
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    totalSources: 0,
-    completedSources: 0,
-    currentSource: null,
-    currentSourceFilesDiscovered: null,
-    currentSourceSeriesTotal: null,
-    currentSourceSeriesCompleted: 0,
-    currentSeries: null,
     summary: sourceId ? 'Preparing folder scan…' : 'Preparing library scan…',
-    events: [],
-  }
+  })
   broadcastScanStatus()
 
-  const scanReporter = {
+  const scanReporter: ScanReporter = {
     onRunStarted: ({ runId, startedAt, totalSources }) => {
       activeScanStatus = {
-        ...(activeScanStatus || {
-          active: true,
-          runId: null,
-          startedAt,
-          finishedAt: null,
-          totalSources: 0,
-          completedSources: 0,
-          currentSource: null,
-          summary: null,
-          events: [],
-        }),
+        ...(activeScanStatus ?? emptyScanStatus()),
         active: true,
         runId,
         startedAt,
@@ -342,63 +387,17 @@ const startBackgroundScan = (
       }
       broadcastScanStatus()
     },
-    onProgress: ({
-      runId,
-      totalSources,
-      completedSources,
-      currentSource,
-      currentSourceFilesDiscovered,
-      currentSourceSeriesTotal,
-      currentSourceSeriesCompleted,
-      currentSeries,
-      summary,
-    }) => {
+    onProgress: (progress) => {
       activeScanStatus = {
-        ...(activeScanStatus || {
-          active: true,
-          runId,
-          startedAt: new Date().toISOString(),
-          finishedAt: null,
-          totalSources,
-          completedSources,
-          currentSource,
-          currentSourceFilesDiscovered,
-          currentSourceSeriesTotal,
-          currentSourceSeriesCompleted,
-          currentSeries,
-          summary,
-          events: [],
-        }),
+        ...(activeScanStatus ?? emptyScanStatus()),
         active: true,
-        runId,
-        totalSources,
-        completedSources,
-        currentSource,
-        currentSourceFilesDiscovered,
-        currentSourceSeriesTotal,
-        currentSourceSeriesCompleted,
-        currentSeries,
-        summary,
+        ...progress,
       }
       broadcastScanStatus()
     },
     onEvent: (event) => {
       activeScanStatus = {
-        ...(activeScanStatus || {
-          active: true,
-          runId: null,
-          startedAt: new Date().toISOString(),
-          finishedAt: null,
-          totalSources: 0,
-          completedSources: 0,
-          currentSource: null,
-          currentSourceFilesDiscovered: null,
-          currentSourceSeriesTotal: null,
-          currentSourceSeriesCompleted: 0,
-          currentSeries: null,
-          summary: null,
-          events: [],
-        }),
+        ...(activeScanStatus ?? emptyScanStatus({ active: true })),
         events: trimScanEvents([...(activeScanStatus?.events || []), event]),
       }
       broadcastScanStreamEvent('scan-event', event)
@@ -406,21 +405,7 @@ const startBackgroundScan = (
     },
     onRunFinished: ({ runId, finishedAt, summary }) => {
       activeScanStatus = {
-        ...(activeScanStatus || {
-          active: false,
-          runId,
-          startedAt: new Date().toISOString(),
-          finishedAt,
-          totalSources: 0,
-          completedSources: 0,
-          currentSource: null,
-          currentSourceFilesDiscovered: null,
-          currentSourceSeriesTotal: null,
-          currentSourceSeriesCompleted: 0,
-          currentSeries: null,
-          summary,
-          events: [],
-        }),
+        ...(activeScanStatus ?? emptyScanStatus()),
         active: false,
         runId,
         finishedAt,
@@ -436,28 +421,13 @@ const startBackgroundScan = (
 
   activeScanPromise = new Promise<void>((resolve, reject) => {
     setImmediate(() => {
-      runScan(db, config, sourceId, scanReporter, options).then(resolve, reject)
+      runScan(db, config, sourceId, scanReporter, options).then(() => resolve(), reject)
     })
   })
-    .then(() => undefined)
     .catch((error) => {
       const finishedAt = new Date().toISOString()
       activeScanStatus = {
-        ...(activeScanStatus || {
-          active: false,
-          runId: null,
-          startedAt: finishedAt,
-          finishedAt,
-          totalSources: 0,
-          completedSources: 0,
-          currentSource: null,
-          currentSourceFilesDiscovered: null,
-          currentSourceSeriesTotal: null,
-          currentSourceSeriesCompleted: 0,
-          currentSeries: null,
-          summary: null,
-          events: [],
-        }),
+        ...(activeScanStatus ?? emptyScanStatus()),
         active: false,
         finishedAt,
         currentSource: null,
@@ -473,29 +443,55 @@ const startBackgroundScan = (
   return activeScanPromise
 }
 
-const getSessionFromRequest = (request: RequestWithUser) => {
+const setSessionCookie = (response: Response, sessionId: string, expiresAt: number) => {
+  response.setHeader(
+    'Set-Cookie',
+    serializeCookie(SESSION_COOKIE_NAME, sessionId, {
+      httpOnly: true,
+      sameSite: 'strict',
+      path: '/',
+      expires: new Date(expiresAt),
+      secure: useSecureSessionCookie,
+    }),
+  )
+}
+
+const clearSessionCookie = (response: Response) => {
+  response.setHeader(
+    'Set-Cookie',
+    serializeCookie(SESSION_COOKIE_NAME, '', {
+      httpOnly: true,
+      sameSite: 'strict',
+      path: '/',
+      expires: new Date(0),
+      secure: useSecureSessionCookie,
+    }),
+  )
+}
+
+app.use((request, response, next) => {
+  const typedRequest = request as RequestWithUser
   const cookies = parseCookie(request.headers.cookie || '')
   const authorization = request.get('authorization') || ''
   const bearerToken = authorization.match(/^Bearer\s+([^\s]+)$/i)?.[1] || null
   const sessionId = bearerToken || cookies[SESSION_COOKIE_NAME] || null
   const sessionContext = findSessionContext(db, sessionId)
 
-  request.sessionId = sessionId
-  request.sessionUser = sessionContext?.user ?? null
-  request.sessionCsrfToken = sessionContext?.csrfToken ?? null
-  request.authMode = bearerToken ? 'mobile' : 'browser'
-}
+  typedRequest.sessionId = sessionId
+  typedRequest.sessionUser = sessionContext?.user ?? null
+  typedRequest.sessionCsrfToken = sessionContext?.csrfToken ?? null
+  typedRequest.authMode = bearerToken ? 'mobile' : 'browser'
 
-app.use((request, _response, next) => {
-  const typedRequest = request as RequestWithUser
-  getSessionFromRequest(typedRequest)
+  // Keep the browser cookie in step with the server-side sliding expiry.
+  if (sessionContext?.renewed && !bearerToken && sessionId) {
+    setSessionCookie(response, sessionId, sessionContext.expiresAt)
+  }
+
   next()
 })
 
 const requireAuth = (request: Request, response: Response, next: NextFunction) => {
-  const typedRequest = request as RequestWithUser
-
-  if (!typedRequest.sessionUser) {
+  if (!(request as RequestWithUser).sessionUser) {
     response.status(401).json({ error: 'You need to sign in first.' })
     return
   }
@@ -543,20 +539,15 @@ const getAllowedRequestOrigins = (request: Request) => {
   return new Set([`http://${host}`, `https://${host}`])
 }
 
-const requireCsrfForUnsafeMethods = (request: Request, response: Response, next: NextFunction) => {
-  if (!unsafeHttpMethods.has(request.method) || csrfExemptPaths.has(request.path)) {
+app.use('/api', (request: Request, response: Response, next: NextFunction) => {
+  if (!unsafeHttpMethods.has(request.method) || csrfExemptPaths.has(request.originalUrl.split('?')[0])) {
     next()
     return
   }
 
   const typedRequest = request as RequestWithUser
 
-  if (!typedRequest.sessionUser) {
-    next()
-    return
-  }
-
-  if (typedRequest.authMode === 'mobile') {
+  if (!typedRequest.sessionUser || typedRequest.authMode === 'mobile') {
     next()
     return
   }
@@ -582,10 +573,11 @@ const requireCsrfForUnsafeMethods = (request: Request, response: Response, next:
   }
 
   next()
-}
+})
 
-app.use('/api', requireCsrfForUnsafeMethods)
-
+// The Android app is a different origin (https://localhost). It authenticates
+// with a bearer token, so no cookies are shared; Range and the exposed headers
+// let pdf.js stream large PDFs page by page instead of downloading them whole.
 app.use('/api', (request, response, next) => {
   const origin = request.get('origin')
 
@@ -596,9 +588,14 @@ app.use('/api', (request, response, next) => {
 
   response.setHeader('Access-Control-Allow-Origin', origin)
   response.setHeader('Access-Control-Allow-Credentials', 'false')
-  response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-CSRF-Token')
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-CSRF-Token, Range, If-None-Match')
   response.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS')
-  response.setHeader('Vary', 'Origin')
+  response.setHeader(
+    'Access-Control-Expose-Headers',
+    'Content-Length, Content-Range, Accept-Ranges, Content-Type, ETag, Content-Disposition',
+  )
+  response.setHeader('Access-Control-Max-Age', '600')
+  response.append('Vary', 'Origin')
 
   if (request.method === 'OPTIONS') {
     response.status(204).end()
@@ -607,32 +604,6 @@ app.use('/api', (request, response, next) => {
 
   next()
 })
-
-const setSessionCookie = (response: Response, sessionId: string, expiresAt: number) => {
-  response.setHeader(
-    'Set-Cookie',
-    serializeCookie(SESSION_COOKIE_NAME, sessionId, {
-      httpOnly: true,
-      sameSite: 'strict',
-      path: '/',
-      expires: new Date(expiresAt),
-      secure: useSecureSessionCookie,
-    }),
-  )
-}
-
-const clearSessionCookie = (response: Response) => {
-  response.setHeader(
-    'Set-Cookie',
-    serializeCookie(SESSION_COOKIE_NAME, '', {
-      httpOnly: true,
-      sameSite: 'strict',
-      path: '/',
-      expires: new Date(0),
-      secure: useSecureSessionCookie,
-    }),
-  )
-}
 
 const startFreshSession = (request: Request, response: Response, userId: string) => {
   const typedRequest = request as RequestWithUser
@@ -647,6 +618,13 @@ const startFreshSession = (request: Request, response: Response, userId: string)
 }
 
 const sendError = (response: Response, error: unknown, status = 400) => {
+  if (response.headersSent) {
+    if (!response.writableEnded) {
+      response.destroy()
+    }
+    return
+  }
+
   if (error instanceof RateLimitError) {
     response.setHeader('Retry-After', String(Math.max(1, Math.ceil(error.retryAfterMs / 1000))))
     response.status(429).json({ error: error.message })
@@ -706,122 +684,28 @@ const recordRateLimiterFailures = (
   }
 }
 
-const parseRangeHeader = (rangeHeader: string, fileSize: number) => {
-  const match = rangeHeader.match(/bytes=(\d*)-(\d*)/)
+const authenticate = async (request: Request, response: Response) => {
+  const username = String(request.body?.username || '')
+  const rateLimiters = getLoginRateLimiters(request, username)
 
-  if (!match) {
-    return null
-  }
-
-  const startText = match[1] || ''
-  const endText = match[2] || ''
-
-  if (!startText && !endText) {
-    return null
-  }
-
-  let start = startText ? Number(startText) : 0
-  let end = endText ? Number(endText) : fileSize - 1
-
-  if (!startText) {
-    const suffixLength = Number(endText)
-
-    if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
-      return null
+  try {
+    assertRateLimitersAllowed(rateLimiters)
+    const user = await loginUser(db, username, String(request.body?.password || ''))
+    clearRateLimitBuckets(db, rateLimiters.map((rateLimiter) => rateLimiter.key))
+    return user
+  } catch (error) {
+    if (!(error instanceof RateLimitError)) {
+      try {
+        recordRateLimiterFailures(rateLimiters)
+      } catch (rateLimitError) {
+        sendError(response, rateLimitError)
+        return null
+      }
     }
 
-    start = Math.max(fileSize - suffixLength, 0)
-    end = fileSize - 1
-  }
-
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start < 0 || end >= fileSize) {
+    sendError(response, error, 401)
     return null
   }
-
-  return { start, end }
-}
-
-const buildMediaEntityTag = (stats: fs.Stats) =>
-  `"${Math.round(stats.mtimeMs).toString(36)}-${stats.size.toString(36)}"`
-
-const requestMatchesMediaValidators = (request: Request, stats: fs.Stats, entityTag: string) => {
-  const ifNoneMatch = request.get('if-none-match')
-
-  if (ifNoneMatch && ifNoneMatch.split(',').map((value) => value.trim()).includes(entityTag)) {
-    return true
-  }
-
-  const ifModifiedSince = request.get('if-modified-since')
-
-  if (!ifModifiedSince) {
-    return false
-  }
-
-  const modifiedSince = Date.parse(ifModifiedSince)
-
-  return Number.isFinite(modifiedSince) && Math.floor(stats.mtimeMs / 1000) <= Math.floor(modifiedSince / 1000)
-}
-
-const sendMediaFile = async (
-  request: Request,
-  response: Response,
-  filePath: string,
-  rangeHeader?: string,
-) => {
-  const stats = await fsPromises.stat(filePath)
-  const contentType = mime.lookup(filePath) || 'application/octet-stream'
-  const safeFileName = encodeURIComponent(path.basename(filePath))
-  const entityTag = buildMediaEntityTag(stats)
-
-  if (!response.hasHeader('Cache-Control')) {
-    response.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate, no-transform')
-  }
-
-  response.setHeader('Accept-Ranges', 'bytes')
-  response.setHeader('ETag', entityTag)
-  response.setHeader('Last-Modified', stats.mtime.toUTCString())
-  response.setHeader('X-Content-Type-Options', 'nosniff')
-  response.setHeader('Vary', 'Cookie, Authorization')
-  response.setHeader(
-    'Content-Disposition',
-    `inline; filename*=UTF-8''${safeFileName}`,
-  )
-
-  if (!rangeHeader && requestMatchesMediaValidators(request, stats, entityTag)) {
-    response.status(304).end()
-    return
-  }
-
-  if (rangeHeader) {
-    const range = parseRangeHeader(rangeHeader, stats.size)
-
-    if (!range) {
-      response.status(416).setHeader('Content-Range', `bytes */${stats.size}`).end()
-      return
-    }
-
-    response.status(206)
-    response.setHeader('Content-Type', contentType)
-    response.setHeader('Content-Length', range.end - range.start + 1)
-    response.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${stats.size}`)
-    if (request.method === 'HEAD') {
-      response.end()
-      return
-    }
-
-    fs.createReadStream(filePath, { start: range.start, end: range.end }).pipe(response)
-    return
-  }
-
-  response.status(200)
-  response.setHeader('Content-Type', contentType)
-  response.setHeader('Content-Length', stats.size)
-  if (request.method === 'HEAD') {
-    response.end()
-    return
-  }
-
-  fs.createReadStream(filePath).pipe(response)
 }
 
 const hasCacheVersion = (version: unknown) => typeof version === 'string' && version.trim().length > 0
@@ -836,15 +720,7 @@ const setPrivateVersionedCacheHeaders = (response: Response, version: unknown) =
   response.setHeader('Vary', 'Cookie, Authorization')
 }
 
-app.get('/api/state', requireAuth, (request, response) => {
-  const typedRequest = request as RequestWithUser
-  response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
-})
-
-app.get('/api/bootstrap', (request, response) => {
-  const typedRequest = request as RequestWithUser
-  response.json(getBootstrapPayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
-})
+/* ---------------------------------------------------------------- health -- */
 
 const sendHealthResponse = (_request: Request, response: Response) => {
   response.setHeader('Cache-Control', 'no-store')
@@ -910,81 +786,73 @@ app.get('/healthz', sendHealthResponse)
 app.get('/api/ready', sendReadyResponse)
 app.get('/readyz', sendReadyResponse)
 
-app.get('/api/mobile/app.apk', (_request, response) => {
-  if (!fs.existsSync(androidApkPath)) {
-    response.status(404).json({ error: 'The Android app download is not available yet.' })
-    return
-  }
+/* ----------------------------------------------------------- android app -- */
 
-  const apkSize = fs.statSync(androidApkPath).size
-  response.setHeader('Content-Type', 'application/vnd.android.package-archive')
-  response.setHeader('Content-Disposition', 'attachment; filename="orbital-android.apk"')
-  response.setHeader('Content-Length', String(apkSize))
-  response.setHeader('Cache-Control', 'no-cache, max-age=0, must-revalidate')
-  response.sendFile(androidApkPath)
+app.get('/api/mobile/app.apk', async (request, response) => {
+  try {
+    const apk = await resolveAndroidApk(androidApkLocations)
+
+    if (!apk) {
+      response.status(404).json({ error: 'The Android app download is not available yet.' })
+      return
+    }
+
+    if (apk.kind === 'redirect') {
+      response.redirect(302, apk.url)
+      return
+    }
+
+    response.setHeader('Cache-Control', 'no-cache, max-age=0, must-revalidate')
+    await sendMediaFile(request, response, apk.filePath, {
+      stats: apk.stats,
+      contentType: 'application/vnd.android.package-archive',
+      fileName: 'orbital-android.apk',
+      disposition: 'attachment',
+    })
+  } catch (error) {
+    sendError(response, error, 404)
+  }
+})
+
+app.get('/api/mobile/app-info', requireAuth, async (_request, response) => {
+  try {
+    response.json(await getAndroidAppInfo(db, androidApkLocations))
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
+/* ------------------------------------------------------------------ auth -- */
+
+app.get('/api/state', requireAuth, (request, response) => {
+  response.json(getStatePayload(request, (request as RequestWithUser).sessionUser))
+})
+
+app.get('/api/bootstrap', (request, response) => {
+  const typedRequest = request as RequestWithUser
+  response.json(getBootstrapPayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
 })
 
 app.post('/api/auth/login', async (request, response) => {
-  const username = String(request.body?.username || '')
-  const rateLimiters = getLoginRateLimiters(request, username)
-  let user: Awaited<ReturnType<typeof loginUser>>
-
-  try {
-    assertRateLimitersAllowed(rateLimiters)
-    user = await loginUser(
-      db,
-      username,
-      String(request.body?.password || ''),
-    )
-  } catch (error) {
-    if (!(error instanceof RateLimitError)) {
-      try {
-        recordRateLimiterFailures(rateLimiters)
-      } catch (rateLimitError) {
-        sendError(response, rateLimitError)
-        return
-      }
-    }
-
-    sendError(response, error, 401)
+  const user = await authenticate(request, response)
+  if (!user) {
     return
   }
 
-  clearRateLimitBuckets(db, rateLimiters.map((rateLimiter) => rateLimiter.key))
-  const session = startFreshSession(request, response, user.id)
-  response.json(getStatePayload(user, session.csrfToken))
+  startFreshSession(request, response, user.id)
+  response.json(getStatePayload(request, user))
 })
 
 app.post('/api/mobile/auth/login', async (request, response) => {
-  const username = String(request.body?.username || '')
-  const rateLimiters = getLoginRateLimiters(request, username)
-  let user: Awaited<ReturnType<typeof loginUser>>
-
-  try {
-    assertRateLimitersAllowed(rateLimiters)
-    user = await loginUser(
-      db,
-      username,
-      String(request.body?.password || ''),
-    )
-  } catch (error) {
-    if (!(error instanceof RateLimitError)) {
-      try {
-        recordRateLimiterFailures(rateLimiters)
-      } catch (rateLimitError) {
-        sendError(response, rateLimitError)
-        return
-      }
-    }
-
-    sendError(response, error, 401)
+  const user = await authenticate(request, response)
+  if (!user) {
     return
   }
 
-  clearRateLimitBuckets(db, rateLimiters.map((rateLimiter) => rateLimiter.key))
   const session = createSession(db, user.id)
+  ;(request as RequestWithUser).sessionCsrfToken = session.csrfToken
   response.json({
-    ...getStatePayload(user, session.csrfToken),
+    ...getStatePayload(request, user),
     accessToken: session.sessionId,
     accessTokenExpiresAt: session.expiresAt,
   })
@@ -1007,16 +875,15 @@ app.post('/api/auth/signup', async (request, response) => {
       String(request.body?.username || ''),
       String(request.body?.password || ''),
     )
-    const session = startFreshSession(request, response, user.id)
-    response.json(getStatePayload(user, session.csrfToken))
+    startFreshSession(request, response, user.id)
+    response.json(getStatePayload(request, user))
   } catch (error) {
     sendError(response, error)
   }
 })
 
 app.post('/api/auth/logout', (request, response) => {
-  const typedRequest = request as RequestWithUser
-  clearSession(db, typedRequest.sessionId)
+  clearSession(db, (request as RequestWithUser).sessionId)
   clearSessionCookie(response)
   response.json({ ok: true })
 })
@@ -1024,7 +891,7 @@ app.post('/api/auth/logout', (request, response) => {
 app.post('/api/auth/change-password', requireAuth, async (request, response) => {
   try {
     const typedRequest = request as RequestWithUser
-    const sessionUser = typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>
+    const sessionUser = currentUser(request)
     const rateLimitKey = createRateLimitKey('change-password', sessionUser.id, getClientAddress(request))
 
     assertRateLimitAllowed(db, rateLimitKey)
@@ -1046,16 +913,18 @@ app.post('/api/auth/change-password', requireAuth, async (request, response) => 
       throw error
     }
 
-    response.json(getStatePayload(sessionUser, typedRequest.sessionCsrfToken))
+    response.json(getStatePayload(request, sessionUser))
   } catch (error) {
     sendError(response, error)
   }
 })
 
+/* --------------------------------------------------------------- library -- */
+
 app.get('/api/search', requireAuth, (request, response) => {
   try {
-    const query = String(request.query.q || '').trim()
-    const scope = String(request.query.scope || 'all') as 'all' | 'anime' | 'manga' | 'novels' | 'books' | 'magazines'
+    const query = queryText(request, 'q').trim()
+    const scope = (queryText(request, 'scope') || 'all') as 'all' | 'anime' | 'manga' | 'novels' | 'books' | 'magazines'
 
     if (!query) {
       response.json({ results: [] })
@@ -1070,9 +939,7 @@ app.get('/api/search', requireAuth, (request, response) => {
 
 app.get('/api/series/:seriesId', requireAuth, (request, response) => {
   try {
-    response.json({
-      series: getSeriesDetail(db, request.params.seriesId),
-    })
+    response.json({ series: getSeriesDetail(db, routeParam(request, 'seriesId')) })
   } catch (error) {
     sendError(response, error, 404)
   }
@@ -1080,8 +947,9 @@ app.get('/api/series/:seriesId', requireAuth, (request, response) => {
 
 app.get('/api/media-tracks/:entryId', requireAuth, async (request, response) => {
   try {
-    const sidecarTracks = getEntrySidecarMediaTracks(db, request.params.entryId)
-    const embeddedTracks = await getEntryEmbeddedMediaTracks(db, request.params.entryId)
+    const entryId = routeParam(request, 'entryId')
+    const sidecarTracks = getEntrySidecarMediaTracks(db, entryId)
+    const embeddedTracks = await getEntryEmbeddedMediaTracks(db, entryId)
 
     response.json({
       mediaTracks: {
@@ -1094,21 +962,21 @@ app.get('/api/media-tracks/:entryId', requireAuth, async (request, response) => 
   }
 })
 
+const readProgressPayload = (request: Request): ReadingProgressPayload => ({
+  seriesId: String(request.body?.seriesId || ''),
+  entryId: String(request.body?.entryId || ''),
+  entryIndex: Number(request.body?.entryIndex || 0),
+  progress: String(request.body?.progress || ''),
+  cue: String(request.body?.cue || ''),
+  position: request.body?.position,
+  lastSeen: typeof request.body?.lastSeen === 'string' ? request.body.lastSeen : undefined,
+})
+
 app.post('/api/bookmarks', requireAuth, (request, response) => {
   try {
-    const typedRequest = request as RequestWithUser
-    response.json(
-      saveBookmark(db, typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>, {
-        seriesId: String(request.body?.seriesId || ''),
-        entryId: String(request.body?.entryId || ''),
-        entryIndex: Number(request.body?.entryIndex || 0),
-        category: request.body?.category,
-        progress: String(request.body?.progress || ''),
-        cue: String(request.body?.cue || ''),
-        position: request.body?.position,
-        lastSeen: typeof request.body?.lastSeen === 'string' ? request.body.lastSeen : undefined,
-      }),
-    )
+    const user = currentUser(request)
+    const payload = readProgressPayload(request)
+    response.json(isCompactRequest(request) ? saveReadingProgress(db, user, payload) : saveBookmark(db, user, payload))
   } catch (error) {
     sendError(response, error)
   }
@@ -1116,14 +984,8 @@ app.post('/api/bookmarks', requireAuth, (request, response) => {
 
 app.delete('/api/bookmarks/:seriesId', requireAuth, (request, response) => {
   try {
-    const typedRequest = request as RequestWithUser
-    response.json(
-      removeBookmark(
-        db,
-        typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>,
-        request.params.seriesId,
-      ),
-    )
+    const result = removeBookmark(db, currentUser(request), routeParam(request, 'seriesId'))
+    response.json(isCompactRequest(request) ? { ok: true } : result)
   } catch (error) {
     sendError(response, error)
   }
@@ -1131,13 +993,8 @@ app.delete('/api/bookmarks/:seriesId', requireAuth, (request, response) => {
 
 app.get('/api/reader-preferences/:seriesId', requireAuth, (request, response) => {
   try {
-    const typedRequest = request as RequestWithUser
     response.json({
-      preference: getReaderPreference(
-        db,
-        typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>,
-        request.params.seriesId,
-      ),
+      preference: getReaderPreference(db, currentUser(request), routeParam(request, 'seriesId')),
     })
   } catch (error) {
     sendError(response, error, 404)
@@ -1146,14 +1003,8 @@ app.get('/api/reader-preferences/:seriesId', requireAuth, (request, response) =>
 
 app.put('/api/reader-preferences/:seriesId', requireAuth, (request, response) => {
   try {
-    const typedRequest = request as RequestWithUser
     response.json({
-      preference: saveReaderPreference(
-        db,
-        typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>,
-        request.params.seriesId,
-        request.body?.settings,
-      ),
+      preference: saveReaderPreference(db, currentUser(request), routeParam(request, 'seriesId'), request.body?.settings),
     })
   } catch (error) {
     sendError(response, error)
@@ -1162,17 +1013,25 @@ app.put('/api/reader-preferences/:seriesId', requireAuth, (request, response) =>
 
 app.post('/api/comments', requireAuth, (request, response) => {
   try {
-    const typedRequest = request as RequestWithUser
-    response.json({
-      series: addComment(db, typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>, {
-        seriesId: String(request.body?.seriesId || ''),
-        text: String(request.body?.text || ''),
-      }),
-    })
+    const payload = {
+      seriesId: String(request.body?.seriesId || ''),
+      text: String(request.body?.text || ''),
+    }
+    response.json(
+      isCompactRequest(request)
+        ? { comments: addCommentCompact(db, currentUser(request), payload) }
+        : { series: addComment(db, currentUser(request), payload) },
+    )
   } catch (error) {
     sendError(response, error)
   }
 })
+
+/* ----------------------------------------------------------------- admin -- */
+
+const respondWithState = (request: Request, response: Response) => {
+  response.json(getStatePayload(request, (request as RequestWithUser).sessionUser))
+}
 
 app.post('/api/admin/roots', requireAdmin, (request, response) => {
   try {
@@ -1180,8 +1039,7 @@ app.post('/api/admin/roots', requireAdmin, (request, response) => {
       label: String(request.body?.label || '').trim(),
       path: String(request.body?.path || '').trim(),
     })
-    const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    respondWithState(request, response)
   } catch (error) {
     sendError(response, error)
   }
@@ -1189,9 +1047,8 @@ app.post('/api/admin/roots', requireAdmin, (request, response) => {
 
 app.delete('/api/admin/roots/:rootId', requireAdmin, (request, response) => {
   try {
-    removeSourceRoot(db, config, request.params.rootId)
-    const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    removeSourceRoot(db, config, routeParam(request, 'rootId'))
+    respondWithState(request, response)
   } catch (error) {
     sendError(response, error)
   }
@@ -1200,11 +1057,7 @@ app.delete('/api/admin/roots/:rootId', requireAdmin, (request, response) => {
 app.get('/api/admin/directories', requireAdmin, (request, response) => {
   try {
     response.json(
-      listDirectoriesForRoot(
-        db,
-        String(request.query.rootId || ''),
-        String(request.query.relativePath || ''),
-      ),
+      listDirectoriesForRoot(db, queryText(request, 'rootId'), queryText(request, 'relativePath')),
     )
   } catch (error) {
     sendError(response, error)
@@ -1219,8 +1072,7 @@ app.post('/api/admin/sources', requireAdmin, async (request, response) => {
       category: request.body?.category,
     })
     void startBackgroundScan(createdSource.sourceId)
-    const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    respondWithState(request, response)
   } catch (error) {
     sendError(response, error)
   }
@@ -1228,12 +1080,10 @@ app.post('/api/admin/sources', requireAdmin, async (request, response) => {
 
 app.patch('/api/admin/sources/:sourceId', requireAdmin, (request, response) => {
   try {
-    updateSourceFolderCategory(db, config, request.params.sourceId, {
-      category: request.body?.category,
-    })
-    void startBackgroundScan(request.params.sourceId)
-    const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    const sourceId = routeParam(request, 'sourceId')
+    updateSourceFolderCategory(db, config, sourceId, { category: request.body?.category })
+    void startBackgroundScan(sourceId)
+    respondWithState(request, response)
   } catch (error) {
     sendError(response, error)
   }
@@ -1241,19 +1091,17 @@ app.patch('/api/admin/sources/:sourceId', requireAdmin, (request, response) => {
 
 app.delete('/api/admin/sources/:sourceId', requireAdmin, (request, response) => {
   try {
-    removeSourceFolder(db, request.params.sourceId)
-    const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    removeSourceFolder(db, routeParam(request, 'sourceId'))
+    respondWithState(request, response)
   } catch (error) {
     sendError(response, error)
   }
 })
 
-app.post('/api/admin/scan', requireAdmin, async (request, response) => {
+app.post('/api/admin/scan', requireAdmin, (request, response) => {
   try {
     void startBackgroundScan(request.body?.sourceId ? String(request.body.sourceId) : undefined)
-    const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    respondWithState(request, response)
   } catch (error) {
     sendError(response, error)
   }
@@ -1289,22 +1137,89 @@ app.get('/api/admin/scan/events', requireAdmin, (request, response) => {
   })
 })
 
+app.post('/api/admin/users', requireAdmin, async (request, response) => {
+  try {
+    await createUserAccount(db, {
+      username: String(request.body?.username || ''),
+      password: String(request.body?.password || ''),
+      role: String(request.body?.role || 'member'),
+    })
+    respondWithState(request, response)
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
+app.delete('/api/admin/users/:userId', requireAdmin, (request, response) => {
+  try {
+    deleteUserAccount(db, config, currentUser(request), routeParam(request, 'userId'))
+    respondWithState(request, response)
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
 app.post('/api/admin/users/:userId/reset-password', requireAdmin, async (request, response) => {
   try {
-    const typedRequest = request as RequestWithUser
-    const adminUser = typedRequest.sessionUser as NonNullable<RequestWithUser['sessionUser']>
+    const adminUser = currentUser(request)
+    const userId = routeParam(request, 'userId')
 
     consumeRateLimit(
       db,
-      createRateLimitKey('admin-reset-password', adminUser.id, request.params.userId, getClientAddress(request)),
+      createRateLimitKey('admin-reset-password', adminUser.id, userId, getClientAddress(request)),
       adminResetPolicy,
     )
-    await resetUserPassword(
-      db,
-      request.params.userId,
-      String(request.body?.password || ''),
-    )
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    await resetUserPassword(db, userId, String(request.body?.password || ''))
+    respondWithState(request, response)
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
+app.get('/api/admin/settings', requireAdmin, async (_request, response) => {
+  try {
+    response.json({
+      remoteMetadata: getRemoteMetadataSetting(db),
+      openSignup: config.openSignup,
+      androidApp: await getAndroidAppInfo(db, androidApkLocations),
+    })
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
+app.put('/api/admin/settings', requireAdmin, async (request, response) => {
+  try {
+    if (typeof request.body?.remoteMetadataEnabled === 'boolean') {
+      setRemoteMetadataEnabled(db, request.body.remoteMetadataEnabled)
+    }
+
+    response.json({
+      remoteMetadata: getRemoteMetadataSetting(db),
+      openSignup: config.openSignup,
+      androidApp: await getAndroidAppInfo(db, androidApkLocations),
+    })
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
+app.put('/api/admin/android-app', requireAdmin, async (request, response) => {
+  try {
+    await saveUploadedAndroidApk(db, androidApkLocations, request, {
+      versionName: queryText(request, 'versionName'),
+      versionCode: queryText(request, 'versionCode'),
+    })
+    response.json({ androidApp: await getAndroidAppInfo(db, androidApkLocations) })
+  } catch (error) {
+    sendError(response, error)
+  }
+})
+
+app.delete('/api/admin/android-app', requireAdmin, async (_request, response) => {
+  try {
+    await deleteUploadedAndroidApk(db, androidApkLocations)
+    response.json({ androidApp: await getAndroidAppInfo(db, androidApkLocations) })
   } catch (error) {
     sendError(response, error)
   }
@@ -1312,7 +1227,7 @@ app.post('/api/admin/users/:userId/reset-password', requireAdmin, async (request
 
 app.post('/api/admin/series/:seriesId/metadata-override', requireAdmin, async (request, response) => {
   try {
-    await saveMetadataOverride(db, config, request.params.seriesId, {
+    await saveMetadataOverride(db, config, routeParam(request, 'seriesId'), {
       title: typeof request.body?.title === 'string' ? request.body.title : null,
       year:
         request.body?.year === '' || request.body?.year == null
@@ -1327,8 +1242,7 @@ app.post('/api/admin/series/:seriesId/metadata-override', requireAdmin, async (r
       coverImageUrl: typeof request.body?.coverImageUrl === 'string' ? request.body.coverImageUrl : null,
       clearCover: request.body?.clearCover === true,
     })
-    const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    respondWithState(request, response)
   } catch (error) {
     sendError(response, error)
   }
@@ -1336,9 +1250,8 @@ app.post('/api/admin/series/:seriesId/metadata-override', requireAdmin, async (r
 
 app.delete('/api/admin/series/:seriesId/metadata-override', requireAdmin, async (request, response) => {
   try {
-    await clearMetadataOverride(db, config, request.params.seriesId)
-    const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    await clearMetadataOverride(db, config, routeParam(request, 'seriesId'))
+    respondWithState(request, response)
   } catch (error) {
     sendError(response, error)
   }
@@ -1346,25 +1259,24 @@ app.delete('/api/admin/series/:seriesId/metadata-override', requireAdmin, async 
 
 app.post('/api/admin/series/:seriesId/metadata-refresh', requireAdmin, async (request, response) => {
   try {
-    await refreshSeriesMetadata(db, config, request.params.seriesId)
-    const typedRequest = request as RequestWithUser
-    response.json(getStatePayload(typedRequest.sessionUser, typedRequest.sessionCsrfToken))
+    await refreshSeriesMetadata(db, config, routeParam(request, 'seriesId'))
+    respondWithState(request, response)
   } catch (error) {
     sendError(response, error)
   }
 })
 
-app.get('/api/offline/capabilities', requireAuth, (request, response) => {
-  void request
+/* --------------------------------------------------------------- offline -- */
+
+app.get('/api/offline/capabilities', requireAuth, (_request, response) => {
   response.setHeader('Cache-Control', 'no-store')
   response.json(getOfflineCapabilities(db, config.appName))
 })
 
 app.post('/api/offline/estimate', requireAuth, async (request, response) => {
   try {
-    const typedRequest = request as RequestWithUser
     response.setHeader('Cache-Control', 'no-store')
-    response.json(await buildOfflineEstimate(db, typedRequest.sessionUser, request.body?.target))
+    response.json(await buildOfflineEstimate(db, currentUser(request), request.body?.target))
   } catch (error) {
     sendError(response, error)
   }
@@ -1372,9 +1284,8 @@ app.post('/api/offline/estimate', requireAuth, async (request, response) => {
 
 app.post('/api/offline/manifests', requireAuth, async (request, response) => {
   try {
-    const typedRequest = request as RequestWithUser
     response.setHeader('Cache-Control', 'no-store')
-    response.json(await buildOfflineManifest(db, typedRequest.sessionUser, request.body?.target))
+    response.json(await buildOfflineManifest(db, currentUser(request), request.body?.target))
   } catch (error) {
     sendError(response, error)
   }
@@ -1396,12 +1307,7 @@ const requestMatchesEntityTag = (request: Request, entityTag: string) =>
 
 const sendOfflineResource = async (request: Request, response: Response) => {
   try {
-    const typedRequest = request as RequestWithUser
-    const resource = await resolveOfflineResource(
-      db,
-      typedRequest.sessionUser,
-      request.params.resourceKey,
-    )
+    const resource = await resolveOfflineResource(db, currentUser(request), routeParam(request, 'resourceKey'))
 
     setOfflineResourceHeaders(response, resource.entityTag)
 
@@ -1411,44 +1317,37 @@ const sendOfflineResource = async (request: Request, response: Response) => {
     }
 
     if (resource.kind === 'file') {
-      response.setHeader('Content-Type', resource.contentType)
-      await sendMediaFile(request, response, resource.filePath, request.headers.range)
+      await sendMediaFile(request, response, resource.filePath, {
+        contentType: resource.contentType,
+        rangeHeader: request.headers.range,
+      })
       return
     }
 
-    response.setHeader('Content-Type', resource.page.contentType)
-    response.setHeader('Content-Length', resource.page.uncompressedSize)
-    response.setHeader(
-      'Content-Disposition',
-      `inline; filename*=UTF-8''${encodeURIComponent(resource.page.fileName)}`,
-    )
-
-    if (request.method === 'HEAD') {
-      response.status(200).end()
-      return
-    }
-
-    await sendCbzPageImage(response, resource.filePath, resource.page)
+    const bytes = await readCbzPage(resource.filePath, resource.stats, resource.manifest, resource.page)
+    sendCbzPageBytes(response, resource.page, bytes, request.method === 'HEAD')
   } catch (error) {
-    if (!response.headersSent) {
-      const message = error instanceof Error ? error.message : ''
-      sendError(response, error, message.includes('stale') ? 409 : 404)
-    }
+    const message = error instanceof Error ? error.message : ''
+    sendError(response, error, message.includes('stale') ? 409 : 404)
   }
 }
 
 app.head('/api/offline/manifests/:manifestId/resources/:resourceKey', requireAuth, sendOfflineResource)
 app.get('/api/offline/manifests/:manifestId/resources/:resourceKey', requireAuth, sendOfflineResource)
 
+/* ----------------------------------------------------------------- media -- */
+
 app.get('/api/media/cover/:seriesId', requireAuth, async (request, response) => {
   try {
-    const cover = resolveSeriesCoverPath(db, request.params.seriesId)
-    const coverPath = request.query.variant === 'card'
-      ? await resolveCardCoverPath(coversDirectory, request.params.seriesId, cover.filePath)
+    const seriesId = routeParam(request, 'seriesId')
+    const cover = resolveSeriesCoverPath(db, seriesId)
+    const coverPath = queryText(request, 'variant') === 'card'
+      ? await resolveCardCoverPath(coversDirectory, seriesId, cover.filePath)
       : cover.filePath
     setPrivateVersionedCacheHeaders(response, request.query.v)
-    response.setHeader('Content-Type', coverPath === cover.filePath ? cover.mimeType : 'image/webp')
-    await sendMediaFile(request, response, coverPath)
+    await sendMediaFile(request, response, coverPath, {
+      contentType: coverPath === cover.filePath ? cover.mimeType : 'image/webp',
+    })
   } catch (error) {
     sendError(response, error, 404)
   }
@@ -1456,10 +1355,9 @@ app.get('/api/media/cover/:seriesId', requireAuth, async (request, response) => 
 
 app.get('/api/media/banner/:seriesId', requireAuth, async (request, response) => {
   try {
-    const banner = resolveSeriesBannerPath(db, request.params.seriesId)
+    const banner = resolveSeriesBannerPath(db, routeParam(request, 'seriesId'))
     setPrivateVersionedCacheHeaders(response, request.query.v)
-    response.setHeader('Content-Type', banner.mimeType)
-    await sendMediaFile(request, response, banner.filePath)
+    await sendMediaFile(request, response, banner.filePath, { contentType: banner.mimeType })
   } catch (error) {
     sendError(response, error, 404)
   }
@@ -1467,16 +1365,14 @@ app.get('/api/media/banner/:seriesId', requireAuth, async (request, response) =>
 
 app.get('/api/media/cbz/:entryId/manifest', requireAuth, async (request, response) => {
   try {
-    const entry = resolveEntryMediaFile(db, request.params.entryId)
+    const entry = await resolveEntryMediaFile(db, routeParam(request, 'entryId'))
 
     if (entry.format !== 'cbz') {
       throw new Error('Requested entry is not a CBZ archive.')
     }
 
-    const stats = await fsPromises.stat(entry.filePath)
-    const currentVersion = getCbzMediaVersion(stats)
-
-    const archive = await loadCbzArchiveManifest(entry.filePath, stats)
+    const currentVersion = getCbzMediaVersion(entry.stats)
+    const archive = await loadCbzArchiveManifest(entry.filePath, entry.stats)
     const versionQuery = `?v=${encodeURIComponent(currentVersion)}`
     if (isCurrentMediaVersion(request.query, currentVersion)) {
       setPrivateVersionedCacheHeaders(response, currentVersion)
@@ -1490,6 +1386,7 @@ app.get('/api/media/cbz/:entryId/manifest', requireAuth, async (request, respons
         archiveIndex: page.archiveIndex,
         name: page.name,
         pageNumber: page.pageNumber,
+        size: page.uncompressedSize,
         url: `/api/media/cbz/${encodeURIComponent(entry.entryId)}/pages/${page.pageNumber}${versionQuery}`,
       })),
     })
@@ -1500,20 +1397,19 @@ app.get('/api/media/cbz/:entryId/manifest', requireAuth, async (request, respons
 
 app.get('/api/media/cbz/:entryId/pages/:pageNumber', requireAuth, async (request, response) => {
   try {
-    const entry = resolveEntryMediaFile(db, request.params.entryId)
+    const entry = await resolveEntryMediaFile(db, routeParam(request, 'entryId'))
 
     if (entry.format !== 'cbz') {
       throw new Error('Requested entry is not a CBZ archive.')
     }
 
-    const pageNumber = Number(request.params.pageNumber)
+    const pageNumber = Number(routeParam(request, 'pageNumber'))
 
     if (!Number.isInteger(pageNumber) || pageNumber < 1) {
       throw new Error('Requested CBZ page was not found.')
     }
 
-    const stats = await fsPromises.stat(entry.filePath)
-    const currentVersion = getCbzMediaVersion(stats)
+    const currentVersion = getCbzMediaVersion(entry.stats)
 
     if (isStaleMediaVersion(request.query, currentVersion)) {
       response.setHeader('Cache-Control', 'no-store')
@@ -1521,29 +1417,31 @@ app.get('/api/media/cbz/:entryId/pages/:pageNumber', requireAuth, async (request
       return
     }
 
-    const archive = await loadCbzArchiveManifest(entry.filePath, stats)
+    const archive = await loadCbzArchiveManifest(entry.filePath, entry.stats)
     const page = archive.pages[pageNumber - 1]
 
     if (!page) {
       throw new Error('Requested CBZ page was not found.')
     }
 
+    const bytes = await readCbzPage(entry.filePath, entry.stats, archive, page)
     setPrivateVersionedCacheHeaders(
       response,
       isCurrentMediaVersion(request.query, currentVersion) ? currentVersion : '',
     )
-    await sendCbzPageImage(response, entry.filePath, page)
+    sendCbzPageBytes(response, page, bytes, request.method === 'HEAD')
   } catch (error) {
-    if (!response.headersSent) {
-      sendError(response, error, 404)
-    }
+    sendError(response, error, 404)
   }
 })
 
 app.get('/api/media/file/:entryId', requireAuth, async (request, response) => {
   try {
-    const filePath = resolveEntryFilePath(db, request.params.entryId)
-    await sendMediaFile(request, response, filePath, request.headers.range)
+    const entry = await resolveEntryMediaFile(db, routeParam(request, 'entryId'))
+    await sendMediaFile(request, response, entry.filePath, {
+      stats: entry.stats,
+      rangeHeader: request.headers.range,
+    })
   } catch (error) {
     sendError(response, error, 404)
   }
@@ -1551,15 +1449,18 @@ app.get('/api/media/file/:entryId', requireAuth, async (request, response) => {
 
 app.get('/api/media/track/:entryId/:kind/:trackId', requireAuth, async (request, response) => {
   try {
-    const kind = request.params.kind === 'audio' ? 'audio' : request.params.kind === 'subtitle' ? 'subtitle' : null
+    const entryId = routeParam(request, 'entryId')
+    const trackId = routeParam(request, 'trackId')
+    const kindParam = routeParam(request, 'kind')
+    const kind = kindParam === 'audio' ? 'audio' : kindParam === 'subtitle' ? 'subtitle' : null
 
     if (!kind) {
       throw new Error('Unsupported media track kind.')
     }
 
-    if (request.params.trackId.startsWith('embedded-')) {
+    if (trackId.startsWith('embedded-')) {
       if (kind === 'audio') {
-        const embeddedAudio = await streamEmbeddedAudioTrack(db, request.params.entryId, request.params.trackId)
+        const embeddedAudio = await streamEmbeddedAudioTrack(db, entryId, trackId)
         response.status(200)
         response.setHeader('Content-Type', embeddedAudio.contentType)
         response.setHeader('Cache-Control', 'no-store')
@@ -1583,7 +1484,7 @@ app.get('/api/media/track/:entryId/:kind/:trackId', requireAuth, async (request,
         return
       }
 
-      const embeddedSubtitle = await renderEmbeddedSubtitleTrack(db, request.params.entryId, request.params.trackId)
+      const embeddedSubtitle = await renderEmbeddedSubtitleTrack(db, entryId, trackId)
       response.status(200)
       response.setHeader('Content-Type', 'text/vtt; charset=utf-8')
       response.setHeader('Cache-Control', 'no-store')
@@ -1592,12 +1493,12 @@ app.get('/api/media/track/:entryId/:kind/:trackId', requireAuth, async (request,
     }
 
     if (kind === 'audio') {
-      const track = resolveEntryTrack(db, request.params.entryId, kind, request.params.trackId)
-      await sendMediaFile(request, response, track.filePath, request.headers.range)
+      const track = await resolveEntryTrack(db, entryId, kind, trackId)
+      await sendMediaFile(request, response, track.filePath, { rangeHeader: request.headers.range })
       return
     }
 
-    const trackPayload = await renderSubtitleTrackForBrowser(db, request.params.entryId, request.params.trackId)
+    const trackPayload = await renderSubtitleTrackForBrowser(db, entryId, trackId)
     response.status(200)
     response.setHeader('Content-Type', 'text/vtt; charset=utf-8')
     response.setHeader('Cache-Control', 'no-store')
@@ -1606,6 +1507,12 @@ app.get('/api/media/track/:entryId/:kind/:trackId', requireAuth, async (request,
     sendError(response, error, 404)
   }
 })
+
+app.use('/api', (_request, response) => {
+  response.status(404).json({ error: 'Not found.' })
+})
+
+/* ---------------------------------------------------------------- client -- */
 
 const distDirectory = path.join(appRoot, 'dist')
 if (fs.existsSync(distDirectory)) {
@@ -1645,9 +1552,17 @@ app.use((error: unknown, _request: Request, response: Response, next: NextFuncti
   sendError(response, error, 500)
 })
 
+/* --------------------------------------------------------------- startup -- */
+
+process.on('unhandledRejection', (reason) => {
+  if (!isClientAbortError(reason)) {
+    console.error('Unhandled promise rejection:', reason)
+  }
+})
+
 ensureConfiguredSourceRoot(db, config)
 await bootstrapAdminUser(db, config)
-await maybeSeedDemoContent(db, config)
+const demoSeedNeedsScan = await maybeSeedDemoContent(db, config)
 
 const httpServer = app.listen(port, () => {
   console.log(`Orbital Library server listening on http://127.0.0.1:${port}`)
@@ -1670,12 +1585,35 @@ if (interruptedScanToResume) {
       },
     )
   }, resumeDelayMs)
+} else if (demoSeedNeedsScan) {
+  void startBackgroundScan()
 }
 
+let stopping = false
+
 const stopServer = () => {
+  if (stopping) {
+    return
+  }
+  stopping = true
+
+  for (const client of scanEventClients) {
+    client.end()
+  }
+  scanEventClients.clear()
+  shutdownMediaWorker()
+
+  const forceExit = setTimeout(() => {
+    httpServer.closeAllConnections()
+    process.exit(0)
+  }, 8000)
+  forceExit.unref()
+
   httpServer.close(() => {
     db.close()
+    process.exit(0)
   })
+  httpServer.closeIdleConnections()
 }
 
 process.once('SIGINT', stopServer)

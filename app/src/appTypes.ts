@@ -6,7 +6,7 @@ export type ViewId = 'bookmarks' | 'library' | 'search' | 'downloads' | 'series'
 export type SeriesTabId = 'overview' | 'entries' | 'comments'
 export type ScopeId = 'all' | CategoryId
 export type Role = 'admin' | 'member'
-export type EntryFormat = 'video' | 'cbz' | 'epub' | 'pdf' | 'md' | 'html' | 'txt'
+export type EntryFormat = 'video' | 'cbz' | 'epub' | 'pdf' | 'md' | 'html' | 'txt' | 'mobi'
 export type ReaderViewMode = 'single' | 'spread'
 export type ReaderLocationType = 'page' | 'percent'
 export type ReadingStyle = 'book' | 'manga' | 'webtoon' | 'text'
@@ -66,6 +66,8 @@ export type SavedReadingPosition = {
   locationType?: ReaderLocationType
   progressLabel?: string
   cueLabel?: string
+  /** Opaque, format-specific exact location (an EPUB CFI, for example). */
+  locator?: string
 }
 
 export type SessionUser = {
@@ -128,7 +130,12 @@ export type SeriesSummary = {
   progressLabel: string
   description: string
   folder: string
+  /** Bounded card thumbnail; null when the client should draw a typographic cover. */
   coverUrl: string | null
+  /** Full-size cover for large displays (series page). */
+  coverImageUrl?: string | null
+  /** When the series first appeared in the library. */
+  addedAt?: string | null
   bannerUrl: string | null
   coverSource: string
   metadataSource: string
@@ -325,8 +332,12 @@ export type SourceFolder = {
 export type UserSummary = {
   id: string
   name: string
+  /** Display label kept for app versions up to 1.23. */
   role: string
+  roleId?: Role
   status: string
+  createdAt?: string | null
+  lastReadAt?: string | null
 }
 
 export type MetadataQueueItem = {
@@ -351,6 +362,10 @@ export type AppState = {
   scanSummary: ScanSummary
   scanStatus: ScanStatus
   library: SeriesSummary[]
+  /** Fingerprint of the library summaries (null when signed out). */
+  libraryRevision?: string | null
+  /** True when the client already had this revision and `library` was omitted. */
+  libraryUnchanged?: boolean
   bookmarks: Bookmark[]
   readingPositions: Record<string, SavedReadingPosition>
   sourceRoots: SourceRoot[]

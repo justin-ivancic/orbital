@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import type fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import mime from 'mime-types'
 import type {
@@ -16,6 +17,7 @@ import type {
 import {
   getCbzMediaVersion,
   loadCbzArchiveManifest,
+  type CbzArchiveManifest,
   type CbzArchivePage,
 } from './cbzArchive'
 import type { OrbitalDatabase } from './database'
@@ -60,6 +62,8 @@ export type ResolvedOfflineResource =
   | {
       kind: 'cbz-page'
       filePath: string
+      stats: fs.Stats
+      manifest: CbzArchiveManifest
       page: CbzArchivePage
       entityTag: string
       version: string
@@ -255,6 +259,26 @@ const getManifestIdentity = (
   }
 }
 
+const mapWithConcurrency = async <Item, Result>(
+  items: Item[],
+  concurrency: number,
+  work: (item: Item) => Promise<Result>,
+) => {
+  const results = new Array<Result>(items.length)
+  let nextIndex = 0
+
+  const runWorker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await work(items[index])
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, runWorker))
+  return results
+}
+
 const buildFileResource = (
   manifestId: string,
   userScope: string,
@@ -313,9 +337,17 @@ export const buildOfflineManifest = async (
   const resources: OfflineDownloadResource[] = []
   const manifestEntries: OfflineManifestEntry[] = []
 
-  for (const entry of entries) {
-    if (entry.format === 'cbz') {
-      const cbzPackage = await buildCbzEntryResources(manifestId, userScope, entry)
+  // Archive directories are read in parallel (each is a couple of reads on a
+  // network mount); results are then assembled in series order.
+  const cbzPackages = await mapWithConcurrency(
+    entries,
+    6,
+    (entry) => (entry.format === 'cbz' ? buildCbzEntryResources(manifestId, userScope, entry) : Promise.resolve(null)),
+  )
+
+  for (const [index, entry] of entries.entries()) {
+    const cbzPackage = cbzPackages[index]
+    if (cbzPackage) {
       resources.push(...cbzPackage.resources)
       manifestEntries.push({
         entryId: entry.entryId,
@@ -474,6 +506,8 @@ export const resolveOfflineResource = async (
     return {
       kind: 'cbz-page',
       filePath: entry.filePath,
+      stats,
+      manifest: archive,
       page,
       entityTag: `"offline-${sha256(`${entry.entryId}:${payload.p}:${currentVersion}`).slice(0, 24)}"`,
       version: currentVersion,

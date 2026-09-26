@@ -14,6 +14,9 @@ export const openDatabase = (dataDirectory: string) => {
   const db = new Database(databasePath)
 
   db.pragma('journal_mode = WAL')
+  // In WAL mode NORMAL only fsyncs at checkpoints: the database stays
+  // consistent after a crash and scans avoid one fsync per small write.
+  db.pragma('synchronous = NORMAL')
   db.pragma('foreign_keys = ON')
   db.pragma('busy_timeout = 5000')
 
@@ -238,6 +241,7 @@ export const openDatabase = (dataDirectory: string) => {
   ensureColumn('entries', 'episode_number', 'INTEGER')
   ensureColumn('entries', 'sort_order', 'REAL NOT NULL DEFAULT 0')
   ensureColumn('bookmarks', 'entry_index', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('reading_positions', 'locator', 'TEXT')
   ensureColumn('bookmarks', 'category', "TEXT NOT NULL DEFAULT 'anime'")
   ensureColumn('source_folders', 'relative_path', "TEXT NOT NULL DEFAULT ''")
   ensureColumn('source_folders', 'item_count', 'INTEGER NOT NULL DEFAULT 0')
@@ -435,6 +439,21 @@ export const openDatabase = (dataDirectory: string) => {
       db.pragma('foreign_keys = ON')
     }
   }
+
+  // Columns added after the category migration above must be ensured here,
+  // because that migration rebuilds the tables from an explicit column list.
+  ensureColumn('series', 'local_metadata_version', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('entries', 'page_count', 'INTEGER')
+
+  // Kindle files used to be indexed as plain text and opened as binary noise.
+  db.prepare(
+    `
+      UPDATE entries
+      SET format = 'mobi'
+      WHERE format = 'txt'
+        AND (lower(file_path) LIKE '%.mobi' OR lower(file_path) LIKE '%.azw3' OR lower(file_path) LIKE '%.azw')
+    `,
+  ).run()
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS scan_series_checkpoints (
