@@ -67,7 +67,7 @@ const makeManifest = (resources: OfflineDownloadResource[]): OfflineDownloadMani
   manifestId: 'pkg_test',
   serverInstanceId: 'server-1',
   ownerUserId: 'user-1',
-  ownerUsername: 'justin',
+  ownerUsername: 'reader',
   target: { type: 'series', seriesId: 'series-1' },
   contentKey: 'content-1',
   title: 'Test series',

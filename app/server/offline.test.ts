@@ -6,7 +6,7 @@ import type { OrbitalDatabase } from './database'
 
 const user = {
   id: 'user-1',
-  username: 'justin',
+  username: 'reader',
   role: 'admin',
 } satisfies SessionUser
 

@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">Orbital Library</string>
     <string name="title_activity_main">Orbital Library</string>
-    <string name="package_name">com.justinivancic.orbital</string>
-    <string name="custom_url_scheme">com.justinivancic.orbital</string>
+    <string name="package_name">app.orbital.library</string>
+    <string name="custom_url_scheme">app.orbital.library</string>
 </resources>

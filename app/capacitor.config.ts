@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli'
 
 const config: CapacitorConfig = {
-  appId: 'com.justinivancic.orbital',
+  appId: 'app.orbital.library',
   appName: 'Orbital Library',
   webDir: 'dist',
   android: {

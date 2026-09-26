@@ -71,9 +71,9 @@ npm run mobile:assemble
 ```
 
 The APK is written to
-`android/app/build/outputs/apk/debug/app-debug.apk`. The native client defaults
-to `https://library.justinivancic.com`; set `VITE_ORBITAL_API_BASE_URL` before
-building to target another server. Android cover storage uses the app-private
+`android/app/build/outputs/apk/debug/app-debug.apk`. On first launch the app
+asks for your server address; set `VITE_ORBITAL_API_BASE_URL` before building
+to bake in a default. Android cover storage uses the app-private
 `Directory.Data` filesystem as its canonical store, so covers remain available
 after the app process is closed. IndexedDB is retained only as a compatibility
 fallback for older covers. The Android UI renders verified cached covers through

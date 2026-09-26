@@ -17,6 +17,6 @@ test('recognizes Android WebView file URLs as local offline resources', () => {
 })
 
 test('does not misclassify server media as a local offline resource', () => {
-  assert.equal(isLocalAppResourceUrl('https://library.justinivancic.com/api/media/file/entry'), false)
+  assert.equal(isLocalAppResourceUrl('https://library.example.com/api/media/file/entry'), false)
   assert.equal(isLocalAppResourceUrl('/api/media/file/entry'), false)
 })

@@ -1,4 +1,4 @@
-package com.justinivancic.orbital;
+package app.orbital.library;
 
 import android.os.Bundle;
 

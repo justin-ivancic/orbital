@@ -110,8 +110,9 @@ Orbital’s Profile page, run `npm run mobile:publish` from `app/`; it copies th
 APK to `app/mobile-distribution/orbital-android.apk` and serves it at
 `/api/mobile/app.apk`.
 
-The native client defaults to `https://library.justinivancic.com`. Set
-`VITE_ORBITAL_API_BASE_URL` at build time only when using another server.
+On first launch the app asks for your server address (for example
+`https://library.example.com`). Set `VITE_ORBITAL_API_BASE_URL` at build time
+if you want to bake a default address into your own APK.
 
 ## Configuration
 

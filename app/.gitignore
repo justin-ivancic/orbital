@@ -25,3 +25,6 @@ library/
 *.njsproj
 *.sln
 *.sw?
+
+# Android builds are distributed through the admin upload or releases, never committed
+mobile-distribution/*.apk
